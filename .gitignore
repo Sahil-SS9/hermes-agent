@@ -1,0 +1,32 @@
+# Secrets and environment files
+.env
+.env.*
+!.env.example
+**/.env
+secrets.json
+**/*.key
+**/*.pem
+**/*.p8
+
+# Backup files
+*.backup-*
+*.bak
+*.swp
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.iml
+
+# Logs (if they end up in repo)
+*.log
+
+# Node/Python artifacts if they ever get bundled
+node_modules/
+__pycache__/
+*.pyc
