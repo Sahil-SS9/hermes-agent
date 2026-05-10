@@ -30,3 +30,16 @@ Thumbs.db
 node_modules/
 __pycache__/
 *.pyc
+
+# Content Engine — generated artefacts (DO commit source code under content_engine/, NOT these)
+content_engine/content_engine.db
+content_engine/db/
+content_engine/output/
+content_engine/generators/__pycache__/
+content_engine/visuals/__pycache__/
+
+# Test artefacts
+.pytest_cache/
+.coverage
+htmlcov/
+
