@@ -20,7 +20,8 @@ CREATE TABLE IF NOT EXISTS drafts (
     created_at  TEXT NOT NULL,
     approved_at TEXT,
     published_at TEXT,
-    postiz_id   TEXT
+    postiz_id   TEXT,
+    ai_enriched_at TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_brand ON drafts(brand);
@@ -33,6 +34,10 @@ def init_db() -> None:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(DB_PATH))
     conn.executescript(SCHEMA)
+    # Backfill: pre-existing DBs may not have ai_enriched_at yet.
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(drafts)").fetchall()}
+    if "ai_enriched_at" not in cols:
+        conn.execute("ALTER TABLE drafts ADD COLUMN ai_enriched_at TEXT")
     conn.commit()
     conn.close()
 
@@ -114,3 +119,40 @@ def mark_published(draft_id: str, postiz_id: Optional[str] = None) -> None:
     )
     conn.commit()
     conn.close()
+
+
+def mark_enriched(draft_id: str) -> None:
+    """Record that Stage 2 (AI media generation) completed for this draft.
+    Prevents Stage 2 from re-running and re-burning FAL/HyperFrames credits.
+    """
+    conn = sqlite3.connect(str(DB_PATH))
+    conn.execute(
+        "UPDATE drafts SET ai_enriched_at = ? WHERE id = ?",
+        (datetime.utcnow().isoformat(), draft_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def list_approved_pending_enrichment() -> List[dict]:
+    """Approved drafts that have NOT yet had Stage 2 run.
+    Excludes already-enriched ones so re-running Stage 2 is idempotent.
+    """
+    conn = sqlite3.connect(str(DB_PATH))
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        "SELECT * FROM drafts "
+        "WHERE status = 'approved' AND ai_enriched_at IS NULL "
+        "ORDER BY approved_at ASC, created_at ASC"
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_draft(draft_id: str) -> Optional[dict]:
+    """Fetch one draft by id (any status). Returns None if not found."""
+    conn = sqlite3.connect(str(DB_PATH))
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT * FROM drafts WHERE id = ?", (draft_id,)).fetchone()
+    conn.close()
+    return dict(row) if row else None

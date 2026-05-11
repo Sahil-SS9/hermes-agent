@@ -10,7 +10,10 @@ from datetime import datetime
 from typing import List, Optional
 
 from config import BRANDS
-from database import init_db, insert_draft, list_drafts, approve_draft, reject_draft
+from database import (
+    init_db, insert_draft, list_drafts, approve_draft, reject_draft,
+    mark_enriched, list_approved_pending_enrichment,
+)
 from drafts import generate_drafts
 from postiz_bridge import queue_post
 from telegram_digest import deliver_digest, send_message
@@ -72,14 +75,15 @@ def run_stage_1(brands: List[str], dry_run: bool = False, platform: Optional[str
 
 
 def run_stage_2(dry_run: bool = False) -> List[dict]:
-    """Generate AI images and videos ONLY for approved drafts. Costs money."""
-    approved = list_drafts(status="approved")
+    """Generate AI images and videos ONLY for approved drafts that haven't
+    already been enriched. Costs money. Idempotent via ai_enriched_at."""
+    approved = list_approved_pending_enrichment()
     if not approved:
-        print("No approved drafts for Stage 2. Skipping AI generation.")
+        print("No approved-and-unenriched drafts for Stage 2.")
         return []
 
     enriched: List[dict] = []
-    print(f"[{len(approved)}] approved draft(s) — generating AI visuals...")
+    print(f"[{len(approved)}] approved draft(s) pending enrichment — generating AI visuals...")
 
     for d in approved:
         brand = d["brand"]
@@ -133,6 +137,9 @@ def run_stage_2(dry_run: bool = False) -> List[dict]:
 
         d["ai_paths"] = ai_paths
         enriched.append(d)
+        # Mark this draft enriched so a re-run of Stage 2 skips it.
+        if not dry_run:
+            mark_enriched(d["id"])
 
     return enriched
 
