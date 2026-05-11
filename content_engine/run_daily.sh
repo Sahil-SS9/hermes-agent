@@ -22,6 +22,6 @@ export ORT_USE_CUDA="0"
 export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH}"
 
 echo "$(date -Iseconds) — Stage 1: generating text drafts + static visuals..."
-python3 content_engine.py stage1 --brand matchdaymaestro plenishd sahil_twitter
+python3 content_engine.py stage1 --brand matchdaymaestro plenishd sahil_twitter sahil_linkedin coachos
 
 echo "$(date -Iseconds) — Done. Check Telegram Topic 22 for approval digest."
