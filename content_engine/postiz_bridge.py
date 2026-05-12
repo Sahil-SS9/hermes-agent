@@ -1,7 +1,7 @@
 """Postiz DB bridge: insert approved drafts into Postiz PostgreSQL."""
 import os
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 try:
@@ -66,7 +66,7 @@ def queue_post(
         return None
 
     post_id = str(uuid.uuid4())
-    scheduled = publish_at or (datetime.utcnow() + timedelta(hours=2))
+    scheduled = publish_at or (datetime.now(timezone.utc) + timedelta(hours=2))
 
     conn = _conn()
     try:

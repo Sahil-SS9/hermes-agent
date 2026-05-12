@@ -11,6 +11,7 @@ Features:
 - Resource guards (max renders, cleanup)
 """
 
+import html
 import os
 import shutil
 import subprocess
@@ -285,8 +286,8 @@ def _generate_countdown_html(brand: str, question: str, count_from: int = 3) -> 
     window.__timelines = window.__timelines || {{}};
     const tl = gsap.timeline({{ paused: true }});
     
-    // Numbers: 3, 2, 1 each for 1 second
-    const numbers = [{count_from}, {count_from - 1 if count_from > 1 else 1}, 1];
+    // Three-number countdown ending at 1 (never below)
+    const numbers = [{count_from}, {max(count_from - 1, 1)}, {max(count_from - 2, 1)}];
     numbers.forEach((num, index) => {{
       const start = index;
       const end = index + 1;
@@ -332,8 +333,9 @@ def _generate_screenshot_overlay_html(band: str, overlay_text: str = "",
     # Default to solid color if no screenshot
     bg_element = f'<div class="screenshot-placeholder"></div>'
     if screenshot_path and Path(screenshot_path).exists():
-        # Use the screenshot as background
-        bg_element = f'<img class="screenshot-image" src="file://{screenshot_path}" alt="Screenshot">'
+        # Use the screenshot as background. Escape for attribute safety (paths can contain ' or &).
+        safe_path = html.escape(screenshot_path, quote=True)
+        bg_element = f'<img class="screenshot-image" src="file://{safe_path}" alt="Screenshot">'
     
     return f"""<!DOCTYPE html>
 <html>

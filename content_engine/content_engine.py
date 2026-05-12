@@ -7,6 +7,7 @@ import argparse
 import os
 import sys
 from datetime import datetime
+from pathlib import Path
 from typing import List, Optional
 
 from config import BRANDS
@@ -144,9 +145,24 @@ def run_stage_2(dry_run: bool = False) -> List[dict]:
     return enriched
 
 
+def _save_html(html: str, subdir: str, name_prefix: str, fixed_name: Optional[str] = None) -> str:
+    """Save an HTML blob to content_engine/output/<subdir>/<prefix>_<ts>.html (or fixed_name).
+
+    Returns the absolute path written.
+    """
+    out_dir = Path("/home/kensei/repos/KenseiAgent/content_engine/output") / subdir
+    out_dir.mkdir(parents=True, exist_ok=True)
+    if fixed_name:
+        path = out_dir / fixed_name
+    else:
+        ts = datetime.now().strftime("%Y%m%d_%H%M")
+        path = out_dir / f"{name_prefix}_{ts}.html"
+    path.write_text(html, encoding="utf-8")
+    return str(path)
+
+
 def generate_html_report(drafts: List[dict], stage: int = 1) -> str:
     """Detailed HTML report of generated content."""
-    from datetime import datetime
     today = datetime.now().strftime("%a %d %b %Y %H:%M")
 
     lines = [
@@ -189,14 +205,7 @@ def generate_html_report(drafts: List[dict], stage: int = 1) -> str:
 
 
 def save_html_report(html: str, stage: int = 1) -> str:
-    from datetime import datetime
-    from pathlib import Path
-    out_dir = Path("/home/kensei/repos/KenseiAgent/content_engine/output/reports")
-    out_dir.mkdir(parents=True, exist_ok=True)
-    ts = datetime.now().strftime("%Y%m%d_%H%M")
-    path = out_dir / f"stage_{stage}_report_{ts}.html"
-    path.write_text(html, encoding="utf-8")
-    return str(path)
+    return _save_html(html, subdir="reports", name_prefix=f"stage_{stage}_report")
 
 
 def deliver_concise_summary(drafts: List[dict], stage: int = 1) -> bool:
@@ -230,7 +239,6 @@ def deliver_concise_summary(drafts: List[dict], stage: int = 1) -> bool:
 
 def generate_html_digest(drafts: List[dict], title: str = "KENSEI Content Digest") -> str:
     """Generate a beautiful dark-themed HTML digest for Telegram delivery."""
-    from datetime import datetime
     today = datetime.now().strftime("%a %d %b %Y")
 
     lines = [
@@ -315,19 +323,12 @@ def run_digest(dry_run: bool = False) -> bool:
     html = generate_html_digest(drafts)
     digest_path = save_html_digest(html)
     print(f"HTML digest saved: {digest_path}")
-
+    return True
 
 
 def save_html_digest(html: str, filename: str = "digest.html") -> str:
     """Save a digest HTML file to the digests output directory."""
-    from datetime import datetime
-    from pathlib import Path
-    out_dir = Path("/home/kensei/repos/KenseiAgent/content_engine/output/digests")
-    out_dir.mkdir(parents=True, exist_ok=True)
-    ts = datetime.now().strftime("%Y%m%d_%H%M")
-    path = out_dir / f"digest_{ts}.html"
-    path.write_text(html, encoding="utf-8")
-    return str(path)
+    return _save_html(html, subdir="digests", name_prefix="digest")
 
 
 def run_approval(draft_id: str, action: str) -> None:

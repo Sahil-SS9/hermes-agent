@@ -1,6 +1,7 @@
 """Topic collector: football fixtures + brand topic banks."""
 import json
 import random
+import sys
 import uuid
 from datetime import datetime, timedelta
 from typing import List, Dict
@@ -60,13 +61,19 @@ TOPIC_BANKS: Dict[str, List[Dict]] = {
 
 
 def fetch_fixtures() -> List[Dict]:
-    """Try free football-data.org for Premier League next matches."""
+    """Try free football-data.org for Premier League next matches.
+
+    Returns [] on any failure; logs the failure mode to stderr so a silent
+    "no fixtures returned" doesn't get mistaken for "API API is fine, just no matches".
+    """
     if requests is None:
+        print("fetch_fixtures: requests not installed", file=sys.stderr)
         return []
     try:
         url = f"{FOOTBALL_API_BASE}/competitions/PL/matches?status=SCHEDULED&matchday=38"
         resp = requests.get(url, timeout=15)
         if resp.status_code != 200:
+            print(f"fetch_fixtures: HTTP {resp.status_code}", file=sys.stderr)
             return []
         data = resp.json()
         matches = []
@@ -78,7 +85,8 @@ def fetch_fixtures() -> List[Dict]:
                 "time": m["utcDate"][11:16],
             })
         return matches
-    except Exception:
+    except (requests.RequestException, ValueError, KeyError) as exc:
+        print(f"fetch_fixtures: {type(exc).__name__}: {exc}", file=sys.stderr)
         return []
 
 

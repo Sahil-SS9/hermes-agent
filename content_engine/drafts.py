@@ -108,37 +108,45 @@ PILLAR_MAP = {
 
 
 def _fill_hook(template: str, topic: Dict) -> str:
-    """Substitute placeholders with topic data or random values."""
-    tpl = template
-    # Common substitutions
-    tpl = tpl.replace("{stake}", str(random.choice([50, 100, 200, 500])))
-    tpl = tpl.replace("{day}", str(random.randint(3, 28)))
-    tpl = tpl.replace("{hours}", str(random.choice([2, 3, 4, 6, 8])))
-    tpl = tpl.replace("{minutes}", str(random.choice([5, 10, 15, 20, 30])))
-    tpl = tpl.replace("{feature}", random.choice(["multi-store split", "voice inventory", "basket fill", "recipe engine", "prediction engine v3"]))
-    tpl = tpl.replace("{metric}", random.choice(["60% lift", "3x faster", "saved £6.40", "shipped in 48h"]))
-    tpl = tpl.replace("{tool_combo}", random.choice(["Claude Code + Hermes", "Agentic loop + tmux", "MCP + Claude API", "Supabase + Convex"]))
-    tpl = tpl.replace("{result}", random.choice(["3-4x speed", "zero context loss", "same brain, wildly different output"]))
-    tpl = tpl.replace("{problem}", random.choice(["family dinner arguments", "spreadsheet shops", "context switching", "fridge mystery items"]))
-    tpl = tpl.replace("{solution}", random.choice(["Plenishd", "a PM suite", "an agentic loop", "MatchdayMaestro"]))
-    tpl = tpl.replace("{status}", random.choice(["Pre-launch. UK only.", "Still debugging the UI flow.", "Works. Still in shock."]))
-    tpl = tpl.replace("{pct}", str(random.choice([67, 78, 89, 92, 95])))
-    tpl = tpl.replace("{pct_actual}", str(random.choice([9, 11, 12, 23])))
-    tpl = tpl.replace("{team}", random.choice(["Liverpool", "Arsenal", "Man City", "Spurs", "Chelsea", "Newcastle"]))
-    tpl = tpl.replace("{home}", topic.get("fixture", {}).get("home", "Home"))
-    tpl = tpl.replace("{away}", topic.get("fixture", {}).get("away", "Away"))
-    tpl = tpl.replace("{home_score}", str(random.randint(0, 2)))
-    tpl = tpl.replace("{away_score}", str(random.randint(0, 2)))
-    tpl = tpl.replace("{time}", topic.get("fixture", {}).get("time", "3pm"))
-    tpl = tpl.replace("{derby_word}", random.choice(["North London Derby", "Manchester Derby", "Merseyside Derby", "Big match"]))
-    tpl = tpl.replace("{company}", random.choice(["SoftwareOne", "Kinexio"]))
-    tpl = tpl.replace("{metric_1}", random.choice(["20-30%", "25-35%", "15-20%"]))
-    tpl = tpl.replace("{metric_2}", random.choice(["45%", "55%", "60%"]))
-    tpl = tpl.replace("{thing}", random.choice(["a Convex schema mismatch", "a deployment pipeline", "a Zustand store"]))
-    tpl = tpl.replace("{setup}", random.choice(["United winning 1-0 at half time", "The 'one more feature' phase"]))
-    tpl = tpl.replace("{audience}", random.choice(["United fan", "indie hacker"]))
-    tpl = tpl.replace("{reaction}", random.choice(["pacing", "already crying"]))
-    return tpl
+    """Substitute placeholders with topic data or random values.
+
+    One random value per placeholder per call (matches original behaviour:
+    multiple occurrences of {key} in a template all resolve to the same value).
+    """
+    fixture = topic.get("fixture", {})
+    subs = {
+        "stake": str(random.choice([50, 100, 200, 500])),
+        "day": str(random.randint(3, 28)),
+        "hours": str(random.choice([2, 3, 4, 6, 8])),
+        "minutes": str(random.choice([5, 10, 15, 20, 30])),
+        "feature": random.choice(["multi-store split", "voice inventory", "basket fill", "recipe engine", "prediction engine v3"]),
+        "metric": random.choice(["60% lift", "3x faster", "saved £6.40", "shipped in 48h"]),
+        "tool_combo": random.choice(["Claude Code + Hermes", "Agentic loop + tmux", "MCP + Claude API", "Supabase + Convex"]),
+        "result": random.choice(["3-4x speed", "zero context loss", "same brain, wildly different output"]),
+        "problem": random.choice(["family dinner arguments", "spreadsheet shops", "context switching", "fridge mystery items"]),
+        "solution": random.choice(["Plenishd", "a PM suite", "an agentic loop", "MatchdayMaestro"]),
+        "status": random.choice(["Pre-launch. UK only.", "Still debugging the UI flow.", "Works. Still in shock."]),
+        "pct": str(random.choice([67, 78, 89, 92, 95])),
+        "pct_actual": str(random.choice([9, 11, 12, 23])),
+        "team": random.choice(["Liverpool", "Arsenal", "Man City", "Spurs", "Chelsea", "Newcastle"]),
+        "home": fixture.get("home", "Home"),
+        "away": fixture.get("away", "Away"),
+        "home_score": str(random.randint(0, 2)),
+        "away_score": str(random.randint(0, 2)),
+        "time": fixture.get("time", "3pm"),
+        "derby_word": random.choice(["North London Derby", "Manchester Derby", "Merseyside Derby", "Big match"]),
+        "company": random.choice(["SoftwareOne", "Kinexio"]),
+        "metric_1": random.choice(["20-30%", "25-35%", "15-20%"]),
+        "metric_2": random.choice(["45%", "55%", "60%"]),
+        "thing": random.choice(["a Convex schema mismatch", "a deployment pipeline", "a Zustand store"]),
+        "setup": random.choice(["United winning 1-0 at half time", "The 'one more feature' phase"]),
+        "audience": random.choice(["United fan", "indie hacker"]),
+        "reaction": random.choice(["pacing", "already crying"]),
+    }
+    out = template
+    for key, value in subs.items():
+        out = out.replace("{" + key + "}", value)
+    return out
 
 
 def generate_drafts(brand: str, topics: List[Dict], platform: Optional[str] = None) -> List[Dict]:
