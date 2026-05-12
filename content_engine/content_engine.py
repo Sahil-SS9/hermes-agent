@@ -228,8 +228,76 @@ def deliver_concise_summary(drafts: List[dict], stage: int = 1) -> bool:
     return send_message("\n".join(lines))
 
 
+def generate_html_digest(drafts: List[dict], title: str = "KENSEI Content Digest") -> str:
+    """Generate a beautiful dark-themed HTML digest for Telegram delivery."""
+    from datetime import datetime
+    today = datetime.now().strftime("%a %d %b %Y")
+
+    lines = [
+        "<!DOCTYPE html><html><head>",
+        "<meta charset='utf-8'>",
+        "<style>",
+        ":root{--bg:#0A0A0A;--surface:#111;--border:#222;--text:#C0C0C0;--muted:#888;--brand-matc:#DC2626;--brand-plen:#FBBF24;--brand-coac:#22C55E;--brand-sahl:#60A5FA;--brand-saht:#A78BFA;}"
+        "body{font-family:'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(--text);padding:24px;max-width:700px;margin:0 auto;line-height:1.6;}"
+        ".digest-header{border-bottom:2px solid #333;padding-bottom:16px;margin-bottom:24px;}"
+        ".digest-header h1{font-size:22px;margin:0;color:#fff;}"
+        ".digest-header p{margin:6px 0 0;color:var(--muted);font-size:14px;}"
+        ".brand-section{margin-bottom:28px;}"
+        ".brand-label{font-size:16px;font-weight:600;margin-bottom:12px;padding-left:8px;border-left:3px solid var(--brand-matc);}"
+        ".brand-plen .brand-label{border-color:var(--brand-plen);}"
+        ".brand-coac .brand-label{border-color:var(--brand-coac);}"
+        ".brand-sahl .brand-label{border-color:var(--brand-sahl);}"
+        ".brand-saht .brand-label{border-color:var(--brand-saht);}"
+        ".card{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:16px;margin-bottom:12px;}"
+        ".card-meta{font-size:11px;color:var(--muted);margin-bottom:10px;display:flex;gap:16px;flex-wrap:wrap;}"
+        ".card-meta span{display:inline-flex;align-items:center;gap:4px;}"
+        ".card-body{font-size:14.5px;white-space:pre-wrap;color:#e0e0e0;}"
+        ".card-body p{margin:0;}"
+        ".card-actions{margin-top:12px;padding-top:12px;border-top:1px solid var(--border);font-size:11px;color:var(--muted);}"
+        "</style></head><body>",
+        f"<div class='digest-header'><h1>⚡ {title}</h1><p>{today} | {len(drafts)} draft(s) pending approval</p></div>",
+    ]
+
+    # Group by brand
+    brand_map = {}
+    for d in drafts:
+        b = d.get("brand", "unknown")
+        brand_map.setdefault(b, []).append(d)
+
+    # Brand order
+    brand_order = ["matchdaymaestro", "coachos", "plenishd", "sahil_linkedin", "sahil_twitter"]
+    ordered = [(b, brand_map[b]) for b in brand_order if b in brand_map]
+    ordered += [(b, v) for b, v in brand_map.items() if b not in brand_order]
+
+    for brand, brand_drafts in ordered:
+        brand_class = f"brand-{brand[:4]}"
+        brand_display = brand.replace("_", " ").title()
+        brand_emoji = {"matchdaymaestro": "⚽", "plenishd": "🍽️", "coachos": "📋",
+                        "sahil_linkedin": "💼", "sahil_twitter": "🧵"}.get(brand, "📝")
+        lines.append(f"<div class='brand-section {brand_class}'>")
+        lines.append(f"<div class='brand-label'>{brand_emoji} {brand_display} ({len(brand_drafts)})</div>")
+        for d in brand_drafts:
+            lines.append("<div class='card'>")
+            lines.append(f"<div class='card-meta'>")
+            lines.append(f"<span>🆔 <code>{d['id']}</code></span>")
+            lines.append(f"<span>📌 {d.get('pillar', '')}</span>")
+            lines.append(f"<span>📺 {d.get('platform', 'twitter')}</span>")
+            lines.append("</div>")
+            # Pre-wrap body text safely
+            body = d.get("body_text", "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            lines.append(f"<div class='card-body'>{body}</div>")
+            lines.append("<div class='card-actions'>Tap ✅ in Telegram to approve | ❌ to reject | 📄 to view</div>")
+            lines.append("</div>")
+        lines.append("</div>")
+
+    lines.append("</body></html>")
+    return "\n".join(lines)
+
+
 def run_digest(dry_run: bool = False) -> bool:
-    """Fetch pending drafts and deliver concise summary + HTML report."""
+    """Fetch pending drafts and deliver:
+         - Mailbox-format Telegram digest (via deliver_digest)
+         - Beautiful HTML report as a Telegram document."""
     drafts = list_drafts(status="draft")
     if not drafts:
         print("No pending drafts to deliver.")
@@ -240,19 +308,26 @@ def run_digest(dry_run: bool = False) -> bool:
             print(f"  [DRY] {d['id']} [{d['brand']}/{d['platform']}] — {d['body_text'][:60]}...")
         return True
 
-    # Concise summary to Telegram
-    deliver_concise_summary(drafts, stage=1)
+    # 1. Rich mailbox-format Telegram digest
+    deliver_digest(drafts)
 
-    # Full HTML report saved to disk
-    html = generate_html_report(drafts, stage=1)
-    report_path = save_html_report(html, stage=1)
-    print(f"HTML report saved: {report_path}")
+    # 2. Full HTML report for archival / mobile scannability
+    html = generate_html_digest(drafts)
+    digest_path = save_html_digest(html)
+    print(f"HTML digest saved: {digest_path}")
 
-    # Send full HTML report as document
-    from telegram_digest import send_document
-    send_document(report_path, caption=f"<b>Full Content Report</b> ({len(drafts)} draft{'s' if len(drafts) != 1 else ''})")
 
-    return True
+
+def save_html_digest(html: str, filename: str = "digest.html") -> str:
+    """Save a digest HTML file to the digests output directory."""
+    from datetime import datetime
+    from pathlib import Path
+    out_dir = Path("/home/kensei/repos/KenseiAgent/content_engine/output/digests")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M")
+    path = out_dir / f"digest_{ts}.html"
+    path.write_text(html, encoding="utf-8")
+    return str(path)
 
 
 def run_approval(draft_id: str, action: str) -> None:

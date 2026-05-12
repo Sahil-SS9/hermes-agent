@@ -1,4 +1,4 @@
-"""Telegram digest delivery."""
+"""Telegram digest delivery — mailbox-format aligned."""
 import json as _json
 import os
 from datetime import datetime
@@ -16,8 +16,7 @@ TELEGRAM_TOPIC_ID = os.getenv("TELEGRAM_CONTENT_TOPIC_ID", "22")
 
 
 def _approval_keyboard(draft_id: str) -> dict:
-    """Inline keyboard for per-draft approve/reject/view. The gateway's
-    Telegram adapter matches on the callback_data prefix."""
+    """Inline keyboard for per-draft approve/reject/view."""
     return {
         "inline_keyboard": [
             [
@@ -63,7 +62,6 @@ def send_photo(photo_path: str, caption: str, draft_id: Optional[str] = None) ->
         payload = _base_payload()
         payload["caption"] = caption
         if draft_id:
-            # multipart/form-data needs reply_markup as a JSON string
             payload["reply_markup"] = _json.dumps(_approval_keyboard(draft_id))
         with open(photo_path, "rb") as f:
             r = requests.post(url, data=payload, files={"photo": f}, timeout=60)
@@ -87,44 +85,79 @@ def send_document(doc_path: str, caption: str = "") -> bool:
         return False
 
 
+def _brand_emoji(brand: str) -> str:
+    """Visual anchor per brand."""
+    mapping = {
+        "matchdaymaestro": "⚽",
+        "plenishd": "🍽️",
+        "coachos": "📋",
+        "sahil_linkedin": "💼",
+        "sahil_twitter": "🧵",
+    }
+    return mapping.get(brand.lower(), "📝")
+
+
+def _format_draft(d: dict) -> str:
+    """Format a single draft entry for the digest."""
+    body = d.get("body_text", "")
+    brand = d.get("brand", "").replace("_", " ").title()
+    brand_emoji = _brand_emoji(d.get("brand", ""))
+    plat = d.get("platform", "twitter")
+    pillar = d.get("pillar", "")
+    draft_id = d["id"]
+
+    # Truncate body to 280 chars (one Tweet length) with clean break
+    preview = body[:280] if len(body) <= 280 else body[:277] + "..."
+
+    msg = (
+        f"{brand_emoji} <b>{brand}</b> | <code>{plat}</code>\n"
+        f"Pillar: {pillar}\n"
+        f"ID: <code>{draft_id}</code>\n\n"
+        f"<i>{preview}</i>"
+    )
+    return msg
+
+
 def deliver_digest(drafts: List[dict]) -> bool:
-    """Send a Telegram digest of drafts for approval to the configured topic."""
+    """Send a Telegram digest of drafts for approval. Mailbox-format aligned."""
     if not drafts:
         return False
 
     today = datetime.now().strftime("%a %d %b")
+    total = len(drafts)
+
+    # Count per brand for the header
+    brand_counts = {}
+    for d in drafts:
+        b = d.get("brand", "unknown").replace("_", " ").title()
+        brand_counts[b] = brand_counts.get(b, 0) + 1
+
+    brand_summary = " ".join(
+        f"{_brand_emoji(b.lower().replace(' ', '_'))} {b}: {c}"
+        for b, c in sorted(brand_counts.items())
+    )
 
     header = (
         f"<b>⚡ KENSEI Content Digest</b>\n"
-        f"{today}  |  {len(drafts)} draft(s) pending\n\n"
-        f"Tap ✅ to approve, ❌ to reject, or 📄 to view the full draft."
+        f"{today}  |  {total} draft(s) pending\n\n"
+        f"{brand_summary}\n\n"
+        f"Tap ✅ to approve, ❌ to reject, or 📄 to view full text."
     )
     send_message(header)
 
     for d in drafts:
-        body = d["body_text"]
-        brand_display = d.get("brand", "").replace("_", " ").title()
-        plat = d.get("platform", "twitter")
+        msg = _format_draft(d)
         draft_id = d["id"]
-
-        msg = (
-            f"<b>Brand:</b> {brand_display}\n"
-            f"<b>Platform:</b> {plat}\n"
-            f"<b>ID:</b> <code>{draft_id}</code>\n"
-            f"<b>Pillar:</b> {d.get('pillar', '')}\n\n"
-            f"<i>{body[:400]}{'...' if len(body) > 400 else ''}</i>"
-        )
-
         visual = d.get("visual_path")
+
         if visual and os.path.exists(visual):
             send_photo(visual, msg, draft_id=draft_id)
         else:
             send_message(msg, draft_id=draft_id)
 
     footer = (
-        f"<b>{len(drafts)} draft(s) above</b> — tap ✅ / ❌ on each, or use the "
-        f"interim shell scripts (<code>approve_draft.sh &lt;id&gt;</code>) "
-        f"if buttons fail."
+        f"<b>{total} draft(s) above</b> — review complete?\n"
+        f"Buttons above are live: ✅ approve, ❌ reject, 📄 view full text."
     )
     send_message(footer)
     return True

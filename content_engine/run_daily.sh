@@ -8,9 +8,11 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-# Load env vars from Hermes
+# Load env vars from Hermes (needed for Telegram digest delivery)
 if [ -f /home/kensei/.hermes/.env ]; then
     export TELEGRAM_BOT_TOKEN=$(grep "^TELEGRAM_BOT_TOKEN=" /home/kensei/.hermes/.env | cut -d'=' -f2 | xargs)
+    export TELEGRAM_CONTENT_CHAT_ID=${TELEGRAM_CONTENT_CHAT_ID:-"-1003922682700"}
+    export TELEGRAM_CONTENT_TOPIC_ID=${TELEGRAM_CONTENT_TOPIC_ID:-"22"}
     export FAL_KEY=$(grep "^FAL_KEY=" /home/kensei/.hermes/.env | cut -d'=' -f2 | xargs)
 fi
 
