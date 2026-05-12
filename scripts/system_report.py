@@ -70,14 +70,21 @@ def token_health() -> dict:
         return {"error": "token_health.py returned invalid JSON", "raw": raw[:500]}
 
 
+def _is_error_sentinel(s: str) -> bool:
+    """run() returns '[ERROR: ...]' on subprocess exceptions; treat as missing data."""
+    return s.startswith("[ERROR:")
+
+
 def system_stats() -> dict:
-    disk = run(["df", "-h", "/"]).strip().split("\n")[-1]
-    mem = run(["free", "-h"]).strip().split("\n")[1]
+    disk_raw = run(["df", "-h", "/"]).strip()
+    mem_raw = run(["free", "-h"]).strip()
     up = run(["uptime"]).strip()
     tailscale_status = run(["tailscale", "status"], timeout=10)
 
-    disk_parts = disk.split()
-    mem_parts = mem.split()
+    # Guard each parse against the error sentinel so disk/mem fields don't
+    # silently surface garbage tokens from the error message.
+    disk_parts = disk_raw.split("\n")[-1].split() if not _is_error_sentinel(disk_raw) else []
+    mem_parts = mem_raw.split("\n")[1].split() if (not _is_error_sentinel(mem_raw) and "\n" in mem_raw) else []
 
     return {
         "disk_total": disk_parts[1] if len(disk_parts) > 1 else "?",
@@ -87,8 +94,8 @@ def system_stats() -> dict:
         "mem_total": mem_parts[1] if len(mem_parts) > 1 else "?",
         "mem_used": mem_parts[2] if len(mem_parts) > 2 else "?",
         "mem_avail": mem_parts[6] if len(mem_parts) > 6 else "?",
-        "uptime": up.replace("up", "").strip() if up else "?",
-        "tailscale": "connected" if "Tailscale" in tailscale_status else "check",
+        "uptime": up.replace("up", "").strip() if up and not _is_error_sentinel(up) else "?",
+        "tailscale": "connected" if "Tailscale" in tailscale_status and not _is_error_sentinel(tailscale_status) else "check",
     }
 
 
