@@ -1,74 +1,83 @@
-"""Main orchestrator for the KENSEI Content Engine.
-Two-stage pipeline:
-  Stage 1: text drafts + static visuals (free) → approval
-  Stage 2: AI images + videos for approved drafts only (costs money)
+#!/usr/bin/env python3
+"""Content Engine v2 — Main orchestrator
+
+Stage 1: LLM-generated drafts → review/approve
+Stage 2: AI images/videos for approved drafts → publish
 """
-import argparse
+import sqlite3
+import json
 import os
-import sys
+import argparse
 from datetime import datetime
-from pathlib import Path
 from typing import List, Optional
 
+# Core imports
 from config import BRANDS
-from database import (
-    init_db, insert_draft, list_drafts, approve_draft, reject_draft,
-    mark_enriched, list_approved_pending_enrichment,
-)
-from drafts import generate_drafts
-from postiz_bridge import queue_post
+from database import init_db, insert_draft, list_drafts, get_draft
+from database import approve_draft, reject_draft, mark_enriched
+from database import list_approved_pending_enrichment, truncate_drafts, purge_stale_drafts, count_drafts_older_than
+from llm_drafts import generate_drafts
 from telegram_digest import deliver_digest, send_message
-from topics import get_topics
-from visuals import make_card, make_leaderboard_card, make_streak_card, make_stat_reveal
-from ffmpeg_video import make_stat_reveal_video, make_countdown_video, make_battle_challenge_video
-try:
-    from hyperframes_video import generate_stat_reveal_video as make_hyperframes_stat_reveal_video, generate_countdown_video as make_hyperframes_countdown_video, generate_screenshot_overlay_video as make_hyperframes_screenshot_overlay_video
-except ImportError:
-    make_hyperframes_stat_reveal_video = None
-    make_hyperframes_countdown_video = None
-    make_hyperframes_screenshot_overlay_video = None
 
 
-try:
-    from fal_client import generate_image, generate_video, generate_image_from_text_card
-except ImportError:
-    generate_image = None
-    generate_video = None
-    generate_image_from_text_card = None
+def run_stage_1(
+    brands: List[str],
+    brand_topics: Optional[dict] = None,
+    dry_run: bool = False,
+    platform: Optional[str] = None,
+) -> List[dict]:
+    """Generate drafts using LLM with brand voice. Zero cost if fallback templates.
 
+    Args:
+        brands: List of brand keys to generate for
+        brand_topics: Override topics: {brand: [{pillar, topic}, ...]}
+        dry_run: If True, don't save to DB
+        platform: Override platform (e.g., "twitter", "linkedin")
 
-def run_stage_1(brands: List[str], dry_run: bool = False, platform: Optional[str] = None) -> List[dict]:
-    """Generate text drafts + static Pillow cards only. Zero cost."""
-    all_drafts: List[dict] = []
+    Returns:
+        List of draft dicts
+    """
+    all_drafts = []
 
     for brand in brands:
         if brand not in BRANDS:
             print(f"Unknown brand: {brand}. Skipping.")
             continue
 
-        print(f"[{brand}] Collecting topics...")
-        topics = get_topics(brand, count=3)
+        print(f"[{brand}] Generating drafts...")
+
+        # Load topics from config or override
+        from topics import get_topics
+        
+        if brand_topics and brand in brand_topics:
+            topics = brand_topics[brand]
+        else:
+            topics = get_topics(brand, count=6)
+
         if not topics:
             print(f"[{brand}] No topics found. Skipping.")
             continue
 
-        print(f"[{brand}] Generating text drafts + static visuals...")
+        print(f"[{brand}] {len(topics)} topics, generating drafts...")
+
+        # Generate via LLM
         drafts = generate_drafts(brand, topics, platform=platform)
 
-        for d in drafts:
-            vis_path = make_card(brand, d["body_text"], title=d.get("title"), platform=d["platform"])
-            d["visual_path"] = vis_path
+        print(f"[{brand}] Generated {len(drafts)} draft(s)")
 
+        for d in drafts:
             if not dry_run:
                 insert_draft(
                     draft_id=d["id"],
                     brand=d["brand"],
                     platform=d["platform"],
-                    pillar=d["pillar"],
-                    topic=d["topic"],
+                    pillar=d.get("pillar", ""),
+                    topic=d.get("topic", ""),
                     title=d.get("title"),
                     body_text=d["body_text"],
-                    visual_path=vis_path,
+                    content_type=d.get("content_type", "text"),
+                    visual_description=d.get("visual_description"),
+                    visual_path=d.get("visual_path"),
                 )
             all_drafts.append(d)
 
@@ -76,236 +85,65 @@ def run_stage_1(brands: List[str], dry_run: bool = False, platform: Optional[str
 
 
 def run_stage_2(dry_run: bool = False) -> List[dict]:
-    """Generate AI images and videos ONLY for approved drafts that haven't
-    already been enriched. Costs money. Idempotent via ai_enriched_at."""
+    """Generate AI media for approved drafts.
+
+    Returns list of enriched drafts.
+    """
     approved = list_approved_pending_enrichment()
     if not approved:
-        print("No approved-and-unenriched drafts for Stage 2.")
+        print("No approved drafts pending Stage 2 enrichment.")
         return []
 
-    enriched: List[dict] = []
-    print(f"[{len(approved)}] approved draft(s) pending enrichment — generating AI visuals...")
+    print(f"Enriching {len(approved)} approved draft(s)...")
+
+    from fal_client import generate_image_from_text_card as fal_gen_image
+    from hyperframes_video import generate_stat_reveal_video as make_hyperframes_stat_reveal_video
+
+    enriched = []
+    from visuals import make_card as make_pillow_card
 
     for d in approved:
         brand = d["brand"]
-        pillar = d.get("pillar", "")
-        body_text = d["body_text"]
-        ai_paths = []
+        draft_id = d["id"]
+        body_text = d.get("body_text", "")
+        visual_desc = d.get("visual_description", "")
+        content_type = d.get("content_type", "text")
 
-        # FAL.ai image for hero content
-        if generate_image_from_text_card and pillar in (
-            "live_predictions", "football_beat", "launch", "build_in_public",
-            "product", "ai_tools", "session_plan", "player_dev"
-        ):
-            print(f"  [{d['id']}] FAL.ai image...")
-            img_path = generate_image_from_text_card(brand, body_text)
-            if img_path:
-                ai_paths.append(img_path)
+        print(f"  [{draft_id}] brand={brand} type={content_type}")
 
-        # FFMPEG video for stat reveals
-        if make_stat_reveal_video and pillar in ("live_predictions", "football_beat"):
-            print(f"  [{d['id']}] FFMPEG stat reveal...")
-            stat_line = body_text.split("\n")[0][:40]
-            sub_line = body_text.split("\n")[-1][:60] if "\n" in body_text else ""
-            vid_path = make_stat_reveal_video(brand, stat_line, sub_line, duration=3)
-            if vid_path:
-                ai_paths.append(vid_path)
+        # Stage 2.1: Pillow static card (free, always)
+        static_path = make_pillow_card(brand, body_text, title=d.get("title"))
+        if static_path:
+            print(f"    Static: {static_path}")
 
-        # FFMPEG countdown for game modes
-        if make_countdown_video and pillar in ("live_predictions", "game_modes"):
-            print(f"  [{d['id']}] FFMPEG countdown...")
-            q_line = body_text.split("\n")[0][:80]
-            c_path = make_countdown_video(brand, q_line, countdown_from=3)
-            if c_path:
-                ai_paths.append(c_path)
+        # Stage 2.2: FAL.ai image for visual content types
+        if "image" in content_type and fal_gen_image and visual_desc:
+            print(f"    FAL.ai: Generating image...")
+            try:
+                img_path = fal_gen_image(brand, visual_desc)
+                if img_path:
+                    print(f"    Image: {img_path}")
+            except Exception as e:
+                print(f"    FAL.ai failed: {e}")
 
-        # HyperFrames video for stat reveals (alternative to FFMPEG)
-        if make_hyperframes_stat_reveal_video and pillar in ("live_predictions", "football_beat"):
-            print(f'  [{d["id"]}] HyperFrames stat reveal...')
-            stat_line = body_text.split("\n")[0][:40]
-            sub_line = body_text.split("\n")[-1][:60] if "\n" in body_text else ""
-            vid_path = make_hyperframes_stat_reveal_video(brand, stat_line, sub_line, draft_id=d["id"])
-            if vid_path:
-                ai_paths.append(vid_path)
+        # Stage 2.3: HyperFrames video for video content types
+        if "video" in content_type and make_hyperframes_stat_reveal_video:
+            print(f"    HyperFrames: Generating video...")
+            try:
+                vid_path = make_hyperframes_stat_reveal_video(brand, body_text[:100], draft_id=draft_id)
+                if vid_path:
+                    print(f"    Video: {vid_path}")
+            except Exception as e:
+                print(f"    HyperFrames failed: {e}")
 
-        # HyperFrames screenshot overlay (for showcasing analytics/images)
-        if make_hyperframes_screenshot_overlay_video and pillar in ("analytics", "product", "ai_tools"):
-            print(f'  [{d["id"]}] HyperFrames screenshot overlay...')
-            overlay_text = body_text.split("\n")[0][:100] if "\n" in body_text else body_text[:100]
-            vid_path = make_hyperframes_screenshot_overlay_video(brand, overlay_text, draft_id=d["id"])
-            if vid_path:
-                ai_paths.append(vid_path)
-
-        d["ai_paths"] = ai_paths
+        mark_enriched(draft_id)
         enriched.append(d)
-        # Mark this draft enriched so a re-run of Stage 2 skips it.
-        if not dry_run:
-            mark_enriched(d["id"])
 
     return enriched
 
 
-def _save_html(html: str, subdir: str, name_prefix: str, fixed_name: Optional[str] = None) -> str:
-    """Save an HTML blob to content_engine/output/<subdir>/<prefix>_<ts>.html (or fixed_name).
-
-    Returns the absolute path written.
-    """
-    out_dir = Path("/home/kensei/repos/KenseiAgent/content_engine/output") / subdir
-    out_dir.mkdir(parents=True, exist_ok=True)
-    if fixed_name:
-        path = out_dir / fixed_name
-    else:
-        ts = datetime.now().strftime("%Y%m%d_%H%M")
-        path = out_dir / f"{name_prefix}_{ts}.html"
-    path.write_text(html, encoding="utf-8")
-    return str(path)
-
-
-def generate_html_report(drafts: List[dict], stage: int = 1) -> str:
-    """Detailed HTML report of generated content."""
-    today = datetime.now().strftime("%a %d %b %Y %H:%M")
-
-    lines = [
-        "<!DOCTYPE html><html><head>",
-        "<meta charset='utf-8'>",
-        "<style>",
-        "body{font-family:sans-serif;background:#0A0A0A;color:#C0C0C0;padding:24px;max-width:900px;margin:0 auto;}",
-        "h1{color:#8B0000;border-bottom:2px solid #8B0000;padding-bottom:8px;}",
-        "h2{color:#FBBF24;} .brand{color:#10B981;font-weight:bold;}",
-        ".draft{border:1px solid #333;margin:14px 0;padding:14px;border-radius:8px;background:#111;}",
-        ".meta{font-size:12px;color:#888;margin-bottom:8px;} .body{font-size:14px;line-height:1.6;white-space:pre-wrap;}",
-        ".visual{font-size:11px;color:#555;margin-top:8px;} .cost{color:#E11D48;}",
-        "</style></head><body>",
-        f"<h1>KENSEI Content Engine Report — Stage {stage}</h1>",
-        f"<p><b>Generated:</b> {today}</p>",
-        f"<p><b>Total drafts:</b> {len(drafts)}</p>",
-        "<hr>",
-    ]
-
-    for d in drafts:
-        brand_display = d.get("brand", "").replace("_", " ").title()
-        platform = d.get("platform", "twitter")
-        cost_indicator = ""
-        if stage == 2 and d.get("ai_paths"):
-            cost_items = len([p for p in d["ai_paths"] if "fal" in p])
-            cost_indicator = f" <span class='cost'>[FAL cost: {cost_items} item(s)]</span>"
-
-        lines.append(f"\n<div class='draft'>")
-        lines.append(f"  <div class='meta'>ID: <code>{d['id']}</code> | Brand: <span class='brand'>{brand_display}</span> | Platform: {platform} | Pillar: {d.get('pillar', '')}{cost_indicator}</div>")
-        lines.append(f"  <div class='body'>{d.get('body_text', '')}</div>")
-        if d.get("visual_path"):
-            lines.append(f"  <div class='visual'>Static: {d['visual_path']}</div>")
-        if d.get("ai_paths"):
-            for p in d["ai_paths"]:
-                lines.append(f"  <div class='visual'>AI: {p}</div>")
-        lines.append("</div>")
-
-    lines.append("</body></html>")
-    return "\n".join(lines)
-
-
-def save_html_report(html: str, stage: int = 1) -> str:
-    return _save_html(html, subdir="reports", name_prefix=f"stage_{stage}_report")
-
-
-def deliver_concise_summary(drafts: List[dict], stage: int = 1) -> bool:
-    """Short, scannable 1/2 liner summary for Telegram."""
-    if not drafts:
-        return send_message("<b>⚡ KENSEI Content Engine</b>\n\nNo drafts generated.")
-
-    today = datetime.now().strftime("%a %d %b")
-    brand_counts = {}
-    for d in drafts:
-        b = d.get("brand", "unknown").replace("_", " ").title()
-        brand_counts[b] = brand_counts.get(b, 0) + 1
-
-    lines = [
-        f"<b>⚡ KENSEI Content — Stage {stage}</b>",
-        f"{today} | {len(drafts)} draft(s)",
-        "",
-    ]
-    for brand, count in brand_counts.items():
-        lines.append(f"• {brand}: {count}")
-
-    if stage == 1:
-        lines.append("")
-        lines.append("<i>Reply <code>A:&lt;id&gt;</code> to approve  |  <code>R:&lt;id&gt;</code> to reject</i>")
-    elif stage == 2:
-        lines.append("")
-        lines.append("<i>AI visuals generated for approved drafts. Ready to queue.</i>")
-
-    return send_message("\n".join(lines))
-
-
-def generate_html_digest(drafts: List[dict], title: str = "KENSEI Content Digest") -> str:
-    """Generate a beautiful dark-themed HTML digest for Telegram delivery."""
-    today = datetime.now().strftime("%a %d %b %Y")
-
-    lines = [
-        "<!DOCTYPE html><html><head>",
-        "<meta charset='utf-8'>",
-        "<style>",
-        ":root{--bg:#0A0A0A;--surface:#111;--border:#222;--text:#C0C0C0;--muted:#888;--brand-matc:#DC2626;--brand-plen:#FBBF24;--brand-coac:#22C55E;--brand-sahl:#60A5FA;--brand-saht:#A78BFA;}"
-        "body{font-family:'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(--text);padding:24px;max-width:700px;margin:0 auto;line-height:1.6;}"
-        ".digest-header{border-bottom:2px solid #333;padding-bottom:16px;margin-bottom:24px;}"
-        ".digest-header h1{font-size:22px;margin:0;color:#fff;}"
-        ".digest-header p{margin:6px 0 0;color:var(--muted);font-size:14px;}"
-        ".brand-section{margin-bottom:28px;}"
-        ".brand-label{font-size:16px;font-weight:600;margin-bottom:12px;padding-left:8px;border-left:3px solid var(--brand-matc);}"
-        ".brand-plen .brand-label{border-color:var(--brand-plen);}"
-        ".brand-coac .brand-label{border-color:var(--brand-coac);}"
-        ".brand-sahl .brand-label{border-color:var(--brand-sahl);}"
-        ".brand-saht .brand-label{border-color:var(--brand-saht);}"
-        ".card{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:16px;margin-bottom:12px;}"
-        ".card-meta{font-size:11px;color:var(--muted);margin-bottom:10px;display:flex;gap:16px;flex-wrap:wrap;}"
-        ".card-meta span{display:inline-flex;align-items:center;gap:4px;}"
-        ".card-body{font-size:14.5px;white-space:pre-wrap;color:#e0e0e0;}"
-        ".card-body p{margin:0;}"
-        ".card-actions{margin-top:12px;padding-top:12px;border-top:1px solid var(--border);font-size:11px;color:var(--muted);}"
-        "</style></head><body>",
-        f"<div class='digest-header'><h1>⚡ {title}</h1><p>{today} | {len(drafts)} draft(s) pending approval</p></div>",
-    ]
-
-    # Group by brand
-    brand_map = {}
-    for d in drafts:
-        b = d.get("brand", "unknown")
-        brand_map.setdefault(b, []).append(d)
-
-    # Brand order
-    brand_order = ["matchdaymaestro", "coachos", "plenishd", "sahil_linkedin", "sahil_twitter"]
-    ordered = [(b, brand_map[b]) for b in brand_order if b in brand_map]
-    ordered += [(b, v) for b, v in brand_map.items() if b not in brand_order]
-
-    for brand, brand_drafts in ordered:
-        brand_class = f"brand-{brand[:4]}"
-        brand_display = brand.replace("_", " ").title()
-        brand_emoji = {"matchdaymaestro": "⚽", "plenishd": "🍽️", "coachos": "📋",
-                        "sahil_linkedin": "💼", "sahil_twitter": "🧵"}.get(brand, "📝")
-        lines.append(f"<div class='brand-section {brand_class}'>")
-        lines.append(f"<div class='brand-label'>{brand_emoji} {brand_display} ({len(brand_drafts)})</div>")
-        for d in brand_drafts:
-            lines.append("<div class='card'>")
-            lines.append(f"<div class='card-meta'>")
-            lines.append(f"<span>🆔 <code>{d['id']}</code></span>")
-            lines.append(f"<span>📌 {d.get('pillar', '')}</span>")
-            lines.append(f"<span>📺 {d.get('platform', 'twitter')}</span>")
-            lines.append("</div>")
-            # Pre-wrap body text safely
-            body = d.get("body_text", "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-            lines.append(f"<div class='card-body'>{body}</div>")
-            lines.append("<div class='card-actions'>Tap ✅ in Telegram to approve | ❌ to reject | 📄 to view</div>")
-            lines.append("</div>")
-        lines.append("</div>")
-
-    lines.append("</body></html>")
-    return "\n".join(lines)
-
-
 def run_digest(dry_run: bool = False) -> bool:
-    """Fetch pending drafts and deliver:
-         - Mailbox-format Telegram digest (via deliver_digest)
-         - Beautiful HTML report as a Telegram document."""
+    """Deliver Telegram digest of pending drafts for review."""
     drafts = list_drafts(status="draft")
     if not drafts:
         print("No pending drafts to deliver.")
@@ -313,135 +151,155 @@ def run_digest(dry_run: bool = False) -> bool:
 
     if dry_run:
         for d in drafts[:3]:
-            print(f"  [DRY] {d['id']} [{d['brand']}/{d['platform']}] — {d['body_text'][:60]}...")
+            print(f"  [DRY] {d['id']} [{d['brand']}/{d['platform']}]")
+            print(f"    Type: {d.get('content_type', 'text')}")
+            print(f"    {d['body_text'][:80]}")
+            print()
         return True
 
-    # 1. Rich mailbox-format Telegram digest
+    # Deliver digest
+    print(f"Delivering {len(drafts)} draft(s) to Telegram...")
     deliver_digest(drafts)
-
-    # 2. Full HTML report for archival / mobile scannability
-    html = generate_html_digest(drafts)
-    digest_path = save_html_digest(html)
-    print(f"HTML digest saved: {digest_path}")
     return True
 
 
-def save_html_digest(html: str, filename: str = "digest.html") -> str:
-    """Save a digest HTML file to the digests output directory."""
-    return _save_html(html, subdir="digests", name_prefix="digest")
-
-
-def run_approval(draft_id: str, action: str) -> None:
-    if action == "approve":
-        approve_draft(draft_id)
-        print(f"Approved {draft_id}")
-        drafts = list_drafts(status="approved")
-        for d in drafts:
-            if d["id"] == draft_id:
-                post_id = queue_post(
-                    body_text=d["body_text"],
-                    brand=d["brand"],
-                    platform=d["platform"],
-                    title=d.get("title"),
-                )
-                if post_id:
-                    print(f"Queued in Postiz: {post_id}")
-                else:
-                    print(f"No Postiz integration for {d['brand']}/{d['platform']} — stored, not queued.")
-                break
-    elif action == "reject":
-        reject_draft(draft_id)
-        print(f"Rejected {draft_id}")
-    else:
-        print(f"Unknown action: {action}. Use 'approve' or 'reject'.")
+def run_generate_all(dry_run: bool = False) -> bool:
+    """Run Stage 1 + deliver digest."""
+    brands = list(BRANDS.keys())
+    
+    print(f"Generating drafts for {len(brands)} brand(s)...")
+    drafts = run_stage_1(brands, dry_run=dry_run)
+    
+    if not drafts:
+        print("No drafts generated.")
+        return False
+    
+    print(f"\nStage 1: {len(drafts)} draft(s)")
+    
+    if not dry_run:
+        run_digest(dry_run=False)
+    
+    return True
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="KENSEI Content Engine — Two-Stage Pipeline")
+    parser = argparse.ArgumentParser(description="KENSEI Content Engine v2")
     sub = parser.add_subparsers(dest="cmd")
 
-    # Stage 1: text + static visuals (free)
-    s1 = sub.add_parser("stage1", help="Stage 1: text drafts + static visuals (free)")
-    s1.add_argument("--brand", "-b", nargs="+", default=list(BRANDS.keys()), help="Brand(s)")
+    # Stage 1
+    s1 = sub.add_parser("stage1", help="Stage 1: LLM draft generation")
+    s1.add_argument("--brand", "-b", nargs="+", default=list(BRANDS.keys()))
     s1.add_argument("--platform", "-p", default=None)
     s1.add_argument("--dry-run", action="store_true")
 
-    # Stage 2: AI images + videos for approved drafts only
-    s2 = sub.add_parser("stage2", help="Stage 2: AI images + videos for APPROVED drafts (costs money)")
+    # Stage 2
+    s2 = sub.add_parser("stage2", help="Stage 2: AI media generation")
     s2.add_argument("--dry-run", action="store_true")
 
-    # Legacy generate command (runs full pipeline)
-    gen = sub.add_parser("generate", help="Full pipeline: stage1 + stage2 combined")
-    gen.add_argument("--brand", "-b", nargs="+", default=list(BRANDS.keys()))
-    gen.add_argument("--platform", "-p", default=None)
+    # Generate all
+    gen = sub.add_parser("generate", help="Generate + deliver")
     gen.add_argument("--dry-run", action="store_true")
 
-    dig = sub.add_parser("digest", help="Deliver Telegram digest of pending drafts")
+    # Digest
+    dig = sub.add_parser("digest", help="Deliver Telegram digest")
     dig.add_argument("--dry-run", action="store_true")
 
-    app = sub.add_parser("approve", help="Approve a draft by ID")
+    # Approve
+    app = sub.add_parser("approve", help="Approve a draft")
     app.add_argument("draft_id")
 
-    rej = sub.add_parser("reject", help="Reject a draft by ID")
+    # Reject
+    rej = sub.add_parser("reject", help="Reject a draft")
     rej.add_argument("draft_id")
 
-    lst = sub.add_parser("list", help="List drafts by status")
-    lst.add_argument("--status", "-s", default="draft", choices=["draft", "approved", "rejected", "published"])
+    # List
+    lst = sub.add_parser("list", help="List drafts")
+    lst.add_argument("--status", "-s", default="draft")
     lst.add_argument("--brand", "-b", default=None)
 
-    args = parser.parse_args()
+    # Truncate (dangerous — prefer purge)
+    trunc = sub.add_parser("truncate", help="Delete all drafts (DANGEROUS — prefer purge)")
+    trunc.add_argument("--force", action="store_true", help="Skip confirmation")
 
+    # Purge (safe — 48h retention)
+    purge = sub.add_parser("purge", help="Delete drafts older than 48h (safe cleanup)")
+    purge.add_argument("--dry-run", action="store_true", help="Preview only")
+    purge.add_argument("--retention", "-r", type=int, default=48, help="Retention in hours (default: 48)")
+    purge.add_argument("--brand", "-b", default=None)
+
+    args = parser.parse_args()
+    
     init_db()
 
     if args.cmd == "stage1":
         drafts = run_stage_1(args.brand, dry_run=args.dry_run, platform=args.platform)
         print(f"\nStage 1 complete: {len(drafts)} draft(s)")
-        if not args.dry_run:
-            deliver_concise_summary(drafts, stage=1)
-            html = generate_html_report(drafts, stage=1)
-            report_path = save_html_report(html, stage=1)
-            print(f"Report: {report_path}")
         return 0
 
     elif args.cmd == "stage2":
         drafts = run_stage_2(dry_run=args.dry_run)
-        print(f"\nStage 2 complete: {len(drafts)} draft(s) enriched with AI visuals")
-        if not args.dry_run and drafts:
-            deliver_concise_summary(drafts, stage=2)
-            html = generate_html_report(drafts, stage=2)
-            report_path = save_html_report(html, stage=2)
-            print(f"Report: {report_path}")
+        print(f"\nStage 2 complete: {len(drafts)} enriched")
         return 0
 
     elif args.cmd == "generate":
-        drafts = run_stage_1(args.brand, dry_run=args.dry_run, platform=args.platform)
-        print(f"\nStage 1: {len(drafts)} draft(s)")
-        if not args.dry_run:
-            approved = run_stage_2(dry_run=args.dry_run)
-            print(f"Stage 2: {len(approved)} approved draft(s) enriched")
-            deliver_concise_summary(drafts + approved, stage=2)
-            html = generate_html_report(drafts + approved, stage=2)
-            report_path = save_html_report(html, stage=2)
-            print(f"Report: {report_path}")
-        return 0
+        ok = run_generate_all(dry_run=args.dry_run)
+        return 0 if ok else 1
 
     elif args.cmd == "digest":
         ok = run_digest(dry_run=args.dry_run)
         return 0 if ok else 1
 
     elif args.cmd == "approve":
-        run_approval(args.draft_id, "approve")
+        approve_draft(args.draft_id)
+        print(f"Approved {args.draft_id}")
+        d = get_draft(args.draft_id)
+        if d:
+            from postiz_bridge import queue_post
+            post_id = queue_post(
+                body_text=d["body_text"],
+                brand=d["brand"],
+                platform=d["platform"],
+                title=d.get("title"),
+            )
+            if post_id:
+                print(f"Queued in Postiz: {post_id}")
+            else:
+                print(f"No Postiz integration for {d['brand']}/{d['platform']}")
         return 0
 
     elif args.cmd == "reject":
-        run_approval(args.draft_id, "reject")
+        reject_draft(args.draft_id)
+        print(f"Rejected {args.draft_id}")
         return 0
 
     elif args.cmd == "list":
         drafts = list_drafts(status=args.status, brand=args.brand)
         print(f"{len(drafts)} draft(s) with status '{args.status}':")
         for d in drafts:
-            print(f"  {d['id']} | {d['brand']} | {d['platform']} | {d['body_text'][:60]}...")
+            ct = d.get("content_type", "text")
+            print(f"  {d['id']} | {d['brand']} | {d['platform']} | {ct} | {d['body_text'][:60]}")
+        return 0
+
+    elif args.cmd == "truncate":
+        if not args.force:
+            confirm = input("DANGER: Delete ALL drafts? This cannot be undone. Type 'yes' to confirm: ")
+            if confirm.strip().lower() != "yes":
+                print("Aborted.")
+                return 1
+        truncate_drafts()
+        print("All drafts deleted.")
+        return 0
+
+    elif args.cmd == "purge":
+        retention = args.retention
+        if args.dry_run:
+            count = count_drafts_older_than(retention_hours=retention, brand=args.brand)
+            scope = f"brand={args.brand}" if args.brand else "all brands"
+            print(f"[DRY RUN] Would delete {count} draft(s) older than {retention}h ({scope})")
+        else:
+            deleted = purge_stale_drafts(retention_hours=retention, brand=args.brand)
+            scope = f"brand={args.brand}" if args.brand else "all brands"
+            print(f"Purged {deleted} draft(s) older than {retention}h ({scope})")
         return 0
 
     else:
@@ -450,4 +308,5 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    import sys
     sys.exit(main())

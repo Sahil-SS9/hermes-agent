@@ -27,48 +27,50 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 from zoneinfo import ZoneInfo
 
 
-LANE_A = "A: AI News"
-LANE_B = "B: Tool News"
-LANE_C = "C: MyTool"
+LANE_A = "AI News"
+LANE_B = "Tool News"
+LANE_C = "Research"
 LANE_ORDER = [LANE_A, LANE_B, LANE_C]
 LANE_LABELS = {
-    LANE_A: "A. AI News",
-    LANE_B: "B. Tool News",
-    LANE_C: "C. MyTool",
+    LANE_A: "AI News",
+    LANE_B: "Tool News",
+    LANE_C: "Research",
 }
 
 TOPIC_QUERIES = [
     {
         "lane": LANE_A,
-        "query": "AI model provider release changelog availability Gemini DeepSeek Kimi Qwen GLM Ollama Cloud OpenAI Anthropic",
-        "include_domains": ["anthropic.com", "openai.com", "developers.openai.com", "ollama.com", "qwenlm.github.io", "moonshot.ai", "huggingface.co", "deepmind.google", "blog.google", "developers.googleblog.com", "deepseek.com"],
+        "query": "AI model release 2026 new version announcement security breach vulnerability deepseek kimi qwen gemini claude openai anthropic",
+        "include_domains": ["anthropic.com", "openai.com", "developers.openai.com", "qwenlm.github.io", "moonshot.ai", "huggingface.co", "deepmind.google", "blog.google", "developers.googleblog.com", "deepseek.com", "x.ai", "cohere.com", "mistral.ai", "techcrunch.com", "arstechnica.com", "theverge.com", "wired.com", "nature.com", "techcrunch.com", "venturebeat.com"],
     },
     {
         "lane": LANE_B,
-        "query": "AI devtools integrations MCP LangGraph GitHub release changelog agent framework memory tooling update",
-        "include_domains": ["github.com", "github.blog", "langchain.com", "blog.langchain.dev", "modelcontextprotocol.io", "news.ycombinator.com", "huggingface.co"],
-        "exclude_domains": ["composio.dev"],
+        "query": "developer tools release 2026 changelog new feature SDK API framework library update",
+        "include_domains": ["github.com", "github.blog", "techcrunch.com", "theverge.com", "arstechnica.com", "medium.com", "dev.to", "vercel.com", "cloudflare.com", "huggingface.co", "openai.com", "anthropic.com"],
     },
     {
         "lane": LANE_C,
-        "query": "Hermes Agent Claude Code OpenAI Codex OpenClaw OpenCode KENSEI release changelog ops cron workspace update",
-        "include_domains": ["hermes-agent.nousresearch.com", "github.com", "nousresearch.com", "anthropic.com", "docs.anthropic.com", "openai.com", "developers.openai.com", "github.blog"],
+        "query": "new github repository 2026 open source agent framework memory tool plugin skill LLM release",
+        "include_domains": ["github.com", "github.blog", "huggingface.co", "github.com", "github.com", "github.com", "huggingface.co", "arxiv.org"],
     },
 ]
 
 RSS_SOURCES = [
+    # AI News — Model releases, announcements, security
+    {"name": "TechCrunch AI", "url": "https://techcrunch.com/category/artificial-intelligence/feed/", "lane": LANE_A},
     {"name": "OpenAI News", "url": "https://openai.com/news/rss.xml", "lane": LANE_A, "official": True},
     {"name": "Google AI Blog", "url": "https://blog.google/technology/ai/rss/", "lane": LANE_A, "official": True},
-    {"name": "GitHub Changelog", "url": "https://github.blog/changelog/feed/", "lane": LANE_B, "official": True},
+    {"name": "Meta AI Blog", "url": "https://ai.meta.com/blog/rss.xml", "lane": LANE_A, "official": True},
     {"name": "Hugging Face Blog", "url": "https://huggingface.co/blog/feed.xml", "lane": LANE_A, "official": True},
-    {"name": "r/LocalLLaMA", "url": "https://www.reddit.com/r/LocalLLaMA/.rss", "lane": LANE_A},
-    {"name": "r/ClaudeAI", "url": "https://www.reddit.com/r/ClaudeAI/.rss", "lane": LANE_C},
-    {"name": "r/MachineLearning", "url": "https://www.reddit.com/r/MachineLearning/.rss", "lane": LANE_A},
-    {"name": "r/vibecoding", "url": "https://www.reddit.com/r/vibecoding/.rss", "lane": LANE_B},
-    {"name": "r/Hermes", "url": "https://www.reddit.com/r/Hermes/.rss", "lane": LANE_C},
-    {"name": "r/OpenClaw", "url": "https://www.reddit.com/r/OpenClaw/.rss", "lane": LANE_C},
-    {"name": "HN frontpage", "url": "https://hnrss.org/frontpage", "lane": LANE_B},
-    {"name": "HN RSS", "url": "https://news.ycombinator.com/rss", "lane": LANE_B},
+    # Tool News — Platform updates, devtools, changes
+    {"name": "GitHub Changelog", "url": "https://github.blog/changelog/feed/", "lane": LANE_B, "official": True},
+    {"name": "HN frontpage (100+)", "url": "https://hnrss.org/frontpage?points=100", "lane": LANE_B},
+    # Research — GitHub repos, tools, frameworks
+    {"name": "Reddit r/MachineLearning", "url": "https://www.reddit.com/r/MachineLearning/.rss", "lane": LANE_C},
+    {"name": "Reddit r/LocalLLaMA", "url": "https://www.reddit.com/r/LocalLLaMA/.rss", "lane": LANE_C},
+    {"name": "Reddit r/vibecoding", "url": "https://www.reddit.com/r/vibecoding/.rss", "lane": LANE_C},
+    {"name": "Reddit r/ClaudeAI", "url": "https://www.reddit.com/r/ClaudeAI/.rss", "lane": LANE_C},
+    {"name": "ArXiv CS.CL", "url": "http://export.arxiv.org/rss/cs.CL", "lane": LANE_C},
 ]
 
 RSS_USER_AGENT = "KENSEI Research Digest/1.0 (+https://hermes-agent.nousresearch.com)"
@@ -88,6 +90,11 @@ OFFICIAL_OR_HIGH_SIGNAL_DOMAINS = {
     "news.ycombinator.com",
     "langchain.com",
     "blog.langchain.dev",
+    "expo.dev",
+    "reactnative.dev",
+    "convex.dev",
+    "supabase.com",
+    "deepgram.com",
     "blog.google",
     "deepmind.google",
     "developers.googleblog.com",
@@ -96,6 +103,7 @@ OFFICIAL_OR_HIGH_SIGNAL_DOMAINS = {
     "news.ycombinator.com",
     "hnrss.org",
     "nousresearch.com",
+    "techcrunch.com",
 }
 
 PRESS_RELEASE_DOMAINS = {
@@ -207,7 +215,9 @@ HIGH_VALUE_TOPIC_TERMS = {
     "agents",
     "claude code",
     "codex",
+    "convex",
     "deepseek",
+    "expo",
     "gemini",
     "hermes",
     "kimi",
@@ -219,38 +229,44 @@ HIGH_VALUE_TOPIC_TERMS = {
     "openclaw",
     "opencode",
     "qwen",
+    "react native",
+    "supabase",
     "workspace",
 }
 
 POSITIVE_TERMS = {
     "agent",
     "agents",
+    "changelog",
     "claude code",
     "codex",
+    "convex",
     "cron",
     "daily briefing",
+    "deepseek",
     "devtool",
     "devtools",
+    "expo",
+    "gemini",
     "github",
     "hermes",
-    "kensei",
     "kimi",
+    "kensei",
+    "langgraph",
     "llm",
     "mcp",
     "ollama",
     "open source",
     "open-weight",
     "qwen",
+    "react native",
     "release",
     "released",
     "release notes",
-    "changelog",
-    "now available",
+    "supabase",
     "version",
     "launch",
     "announced",
-    "gemini",
-    "deepseek",
     "workspace",
     "memory",
     "workflow",
@@ -297,7 +313,7 @@ BLOCKED_GITHUB_REPOS = {
     ("warpdot-dev", "composio"),
 }
 
-MIN_SELECTED_SCORE = 7.0
+MIN_SELECTED_SCORE = 4.0
 
 KNOWN_GITHUB_ORGS = {
     "nousresearch",
@@ -571,7 +587,7 @@ def is_static_reference_candidate(candidate: dict) -> bool:
     title_url = f"{candidate.get('title', '')} {candidate.get('url', '')}".lower()
     if source in {"docs.anthropic.com", "hermes-agent.nousresearch.com", "modelcontextprotocol.io"}:
         return not any_term_in_text(title_url, {"changelog", "release", "released", "release notes", "version", "what's new", "whats new"})
-    if source == "huggingface.co" and ("/activity/" in path or "/resolve/" in path or "/raw/" in path):
+    if source == "huggingface.co" and ("/activity/" in path or "/resolve/" in path or "/raw/" in path or "/blob/" in path or "/datasets/" in path or "/spaces/" in path):
         return True
     if source == "ollama.com" and (path == "/search" or path.startswith("/library/")):
         return True
@@ -642,6 +658,71 @@ def github_repo_identity(url: str) -> tuple[str, str] | None:
     return path_bits[0], path_bits[1]
 
 
+def is_stale_rss_item(candidate: dict, now: datetime | None = None) -> bool:
+    """Reject RSS entries older than 7 days. Prevents stale RSS from polluting the digest."""
+    published = candidate.get("published", "")
+    if not published:
+        return False  # No date means we can't judge — keep it
+    try:
+        parsed = email.utils.parsedate_to_datetime(published)
+    except (TypeError, ValueError):
+        try:
+            parsed = datetime.fromisoformat(published.replace("Z", "+00:00"))
+        except ValueError:
+            return False  # Unparseable date, keep it
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=ZoneInfo("Europe/London"))
+    now = now or datetime.now(ZoneInfo("Europe/London"))
+    return now - parsed.astimezone(now.tzinfo) > timedelta(days=7)
+
+
+def is_stale_by_url_date(candidate: dict, now: datetime | None = None) -> bool:
+    """Extract date from URL path and reject items older than 7 days for daily digest."""
+    url = candidate.get("url", "")
+    title = candidate.get("title", "")
+    now = now or datetime.now(ZoneInfo("Europe/London"))
+
+    # Pattern 1: URL date path like /2026/05/12/ or /2026-01-27
+    date_match = re.search(r"/(\d{4})[-/](\d{2})[-/](\d{1,2})", url)
+    if date_match:
+        try:
+            year, month, day = int(date_match.group(1)), int(date_match.group(2)), int(date_match.group(3))
+            url_date = datetime(year, month, day, tzinfo=ZoneInfo("Europe/London"))
+            return (now - url_date) > timedelta(days=90)
+        except ValueError:
+            pass
+
+    # Pattern 2: Title contains a month-year like "March 2025", "January 2026", "Jan 2026"
+    month_names = {
+        'january': 1, 'february': 2, 'march': 3, 'april': 4, 'may': 5, 'june': 6,
+        'july': 7, 'august': 8, 'september': 9, 'october': 10, 'november': 11, 'december': 12,
+    }
+    title_lower = title.lower()
+    date_match = re.search(r"(january|february|march|april|may|june|july|august|september|october|november|december)\s+(\d{4})", title_lower)
+    if date_match:
+        try:
+            month = month_names[date_match.group(1)]
+            year = int(date_match.group(2))
+            if year < datetime.now(ZoneInfo("Europe/London")).year:
+                return True  # any content explicitly referencing a past year is stale
+            url_date = datetime(year, month, 1, tzinfo=ZoneInfo("Europe/London"))
+            return (now - url_date) > timedelta(days=90)
+        except ValueError:
+            pass
+
+    # Pattern 3: URL path contains a date like march-2025, jan-27-2026, 20260127
+    date_match = re.search(r"(?:^|[-/])(\d{8})(?:$|[-/])", url)
+    if date_match:
+        try:
+            date_str = date_match.group(1)
+            url_date = datetime(int(date_str[:4]), int(date_str[4:6]), int(date_str[6:8]), tzinfo=ZoneInfo("Europe/London"))
+            return (now - url_date) > timedelta(days=90)
+        except ValueError:
+            pass
+
+    return False
+
+
 def is_excluded_candidate(candidate: dict) -> bool:
     url = candidate.get("url", "")
     source = candidate.get("source") or source_from_url(url)
@@ -658,10 +739,19 @@ def is_excluded_candidate(candidate: dict) -> bool:
         return True
     if any_term_in_text(haystack, EXCLUDED_PHRASES):
         return True
+    if candidate.get("source_type") == "rss" and is_stale_rss_item(candidate):
+        return True
+    if candidate.get("source_type") == "tavily" and is_stale_by_url_date(candidate):
+        return True
+    if source == "techcrunch.com":
+        if candidate.get("source_type") == "tavily" and "p=31" in url:
+            return True
     if is_static_reference_candidate(candidate):
         return True
-    if not has_news_signal(candidate):
-        return True
+    # Community sources (HN, Reddit) don't need version/news signals — they're curated
+    if source not in {"news.ycombinator.com", "reddit.com"}:
+        if not has_news_signal(candidate):
+            return True
     repo_identity = github_repo_identity(url)
     if repo_identity in BLOCKED_GITHUB_REPOS:
         return True
@@ -669,12 +759,16 @@ def is_excluded_candidate(candidate: dict) -> bool:
         path_bits = [bit.lower() for bit in urlparse(url).path.split("/") if bit]
         if path_bits and path_bits[0] == "topics":
             return True
-        if len(path_bits) >= 2 and (path_bits[1].startswith("awesome-") or path_bits[1] in {"starred", "my-awesome-stars", "zstar"}):
+        if len(path_bits) >= 2 and (path_bits[1].startswith("awesome-") or path_bits[1] in {"starred", "my-awesome-stars", "zstar", "todo", "archive", "forked", "fork"}):
             return True
         if any(bit in {"blob", "tree", "pull", "pulls", "issue", "issues"} for bit in path_bits):
             return True
         if len(path_bits) == 2:
-            return True
+            # Only block GitHub repos if they're stale or clearly noise
+            # Allow repos with recent release tags or version-like titles
+            haystack = candidate_haystack(candidate)
+            if not has_version_signal(haystack) and not any_term_in_text(haystack, {"release", "changelog", "announce", "launch", "new", "update", "agent", "framework", "tool", "library", "sdk"}):
+                return True
     return False
 
 
@@ -752,6 +846,22 @@ def score_candidate(candidate: dict) -> float:
         score += 4
     if candidate.get("source_type") == "rss":
         score += 1
+    if source == "arxiv.org" and lane != LANE_C:
+        score -= 8
+    if source == "arxiv.org" and lane == LANE_C:
+        score -= 3
+    if source == "huggingface.co" and "/posts/" in path:
+        score += 4
+
+    # Penalise items explicitly referencing past years
+    current_year = datetime.now(ZoneInfo("Europe/London")).year
+    title = candidate.get("title", "").lower()
+    content = candidate.get("content", "").lower()
+    for year_offset in [current_year - 3, current_year - 2, current_year - 1]:
+        if str(year_offset) in title or str(year_offset) in content[:200]:
+            if "2026" not in title and f"2026" not in content[:200]:
+                score -= 4
+
     points = int(candidate.get("points") or 0)
     comments = int(candidate.get("comments") or 0)
     if points:
@@ -956,18 +1066,31 @@ def select_candidates(candidates: list[dict], limit: int = 5) -> list[dict]:
     for candidate in sorted(deduped, key=lambda item: item["final_score"], reverse=True):
         by_lane.setdefault(candidate.get("lane", "Other"), []).append(candidate)
 
-    selected: list[dict] = []
-    lane_order = LANE_ORDER
-    for lane in lane_order:
-        lane_items = by_lane.get(lane, [])
-        if lane_items and len(selected) < limit:
-            selected.append(lane_items[0])
+    per_lane_max = 10  # generous cap — scoring does the real filtering
+    lane_caps: dict[str, int] = {}  # no hard per-lane cap, score-based selection
 
+    selected: list[dict] = []
+    lane_counts: dict[str, int] = {}
+
+    # First pass: pick top items per lane up to their cap
+    for lane in LANE_ORDER:
+        lane_items = by_lane.get(lane, [])
+        cap = lane_caps.get(lane, per_lane_max)
+        for item in lane_items[:cap]:
+            if len(selected) < limit:
+                selected.append(item)
+                lane_counts[lane] = lane_counts.get(lane, 0) + 1
+
+    # Second pass: fill remaining by score, but respect lane caps
     remaining = [item for lane_items in by_lane.values() for item in lane_items if item not in selected]
     for candidate in sorted(remaining, key=lambda item: item["final_score"], reverse=True):
         if len(selected) >= limit:
             break
+        lane = candidate.get("lane", "Other")
+        if lane_counts.get(lane, 0) >= lane_caps.get(lane, per_lane_max):
+            continue
         selected.append(candidate)
+        lane_counts[lane] = lane_counts.get(lane, 0) + 1
 
     return sorted(selected, key=lambda item: item["final_score"], reverse=True)
 
@@ -1037,66 +1160,50 @@ def telegram_text(payload: dict, html_path: Path, include_media_tag: bool = Fals
         return "[SILENT]"
 
     generated = datetime.fromisoformat(payload["generated_at"])
-    date_label = generated.strftime("%A, %B %-d")
-    time_label = generated.strftime("%-I:%M %p")
-    window = payload.get("time_range_used", "day")
-    freshness = "last 24h" if window == "day" else "last 24h, with 7-day fallback"
+    ts = generated.strftime("%a %d %b · %H:%M")
 
-    # Build lane counts
-    lane_counts = {}
-    for item in selected:
-        lane = item.get("lane", "Other")
-        lane_counts[lane] = lane_counts.get(lane, 0) + 1
+    grouped = grouped_selected(selected)
+    lane_counts = {lane: len(items) for lane, items in grouped.items() if items}
 
     lines = [
-        f"☀️ Good morning, {date_label}, {time_label}",
+        f"📰 <b>Research brief</b> · {ts}",
+        f"{len(selected)} signals · {source_mix(payload)}",
         "",
-        "🧠 AI/Agent brief",
-        f"Freshness: {freshness}. Stale RSS items rejected.",
-        "",
-        "📰 Signals by lane",
     ]
 
     for lane in LANE_ORDER:
-        if lane in lane_counts:
-            label = LANE_LABELS.get(lane, lane)
-            lines.append(f"• {label}: {lane_counts[lane]} items")
+        items = grouped.get(lane, [])
+        if not items:
+            continue
+        lines.append(f"<b>{LANE_LABELS.get(lane, lane)}</b>")
+        for item in items[:3]:
+            summary = summarise_item(item, 120)
+            lines.append(f"• <a href=\"{item.get('url', '')}\">{item.get('title', '?')}</a> — {summary}")
+        if len(items) > 3:
+            lines.append(f"• +{len(items) - 3} more in full report")
+        lines.append("")
 
-    lines.extend(
-        [
-            "",
-            "✅ Next move",
-            f"→ {recommendation_for(selected)}",
-            "",
-            "📎 HTML brief attached" if include_media_tag else f"📎 HTML brief: {html_path}",
-            "That's all. Keep it useful, not noisy.",
-        ]
-    )
-    if include_media_tag:
-        lines.append(f"MEDIA:{html_path}")
+    lines.append("<b>Full report</b>")
+    lines.append(f"<code>{html_path}</code>")
+    lines.append("")
+    lines.append(f"MEDIA:{html_path}")
 
     text = "\n".join(lines)
     if len(text) <= 1400:
         return text
 
-    # Compact fallback for length
     compact = [
-        f"☀️ Good morning, {date_label}, {time_label}",
+        f"📰 <b>Research brief</b> · {ts}",
+        f"{len(selected)} signals · {source_mix(payload)}",
         "",
-        "🧠 AI/Agent brief",
-        f"Freshness: {freshness}.",
-        "",
-        "📰 Signals by lane",
+        "<b>Findings</b>",
     ]
     for lane in LANE_ORDER:
-        if lane in lane_counts:
-            label = LANE_LABELS.get(lane, lane)
-            compact.append(f"• {label}: {lane_counts[lane]} items")
-    compact.extend(["", "✅ Next move", f"→ {recommendation_for(selected)}", "", "📎 HTML brief attached" if include_media_tag else f"📎 HTML brief: {html_path}"])
-    if include_media_tag:
-        compact.append(f"MEDIA:{html_path}")
+        items = grouped.get(lane, [])
+        for item in items[:2]:
+            compact.append(f"• <a href=\"{item.get('url', '')}\">{item.get('title', '?')}</a>")
+    compact.extend(["", "<b>Full report</b>", f"<code>{html_path}</code>", "", f"MEDIA:{html_path}"])
     return "\n".join(compact)
-
 
 def markdown_text(payload: dict, html_path: Path) -> str:
     selected = payload.get("selected", [])

@@ -1,29 +1,23 @@
-#!/bin/bash
-# KENSEI Content Engine — Daily Pipeline Runner
-# Stage 1: text drafts + static visuals (free) → Telegram digest for approval
-# Stage 2: AI images + videos for approved drafts (costs money) → runs after approval
+#!/usr/bin/env bash
+# KENSEI Content Engine v2 — Daily Pipeline Runner
+# Stage 1: LLM text drafts (free) → Telegram cards for approval
+# Stage 2: AI images + videos for approved drafts only (costs money)
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-# Load env vars from Hermes (needed for Telegram digest delivery)
+# Load env vars from Hermes
 if [ -f /home/kensei/.hermes/.env ]; then
-    export TELEGRAM_BOT_TOKEN=$(grep "^TELEGRAM_BOT_TOKEN=" /home/kensei/.hermes/.env | cut -d'=' -f2 | xargs)
-    export TELEGRAM_CONTENT_CHAT_ID=${TELEGRAM_CONTENT_CHAT_ID:-"-1003922682700"}
-    export TELEGRAM_CONTENT_TOPIC_ID=${TELEGRAM_CONTENT_TOPIC_ID:-"22"}
-    export FAL_KEY=$(grep "^FAL_KEY=" /home/kensei/.hermes/.env | cut -d'=' -f2 | xargs)
+    export $(cat /home/kensei/.hermes/.env | xargs)
 fi
 
-# HyperFrames CPU-only mode (VPS has no GPU)
-export PRODUCER_FORCE_SCREENSHOT="true"
-export ORT_ALLOW_CPU_FALLBACK="1"
-export ORT_USE_CUDA="0"
-
+export TELEGRAM_CONTENT_CHAT_ID=${TELEGRAM_CONTENT_CHAT_ID:-"-1003922682700"}
+export TELEGRAM_CONTENT_TOPIC_ID=${TELEGRAM_CONTENT_TOPIC_ID:-"22"}
 export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH}"
 
-echo "$(date -Iseconds) — Stage 1: generating text drafts + static visuals..."
-python3 content_engine.py stage1 --brand matchdaymaestro plenishd sahil_twitter sahil_linkedin coachos
+echo "$(date -Iseconds) — Content Engine v2: generating LLM drafts..."
+python3 content_engine.py stage1 --brand matchdaymaestro plenishd sahil_twitter sahil_linkedin coachos --max-per-brand 2
 
 echo "$(date -Iseconds) — Done. Check Telegram Topic 22 for approval digest."

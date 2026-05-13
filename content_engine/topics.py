@@ -48,6 +48,8 @@ TOPIC_BANKS: Dict[str, List[Dict]] = {
         {"pillar": "ai", "topic": "Enterprise AI adoption pattern"},
         {"pillar": "leadership", "topic": "Team velocity insight"},
         {"pillar": "pm_thought", "topic": "RAG chatbot case study"},
+        {"pillar": "indie", "topic": "Four apps lesson learn"},
+        {"pillar": "ai", "topic": "Vibe coding production reality"},
     ],
     "coachos": [
         {"pillar": "session_plan", "topic": "Grassroots drill of the week"},
@@ -90,7 +92,7 @@ def fetch_fixtures() -> List[Dict]:
         return []
 
 
-def get_topics(brand: str, count: int = 3) -> List[Dict]:
+def get_topics(brand: str, count: int = 6) -> List[Dict]:
     """Return N topic objects, mixing football fixtures for MMaestro and static banks for others."""
     topics: List[Dict] = []
     if brand == "matchdaymaestro":

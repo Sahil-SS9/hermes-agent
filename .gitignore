@@ -11,6 +11,7 @@ secrets.json
 # Backup files
 *.backup-*
 *.bak
+*.bak.*
 *.swp
 *~
 
