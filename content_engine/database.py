@@ -175,12 +175,12 @@ def purge_stale_drafts(retention_hours: int = 48, brand: Optional[str] = None) -
     conn = sqlite3.connect(str(DB_PATH))
     if brand:
         cur = conn.execute(
-            "DELETE FROM drafts WHERE created_at < datetime('now', ?) AND brand = ?",
+            "DELETE FROM drafts WHERE created_at < strftime('%Y-%m-%dT%H:%M:%S', 'now', ?) AND brand = ?",
             (f"-{retention_hours} hours", brand),
         )
     else:
         cur = conn.execute(
-            "DELETE FROM drafts WHERE created_at < datetime('now', ?)",
+            "DELETE FROM drafts WHERE created_at < strftime('%Y-%m-%dT%H:%M:%S', 'now', ?)",
             (f"-{retention_hours} hours",),
         )
     deleted = cur.rowcount
@@ -194,12 +194,12 @@ def count_drafts_older_than(retention_hours: int = 48, brand: Optional[str] = No
     conn = sqlite3.connect(str(DB_PATH))
     if brand:
         row = conn.execute(
-            "SELECT COUNT(*) FROM drafts WHERE created_at < datetime('now', ?) AND brand = ?",
+            "SELECT COUNT(*) FROM drafts WHERE created_at < strftime('%Y-%m-%dT%H:%M:%S', 'now', ?) AND brand = ?",
             (f"-{retention_hours} hours", brand),
         ).fetchone()
     else:
         row = conn.execute(
-            "SELECT COUNT(*) FROM drafts WHERE created_at < datetime('now', ?)",
+            "SELECT COUNT(*) FROM drafts WHERE created_at < strftime('%Y-%m-%dT%H:%M:%S', 'now', ?)",
             (f"-{retention_hours} hours",),
         ).fetchone()
     conn.close()

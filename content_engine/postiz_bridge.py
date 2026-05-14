@@ -1,5 +1,10 @@
-"""Postiz DB bridge: insert approved drafts into Postiz PostgreSQL."""
+"""Postiz DB bridge: insert approved drafts into Postiz PostgreSQL.
+
+If Postiz social integrations are not linked, falls back to manual export
+so approved drafts are still usable (printed to stdout / saved to file).
+"""
 import os
+import json
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -18,9 +23,11 @@ POSTGRES_DB = os.getenv("POSTIZ_DB_NAME", "postiz-db-local")
 # Organisation ID from the existing Postiz instance
 ORG_ID = "2645662d-a479-4a6a-91ca-a50a7d29f607"
 
-# Placeholder integration IDs per brand/platform — must be created when social accounts are linked
-# Map: "brand_platform" -> integration_id (to be filled as integrations are added)
-INTEGRATION_MAP = {
+# Integration IDs per brand/platform — populated from the live Postiz DB.
+# Run `postiz_bridge.py --refresh-integrations` to rebuild from the database.
+# As of 2026-05-14, only a Telegram test channel exists.
+# All other platforms must be linked via the Postiz web UI OAuth flow.
+INTEGRATION_MAP: dict[str, Optional[str]] = {
     "matchdaymaestro_twitter": None,
     "matchdaymaestro_instagram": None,
     "matchdaymaestro_tiktok": None,
@@ -32,6 +39,11 @@ INTEGRATION_MAP = {
     "coachos_twitter": None,
     "coachos_instagram": None,
     "coachos_linkedin": None,
+    # Telegram is wired — can be used for test posts
+    "matchdaymaestro_telegram": "72a8d345-6951-4707-b503-03070d7643e3",
+    "plenishd_telegram": "72a8d345-6951-4707-b503-03070d7643e3",
+    "sahil_telegram": "72a8d345-6951-4707-b503-03070d7643e3",
+    "coachos_telegram": "72a8d345-6951-4707-b503-03070d7643e3",
 }
 
 
@@ -47,9 +59,133 @@ def _conn():
     )
 
 
+def refresh_integration_map() -> dict[str, Optional[str]]:
+    """Query the Postiz DB and rebuild INTEGRATION_MAP from live data."""
+    try:
+        conn = _conn()
+        cur = conn.cursor()
+        cur.execute(
+            """SELECT id, "providerIdentifier", name
+               FROM "Integration"
+               WHERE "organizationId" = %s AND "deletedAt" IS NULL AND disabled = false""",
+            (ORG_ID,),
+        )
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+
+        # Build provider→integrations mapping
+        provider_map: dict[str, list[tuple[str, str]]] = {}
+        for iid, provider, name in rows:
+            provider_map.setdefault(provider.lower(), []).append((iid, name))
+
+        print(f"Found {len(rows)} active integration(s) in Postiz DB:")
+        for iid, provider, name in rows:
+            print(f"  [{provider}] {name}  ({iid})")
+
+        # Update the global INTEGRATION_MAP from DB rows
+        # Map known Postiz provider identifiers to our brand+platform keys
+        # This is best-effort — we match known providers to our expected keys
+        updated = {}
+        for key in INTEGRATION_MAP:
+            # Parse key format: brand_provider
+            # e.g. "matchdaymaestro_twitter" -> provider "twitter"
+            parts = key.split("_", 1)
+            if len(parts) == 2:
+                brand, provider = parts
+                # Handle duplicate brand in key (legacy format)
+                if provider.startswith(brand + "_"):
+                    provider = provider[len(brand) + 1:]
+            else:
+                continue
+
+            matches = provider_map.get(provider, [])
+            if matches:
+                updated[key] = matches[0][0]  # use first match
+            else:
+                updated[key] = None
+
+        INTEGRATION_MAP.clear()
+        INTEGRATION_MAP.update(updated)
+        return INTEGRATION_MAP
+
+    except Exception as e:
+        print(f"Could not query Postiz DB: {e}")
+        print("INTEGRATION_MAP unchanged. Only Telegram is wired.")
+        return INTEGRATION_MAP
+
+
 def _get_integration_id(brand: str, platform: str) -> Optional[str]:
     key = f"{brand}_{platform}"
     return INTEGRATION_MAP.get(key)
+
+
+def _manual_export(
+    body_text: str,
+    brand: str,
+    platform: str,
+    title: Optional[str] = None,
+) -> None:
+    """Print an approved draft to stdout for manual posting.
+
+    Written to workspace file so downstream tools / humans can find it.
+    """
+    export_dir = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "..", "data", "publish_queue"
+    )
+    os.makedirs(export_dir, exist_ok=True)
+
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    safe_title = (title or "untitled").replace(" ", "_").replace("/", "-")[:40]
+    filename = f"{timestamp}_{brand}_{platform}_{safe_title}.txt"
+    filepath = os.path.join(export_dir, filename)
+
+    content_lines = [
+        f"# Publish Queue — {brand} / {platform}",
+        f"# Generated: {datetime.now(timezone.utc).isoformat()}",
+        f"# Title: {title or ''}",
+        "",
+        body_text,
+        "",
+        "# --- Copy the text above, paste into the platform below ---",
+    ]
+
+    with open(filepath, "w") as f:
+        f.write("\n".join(content_lines))
+
+    print(f"  Manual export saved: {filepath}")
+    print(f"  {'='*60}")
+    print(f"  Brand:  {brand}")
+    print(f"  Platform: {platform}")
+    if title:
+        print(f"  Title:  {title}")
+    print()
+    print(body_text)
+    print()
+    print(f"  {'='*60}")
+
+
+def list_postiz_integrations() -> list[dict]:
+    """Return active Postiz integrations as a debug list."""
+    try:
+        conn = _conn()
+        cur = conn.cursor()
+        cur.execute(
+            """SELECT id, name, type, "providerIdentifier", disabled
+               FROM "Integration"
+               WHERE "organizationId" = %s AND "deletedAt" IS NULL""",
+            (ORG_ID,),
+        )
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        return [
+            {"id": r[0], "name": r[1], "type": r[2], "provider": r[3], "disabled": r[4]}
+            for r in rows
+        ]
+    except Exception:
+        return []
 
 
 def queue_post(
@@ -60,9 +196,13 @@ def queue_post(
     publish_at: Optional[datetime] = None,
     group: str = "kensei-generated",
 ) -> Optional[str]:
-    """Insert a post directly into Postiz DB. Returns the post ID or None."""
+    """Insert a post into Postiz DB, or export manually if no integration.
+
+    Returns the Postiz post ID if queued, or None (manual export printed).
+    """
     integration_id = _get_integration_id(brand, platform)
     if not integration_id:
+        _manual_export(body_text, brand, platform, title=title)
         return None
 
     post_id = str(uuid.uuid4())
@@ -87,9 +227,12 @@ def queue_post(
         )
         conn.commit()
         cur.close()
+        print(f"  Queued in Postiz: {post_id} ({brand}/{platform})")
         return post_id
     except Exception as e:
-        print(f"Postiz insert failed: {e}")
+        print(f"  Postiz insert failed: {e}")
+        print(f"  Falling back to manual export.")
+        _manual_export(body_text, brand, platform, title=title)
         return None
     finally:
         conn.close()
@@ -124,3 +267,33 @@ def list_unpublished(brand: Optional[str] = None, limit: int = 50) -> list:
     cur.close()
     conn.close()
     return [dict(zip(["id", "content", "title", "integration_id", "state", "publish_date"], r)) for r in rows]
+
+
+if __name__ == "__main__":
+    import sys
+    if "--refresh-integrations" in sys.argv:
+        print("Refreshing INTEGRATION_MAP from Postiz DB...")
+        result = refresh_integration_map()
+        print(f"\nINTEGRATION_MAP now has {sum(1 for v in result.values() if v)} live integration(s).")
+        for k, v in result.items():
+            status = f"✓ {v[:12]}..." if v else "✗ not linked"
+            print(f"  {k:35s} {status}")
+    elif "--list-integrations" in sys.argv:
+        integrations = list_postiz_integrations()
+        if integrations:
+            print(f"Active Postiz integrations ({len(integrations)}):")
+            for i in integrations:
+                print(f"  [{i['provider']:15s}] {i['name']:30s} {i['id'][:12]}...")
+        else:
+            print("No active Postiz integrations found.")
+            print("Social accounts must be linked via the Postiz web UI (port 8080).")
+    else:
+        print("postiz_bridge.py — Postiz DB bridge for KENSEI Content Engine")
+        print()
+        print("Usage:")
+        print("  --refresh-integrations   Rebuild INTEGRATION_MAP from live DB")
+        print("  --list-integrations      List active Postiz social integrations")
+        print()
+        print(f"Currently wired integrations: {sum(1 for v in INTEGRATION_MAP.values() if v)} / {len(INTEGRATION_MAP)}")
+        print("Telegram: ✓ (Test Telegram Channel)")
+        print("All other platforms: ✗ (must be linked via Postiz web UI)")

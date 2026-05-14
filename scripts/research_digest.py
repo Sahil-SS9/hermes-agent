@@ -40,38 +40,45 @@ LANE_LABELS = {
 TOPIC_QUERIES = [
     {
         "lane": LANE_A,
-        "query": "AI model release 2026 new version announcement security breach vulnerability deepseek kimi qwen gemini claude openai anthropic",
-        "include_domains": ["anthropic.com", "openai.com", "developers.openai.com", "qwenlm.github.io", "moonshot.ai", "huggingface.co", "deepmind.google", "blog.google", "developers.googleblog.com", "deepseek.com", "x.ai", "cohere.com", "mistral.ai", "techcrunch.com", "arstechnica.com", "theverge.com", "wired.com", "nature.com", "techcrunch.com", "venturebeat.com"],
+        "query": "new AI model launch release announced today 2026",
+        "include_domains": ["anthropic.com", "openai.com", "blog.google", "deepmind.google", "developers.googleblog.com", "huggingface.co", "deepseek.com", "x.ai", "mistral.ai", "techcrunch.com", "arstechnica.com", "theverge.com", "venturebeat.com", "nousresearch.com", "ollama.com"],
     },
     {
         "lane": LANE_B,
-        "query": "developer tools release 2026 changelog new feature SDK API framework library update",
-        "include_domains": ["github.com", "github.blog", "techcrunch.com", "theverge.com", "arstechnica.com", "medium.com", "dev.to", "vercel.com", "cloudflare.com", "huggingface.co", "openai.com", "anthropic.com"],
+        "query": "new AI developer tool library SDK framework launched released 2026",
+        "include_domains": ["github.com", "github.blog", "vercel.com", "cloudflare.com", "huggingface.co", "openai.com", "anthropic.com", "deepseek.com", "ollama.com", "hermes-agent.nousresearch.com"],
     },
     {
         "lane": LANE_C,
-        "query": "new github repository 2026 open source agent framework memory tool plugin skill LLM release",
-        "include_domains": ["github.com", "github.blog", "huggingface.co", "github.com", "github.com", "github.com", "huggingface.co", "arxiv.org"],
+        "query": "new open source AI agent project launched released 2026",
+        "include_domains": [],
     },
 ]
 
 RSS_SOURCES = [
-    # AI News — Model releases, announcements, security
+    # AI News — Model releases, announcements
     {"name": "TechCrunch AI", "url": "https://techcrunch.com/category/artificial-intelligence/feed/", "lane": LANE_A},
     {"name": "OpenAI News", "url": "https://openai.com/news/rss.xml", "lane": LANE_A, "official": True},
     {"name": "Google AI Blog", "url": "https://blog.google/technology/ai/rss/", "lane": LANE_A, "official": True},
-    {"name": "Meta AI Blog", "url": "https://ai.meta.com/blog/rss.xml", "lane": LANE_A, "official": True},
     {"name": "Hugging Face Blog", "url": "https://huggingface.co/blog/feed.xml", "lane": LANE_A, "official": True},
-    # Tool News — Platform updates, devtools, changes
+    # Tool News — Platform updates, devtools, releases
     {"name": "GitHub Changelog", "url": "https://github.blog/changelog/feed/", "lane": LANE_B, "official": True},
-    {"name": "HN frontpage (100+)", "url": "https://hnrss.org/frontpage?points=100", "lane": LANE_B},
-    # Research — GitHub repos, tools, frameworks
-    {"name": "Reddit r/MachineLearning", "url": "https://www.reddit.com/r/MachineLearning/.rss", "lane": LANE_C},
+    {"name": "HN frontpage (150+)", "url": "https://hnrss.org/frontpage?points=150", "lane": LANE_B},
+    {"name": "HN Show", "url": "https://hnrss.org/show", "lane": LANE_C},
+    # Research — GitHub repos, agent frameworks, devtools
+    {"name": "Reddit r/hermesagent", "url": "https://www.reddit.com/r/hermesagent/.rss", "lane": LANE_C},
     {"name": "Reddit r/LocalLLaMA", "url": "https://www.reddit.com/r/LocalLLaMA/.rss", "lane": LANE_C},
-    {"name": "Reddit r/vibecoding", "url": "https://www.reddit.com/r/vibecoding/.rss", "lane": LANE_C},
     {"name": "Reddit r/ClaudeAI", "url": "https://www.reddit.com/r/ClaudeAI/.rss", "lane": LANE_C},
-    {"name": "ArXiv CS.CL", "url": "http://export.arxiv.org/rss/cs.CL", "lane": LANE_C},
 ]
+
+X_ACCOUNT_QUERIES = [
+    # AI News + Community — 20 targeted accounts across labs, curated AI, indie builders
+    {"query": "from:nousresearch OR from:ollama OR from:openai OR from:AnthropicAI OR from:deepseek_ai OR from:xai OR from:mistralai OR from:huggingface OR from:teknium OR from:intheworldofai OR from:claudedevs OR from:petergyang OR from:rileybrown OR from:rasmic OR from:godofprompt OR from:iam_elias1 OR from:davidondrej1 OR from:juliangoldieseo OR from:aaditsh OR from:akshay_pachaar", "lane": LANE_A},
+    # DevTools & Platform — 11 accounts
+    {"query": "from:OpenRouterAI OR from:vercel OR from:supabase OR from:expo OR from:github OR from:cloudflaredev OR from:langchainai OR from:modelcontextprot OR from:thdxr OR from:bccherny OR from:durov", "lane": LANE_B},
+]
+
+X_RESULTS_PER_QUERY = 8
 
 RSS_USER_AGENT = "KENSEI Research Digest/1.0 (+https://hermes-agent.nousresearch.com)"
 
@@ -748,10 +755,14 @@ def is_excluded_candidate(candidate: dict) -> bool:
             return True
     if is_static_reference_candidate(candidate):
         return True
-    # Community sources (HN, Reddit) don't need version/news signals — they're curated
-    if source not in {"news.ycombinator.com", "reddit.com"}:
+    # Community sources (HN, Reddit, X) don't need version/news signals — they're curated
+    if source not in {"news.ycombinator.com", "reddit.com", "x.com"}:
         if not has_news_signal(candidate):
-            return True
+            # Tavily results: search snippets are short, keywords rarely appear verbatim.
+            # If the candidate has high-value topic terms and came from a targeted search,
+            # treat it as having sufficient signal.
+            if candidate.get("source_type") != "tavily" or not has_high_value_topic(candidate):
+                return True
     repo_identity = github_repo_identity(url)
     if repo_identity in BLOCKED_GITHUB_REPOS:
         return True
@@ -841,16 +852,24 @@ def score_candidate(candidate: dict) -> float:
     if has_high_value_topic(candidate):
         score += 2
     if source in OFFICIAL_OR_HIGH_SIGNAL_DOMAINS:
-        score += 4
+        if has_high_value_topic(candidate) or has_news_signal(candidate):
+            score += 4
+        else:
+            score += 2  # Half bonus when official source has no relevant topic
     if candidate.get("official_source"):
-        score += 4
+        if has_high_value_topic(candidate) or has_news_signal(candidate):
+            score += 4
+        else:
+            score += 2  # Half bonus when official source has no relevant topic
     if candidate.get("source_type") == "rss":
         score += 1
+    if candidate.get("source_type") == "x":
+        score += 4  # X is early-signal: these catch announcements hours before RSS/Tavily
     if source == "arxiv.org" and lane != LANE_C:
         score -= 8
     if source == "arxiv.org" and lane == LANE_C:
         score -= 3
-    if source == "huggingface.co" and "/posts/" in path:
+    if source == "huggingface.co" and "/posts/" in urlparse(url).path:
         score += 4
 
     # Penalise items explicitly referencing past years
@@ -1001,11 +1020,188 @@ def _run_brave_search(query: str, api_key: str, max_results: int, time_range: st
     return {"results": results}
 
 
+def collect_github_trending(now: datetime | None = None) -> list[dict]:
+    """Scrape GitHub trending repos for Python and TypeScript, filter for AI/devtools relevance."""
+    candidates: list[dict] = []
+    now = now or datetime.now(ZoneInfo("Europe/London"))
+
+    trending_urls = [
+        ("https://github.com/trending/python?since=daily", "Python"),
+        ("https://github.com/trending/typescript?since=daily", "TypeScript"),
+    ]
+
+    for url, language in trending_urls:
+        try:
+            request = urllib.request.Request(
+                url,
+                headers={"User-Agent": RSS_USER_AGENT, "Accept": "text/html"},
+            )
+            with urllib.request.urlopen(request, timeout=15) as response:
+                html_body = response.read().decode("utf-8", errors="replace")
+        except Exception:
+            continue
+
+        # Parse repo blocks from GitHub trending page
+        repo_blocks = re.findall(
+            r'<h2[^>]*>\s*<a[^>]*href="(/[^"]+)"[^>]*>.*?</a>\s*/\s*<a[^>]*href="(/[^"]+)"[^>]*>([^<]+)</a>\s*</h2>(.*?)(?=<h2[^>]*>|$)',
+            html_body,
+            re.DOTALL,
+        )
+
+        for org_path, repo_path, repo_name, rest in repo_blocks:
+            full_name = f"{org_path.strip('/')}/{repo_path.strip('/')}"
+            repo_name = repo_name.strip()
+            repo_url = f"https://github.com/{full_name}"
+
+            # Extract description
+            desc_match = re.search(r'<p[^>]*class="[^"]*col-9[^"]*"[^>]*>(.*?)</p>', rest, re.DOTALL)
+            description = re.sub(r"<[^>]+>", " ", desc_match.group(1)).strip() if desc_match else ""
+
+            # Extract star count
+            stars_match = re.search(r'(\d[\d,]*)\s+stars', rest, re.IGNORECASE)
+            stars_today_match = re.search(r'(\d[\d,]*)\s+stars today', rest, re.IGNORECASE)
+            stars = int(stars_match.group(1).replace(",", "")) if stars_match else 0
+            stars_today = int(stars_today_match.group(1).replace(",", "")) if stars_today_match else 0
+
+            # Filter: must relate to AI, agents, devtools, or our stack
+            haystack = f"{repo_name} {full_name} {description}".lower()
+            relevant_terms = {
+                "ai", "agent", "llm", "claude", "codex", "hermes", "ollama",
+                "mcp", "workflow", "memory", "rag", "skill", "plugin",
+                "vibe", "open source", "framework", "devtool", "tool",
+                "langchain", "langgraph", "autogen", "crew", "cursor",
+                "supabase", "convex", "expo", "react native", "deepseek",
+                "qwen", "moonshot", "gemini", "openai", "anthropic",
+                "transformer", "vision", "video", "audio", "speech",
+                "generative", "diffusion", "benchmark", "evaluation",
+            }
+            if not any(term in haystack for term in relevant_terms):
+                continue
+
+            candidates.append({
+                "title": f"{full_name}: {description}" if description else full_name,
+                "url": repo_url,
+                "source": "github.com",
+                "lane": LANE_C,
+                "query": f"github-trending:{language}",
+                "content": description,
+                "search_score": 0.8 + min(0.2, math.log10(stars_today + 1) * 0.05) if stars_today else 0.8,
+                "source_type": "github-trending",
+                "points": stars,
+                "comments": 0,
+                "published": now.isoformat(),
+                "feed_name": f"GH Trending {language}",
+                "official_source": False,
+            })
+
+    return candidates
+
+
+def collect_x_candidates(now: datetime | None = None) -> tuple[list[dict], list[dict]]:
+    """Search X/Twitter for AI news, tool releases, and agent launches via xurl CLI."""
+    candidates: list[dict] = []
+    diagnostics: list[dict] = []
+    now = now or datetime.now(ZoneInfo("Europe/London"))
+
+    # Verify xurl is available
+    try:
+        subprocess.check_output(["which", "xurl"], stderr=subprocess.STDOUT, timeout=5)
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        diagnostics.append({"status": "error", "query": "x-check", "lane": LANE_A, "message": "xurl CLI not available. Install with: curl -fsSL https://raw.githubusercontent.com/xdevplatform/xurl/main/install.sh | bash"})
+        return candidates, diagnostics
+
+    for topic in X_ACCOUNT_QUERIES:
+        query = topic["query"]
+        lane = topic["lane"]
+        try:
+            raw = subprocess.check_output(
+                ["xurl", "search", query, "-n", str(X_RESULTS_PER_QUERY)],
+                stderr=subprocess.STDOUT,
+                timeout=30,
+                env=os.environ.copy(),
+            )
+            data = json.loads(raw.decode("utf-8"))
+        except subprocess.CalledProcessError as exc:
+            raw_output = exc.output.decode("utf-8", errors="ignore") if exc.output else str(exc)
+            # CreditsDepleted, rate limit, auth errors are common — report and skip
+            try:
+                err_data = json.loads(raw_output)
+                err_msg = err_data.get("title", err_data.get("detail", raw_output[:200]))
+            except (json.JSONDecodeError, AttributeError):
+                err_msg = raw_output[:200]
+            diagnostics.append({"status": "error", "query": query, "lane": lane, "message": err_msg})
+            continue
+        except Exception as exc:
+            diagnostics.append({"status": "error", "query": query, "lane": lane, "message": str(exc)[:300]})
+            continue
+
+        # xurl search returns {"data": [...], "includes": {"users": [...]}}
+        posts = data.get("data", [])
+        users = {u["id"]: u for u in (data.get("includes", {}).get("users", []))}
+
+        result_count = 0
+        for post in posts:
+            user_id = post.get("author_id", "")
+            user = users.get(user_id, {})
+            username = user.get("username", "unknown")
+            author_name = user.get("name", username)
+            text = post.get("text", "").strip()
+            post_id = post.get("id", "")
+            post_url = f"https://x.com/{username}/status/{post_id}" if username and post_id else ""
+            created_at = post.get("created_at", now.isoformat())
+
+            # Skip retweets/reposts
+            if text.startswith("RT "):
+                continue
+
+            # Clean text content
+            content = re.sub(r"\s+", " ", text[:500]).strip()
+            title = text[:120].strip()
+
+            candidates.append({
+                "title": f"@{username}: {title}",
+                "url": post_url,
+                "source": "x.com",
+                "lane": lane,
+                "query": query,
+                "content": content,
+                "search_score": 0.85,
+                "source_type": "x",
+                "feed_name": f"X: {author_name} (@{username})",
+                "official_source": False,
+                "points": int(post.get("public_metrics", {}).get("like_count", 0) or 0),
+                "comments": int(post.get("public_metrics", {}).get("reply_count", 0) or 0),
+                "published": created_at,
+            })
+            result_count += 1
+
+        diagnostics.append({"status": "ok", "query": query, "lane": lane, "results": result_count, "source": "xurl"})
+
+    return candidates, diagnostics
+
+
 def collect_candidates(max_results_per_query: int = 7, time_range: str = "week", include_rss: bool = True) -> tuple[list[dict], list[dict]]:
     env = command_env()
     diagnostics = []
     candidates = []
     now = datetime.now(ZoneInfo("Europe/London"))
+
+    # GitHub trending — fast, no API key needed, catches repos before they hit RSS
+    try:
+        trending_candidates = collect_github_trending(now=now)
+        candidates.extend(trending_candidates)
+        diagnostics.append({"status": "ok", "query": "github-trending", "lane": LANE_C, "results": len(trending_candidates)})
+    except Exception as exc:
+        diagnostics.append({"status": "error", "query": "github-trending", "lane": LANE_C, "message": str(exc)[:300]})
+
+    # X/Twitter — catches official announcements and launches hours before RSS
+    try:
+        x_candidates, x_diagnostics = collect_x_candidates(now=now)
+        candidates.extend(x_candidates)
+        diagnostics.extend(x_diagnostics)
+    except Exception as exc:
+        diagnostics.append({"status": "error", "query": "x-collect", "lane": LANE_A, "message": str(exc)[:300]})
+
     if not env.get("TAVILY_API_KEY"):
         diagnostics.append({"status": "error", "message": "TAVILY_API_KEY not available to subprocess env"})
     else:
@@ -1135,7 +1331,19 @@ def source_mix(payload: dict) -> str:
         return "RSS"
     if source_types == {"tavily"}:
         return "Tavily"
-    return "Tavily/RSS"
+    if "rss" in source_types and "tavily" in source_types:
+        return "RSS + Tavily"
+    # Anything involving trending, tavily, or mixed
+    parts = []
+    if "rss" in source_types:
+        parts.append("RSS")
+    if "tavily" in source_types:
+        parts.append("Tavily")
+    if "github-trending" in source_types:
+        parts.append("GH Trending")
+    if "x" in source_types:
+        parts.append("X")
+    return " + ".join(parts) if parts else "Tavily/RSS"
 
 
 def recommendation_for(selected: list[dict]) -> str:

@@ -254,17 +254,20 @@ def main() -> int:
         print(f"Approved {args.draft_id}")
         d = get_draft(args.draft_id)
         if d:
+            brand = d["brand"]
+            platform = d["platform"]
             from postiz_bridge import queue_post
             post_id = queue_post(
                 body_text=d["body_text"],
-                brand=d["brand"],
-                platform=d["platform"],
+                brand=brand,
+                platform=platform,
                 title=d.get("title"),
             )
             if post_id:
-                print(f"Queued in Postiz: {post_id}")
+                print(f"  Queued in Postiz: {post_id}")
             else:
-                print(f"No Postiz integration for {d['brand']}/{d['platform']}")
+                print(f"  No Postiz integration for {brand}/{platform} — exported to data/publish_queue/ for manual posting.")
+                print(f"  To link this platform, log into Postiz at http://localhost:8080 and add the social account.")
         return 0
 
     elif args.cmd == "reject":
