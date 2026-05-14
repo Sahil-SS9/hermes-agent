@@ -7,11 +7,11 @@ Replaces json.dumps() calls where the output is consumed by an LLM.
 Usage:
     from toon_utils import toon_encode, maybe_toon, toon_blob, size_report
 
-    # Always encode as TOON
+    # Always encode as TOON (the typical case)
     prompt = f"Process this data:\n{toon_blob(data)}"
 
     # Only encode if it saves tokens (skips small/trivial data)
-    prompt = f"Process this data:\n{toon_blob(maybe_toon(data))}"
+    prompt = f"Process this data:\n{toon_blob(data)}"  # maybe_toon is used internally
 """
 
 import json
@@ -45,7 +45,15 @@ def toon_encode(data: object, fallback_to_json: bool = True) -> str:
 
 def maybe_toon(data: object, threshold: int = TOON_MIN_CHARS) -> str:
     """Encode as TOON only if data is large enough to justify the overhead."""
-    compact = json.dumps(data, separators=(",", ":"), ensure_ascii=False)
+    try:
+        compact = json.dumps(data, separators=(",", ":"), ensure_ascii=False)
+    except (TypeError, ValueError):
+        # Data isn't JSON-serializable — try TOON directly
+        result = _try_encode(data)
+        if result is not None:
+            return result
+        raise TypeError(f"data is neither JSON-serializable nor TOON-encodable: {type(data)}")
+
     if len(compact) < threshold:
         return compact
     result = _try_encode(data)
@@ -67,16 +75,22 @@ def estimated_tokens(text: str) -> int:
 
 def size_report(data: object) -> str:
     """Return a comparison string showing TOON vs JSON size for the given data.
-    Useful for debugging and monitoring actual savings."""
+    Useful for debugging and monitoring actual savings.
+    Falls back gracefully if data isn't JSON-serializable."""
     toon = toon_encode(data)
-    compact = json.dumps(data, separators=(",", ":"), ensure_ascii=False)
-    pretty = json.dumps(data, indent=2, ensure_ascii=False)
 
-    vs_compact = f"{100 - (len(toon) / len(compact) * 100):+.0f}%" if len(compact) > 0 else "N/A"
-    vs_pretty = f"{100 - (len(toon) / len(pretty) * 100):+.0f}%" if len(pretty) > 0 else "N/A"
-
-    return (
-        f"TOON: {len(toon)} chars (~{estimated_tokens(toon)} tok) | "
-        f"JSON compact: {len(compact)} chars (~{estimated_tokens(compact)} tok) {vs_compact} | "
-        f"JSON pretty: {len(pretty)} chars (~{estimated_tokens(pretty)} tok) {vs_pretty}"
-    )
+    try:
+        compact = json.dumps(data, separators=(",", ":"), ensure_ascii=False)
+        pretty = json.dumps(data, indent=2, ensure_ascii=False)
+        return (
+            f"TOON: {len(toon)} chars (~{estimated_tokens(toon)} tok) | "
+            f"JSON compact: {len(compact)} chars (~{estimated_tokens(compact)} tok) "
+            f"{100 - (len(toon) / len(compact) * 100):+.0f}% | "
+            f"JSON pretty: {len(pretty)} chars (~{estimated_tokens(pretty)} tok) "
+            f"{100 - (len(toon) / len(pretty) * 100):+.0f}%"
+        )
+    except (TypeError, ValueError):
+        return (
+            f"TOON: {len(toon)} chars (~{estimated_tokens(toon)} tok) | "
+            f"JSON: not serializable"
+        )
