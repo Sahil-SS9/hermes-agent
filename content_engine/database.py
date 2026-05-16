@@ -70,17 +70,20 @@ def insert_draft(
     visual_path: Optional[str] = None,
     ai_image_path: Optional[str] = None,
     ai_video_path: Optional[str] = None,
+    slop_score: int = 0,
+    slop_issues: str = "",
 ) -> None:
     conn = sqlite3.connect(str(DB_PATH))
     conn.execute(
         """
-        INSERT INTO drafts (id, brand, platform, content_type, pillar, topic, title, body_text, visual_description, visual_path, ai_image_path, ai_video_path, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO drafts (id, brand, platform, content_type, pillar, topic, title, body_text, visual_description, visual_path, ai_image_path, ai_video_path, slop_score, slop_issues, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             draft_id, brand, platform, content_type, pillar, topic,
             title, body_text, visual_description, visual_path,
-            ai_image_path, ai_video_path, datetime.utcnow().isoformat(),
+            ai_image_path, ai_video_path, slop_score, slop_issues,
+            datetime.utcnow().isoformat(),
         ),
     )
     conn.commit()

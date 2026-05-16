@@ -4,45 +4,253 @@ GitHub Radar — Automated Repo Discovery Pipeline (Daily Cron)
 Phase 1-3: Discovery + Classification + Kanban Routing + Digest
 
 Collects repos from GitHub Search API + trending scrape,
-pre-filters noise, then outputs structured JSON for the
-Hermes cron agent to classify and route.
+pre-filters noise, self-tunes thresholds based on signal quality,
+then outputs structured JSON for the Hermes cron agent.
+
+v3.2.0 — Added self-tuning thresholds feedback loop.
 """
 
 import json
 import os
+import re
 import subprocess
 import sys
 import time
 import urllib.request
 import urllib.parse
-from datetime import datetime, timezone, timedelta
 from collections import defaultdict
+from datetime import datetime, timezone, timedelta
 
-# ── Config ──────────────────────────────────────────────────────────
+# ── Data Paths ──────────────────────────────────────────────────────
 
-STAR_THRESHOLD = 100
+DATA_DIR = os.path.expanduser("~/.hermes/data/github-radar")
+CACHE_FILE = os.path.join(DATA_DIR, "cache.json")
+OUTPUT_FILE = os.path.join(DATA_DIR, "discoveries.json")
+METRICS_FILE = os.path.join(DATA_DIR, "metrics.json")
+THRESHOLDS_FILE = os.path.join(DATA_DIR, "thresholds.json")
+
+# ── Static Config ───────────────────────────────────────────────────
+
 RECENCY_DAYS = 7
 MAX_RESULTS_PER_QUERY = 100
 MAX_PAGES = 10  # GitHub caps search results at 1000
 TRENDING_URL = "https://github.com/trending?since=daily"
-CACHE_FILE = os.path.expanduser("~/.hermes/data/github-radar/cache.json")
-OUTPUT_FILE = os.path.expanduser("~/.hermes/data/github-radar/discoveries.json")
-QUERIES = [
+
+# Base query templates — {stars} placeholder filled at runtime
+QUERY_TEMPLATES = [
     # Primary: high-signal repos
-    {"q": "stars:>100", "sort": "stars", "order": "desc"},
+    {"q": "stars:>{stars}", "sort": "stars", "order": "desc", "star_base": 100},
     # Language expanders
-    {"q": "language:python stars:>50", "sort": "stars", "order": "desc"},
-    {"q": "language:typescript stars:>50", "sort": "stars", "order": "desc"},
-    {"q": "language:go stars:>50", "sort": "stars", "order": "desc"},
-    {"q": "language:rust stars:>50", "sort": "stars", "order": "desc"},
-    # Topic targets (low volume, high relevance)
-    {"q": "topic:mcp stars:>10", "sort": "stars", "order": "desc"},
-    {"q": "topic:agent-framework stars:>10", "sort": "stars", "order": "desc"},
-    {"q": "topic:developer-tools stars:>20", "sort": "stars", "order": "desc"},
-    {"q": "topic:hermes-plugin stars:>5", "sort": "stars", "order": "desc"},
+    {"q": "language:python stars:>{stars}", "sort": "stars", "order": "desc", "star_base": 50},
+    {"q": "language:typescript stars:>{stars}", "sort": "stars", "order": "desc", "star_base": 50},
+    {"q": "language:go stars:>{stars}", "sort": "stars", "order": "desc", "star_base": 50},
+    {"q": "language:rust stars:>{stars}", "sort": "stars", "order": "desc", "star_base": 50},
+    # Topic targets (lower threshold by design)
+    {"q": "topic:mcp stars:>{stars}", "sort": "stars", "order": "desc", "star_base": 10},
+    {"q": "topic:agent-framework stars:>{stars}", "sort": "stars", "order": "desc", "star_base": 10},
+    {"q": "topic:developer-tools stars:>{stars}", "sort": "stars", "order": "desc", "star_base": 20},
+    {"q": "topic:hermes-plugin stars:>{stars}", "sort": "stars", "order": "desc", "star_base": 5},
 ]
 
+# ── Thresholds ──────────────────────────────────────────────────────
+
+DEFAULT_THRESHOLDS = {
+    "star_threshold": 100,
+    "min_star_threshold": 25,
+    "max_star_threshold": 500,
+    "noise_keywords": ["awesome", "curated list", "awesome list", "learn", "tutorial", "list", "resource", "cheatsheet"],
+    "language_filters": ["HTML", "CSS", "Markdown"],
+    "dead_repo_forks_ratio": 3.0,
+    "dead_repo_min_stars": 10,
+    "consecutive_noise_high_days": 3,
+    "consecutive_signal_good_days": 3,
+    "consecutive_signal_low_days": 5,
+    "noise_high_threshold_pct": 40.0,
+    "noise_low_threshold_pct": 20.0,
+    "signal_high_threshold_pct": 60.0,
+    "signal_low_threshold_pct": 10.0,
+    "star_adjust_step": 25,
+    "history": [],
+    "last_tuned": None,
+}
+
+
+def load_thresholds():
+    """Load thresholds.json, falling back to defaults with a fresh history entry."""
+    if not os.path.exists(THRESHOLDS_FILE):
+        save_thresholds(DEFAULT_THRESHOLDS)
+        return dict(DEFAULT_THRESHOLDS)
+    try:
+        with open(THRESHOLDS_FILE) as f:
+            data = json.load(f)
+        # Merge with defaults so new keys propagate
+        merged = dict(DEFAULT_THRESHOLDS)
+        merged.update(data)
+        return merged
+    except (json.JSONDecodeError, OSError):
+        return dict(DEFAULT_THRESHOLDS)
+
+
+def save_thresholds(thresholds):
+    """Persist thresholds to disk."""
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        with open(THRESHOLDS_FILE, "w") as f:
+            json.dump(thresholds, f, indent=2, default=str)
+    except OSError as e:
+        print(f"WARN: Failed to write thresholds: {e}", file=sys.stderr)
+
+
+def build_queries(thresholds):
+    """Build query dicts with dynamic star thresholds applied."""
+    base_threshold = thresholds["star_threshold"]
+    queries = []
+    for tpl in QUERY_TEMPLATES:
+        # Effective star level = max(query's base, global threshold * 0.75 for topic queries)
+        star_eff = max(tpl["star_base"], int(base_threshold * 0.75))
+        q = tpl["q"].replace("{stars}", str(star_eff))
+        queries.append({"q": q, "sort": tpl["sort"], "order": tpl["order"]})
+    return queries
+
+
+# ── Self-Tuning ─────────────────────────────────────────────────────
+
+METRICS_LOOKBACK_DAYS = 7
+
+
+def load_metrics():
+    """Load metrics history from disk."""
+    if not os.path.exists(METRICS_FILE):
+        return []
+    try:
+        with open(METRICS_FILE) as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return []
+
+
+def append_metrics_entry(entry):
+    """Append a metrics entry, prune to 365 max."""
+    metrics = load_metrics()
+    metrics.append(entry)
+    # Prune to 365 entries
+    if len(metrics) > 365:
+        metrics = metrics[-365:]
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        with open(METRICS_FILE, "w") as f:
+            json.dump(metrics, f, indent=2)
+    except OSError as e:
+        print(f"WARN: Failed to write metrics: {e}", file=sys.stderr)
+
+
+def self_tune(thresholds, noise_rate_pct, signal_rate_pct):
+    """
+    Read recent metrics and adjust thresholds based on signal quality.
+    Returns (updated_thresholds, tuning_actions_log) where tuning_actions_log
+    is a list of human-readable strings describing what changed.
+    """
+    actions = []
+    metrics = load_metrics()
+
+    # Take last N entries for consecutive analysis
+    recent = metrics[-METRICS_LOOKBACK_DAYS:] if len(metrics) >= METRICS_LOOKBACK_DAYS else metrics
+
+    # Also include today's run (it's not in metrics yet)
+    today = {"noise_rate_pct": noise_rate_pct, "signal_rate_pct": signal_rate_pct}
+    window = list(recent) + [today] if recent else [today]
+
+    if len(window) < 2:
+        return thresholds, ["Not enough data to tune (need 2+ runs)"]
+
+    high_noise_consecutive = 0
+    good_signal_consecutive = 0
+    low_signal_consecutive = 0
+    low_noise_consecutive = 0
+
+    for entry in window:
+        nr = entry.get("noise_rate_pct", 0)
+        sr = entry.get("signal_rate_pct", 0)
+
+        if nr >= thresholds["noise_high_threshold_pct"]:
+            high_noise_consecutive += 1
+        else:
+            high_noise_consecutive = 0
+
+        if sr >= thresholds["signal_high_threshold_pct"] and nr <= thresholds["noise_low_threshold_pct"]:
+            good_signal_consecutive += 1
+        else:
+            good_signal_consecutive = 0
+
+        if sr <= thresholds["signal_low_threshold_pct"]:
+            low_signal_consecutive += 1
+        else:
+            low_signal_consecutive = 0
+
+        if nr <= thresholds["noise_low_threshold_pct"]:
+            low_noise_consecutive += 1
+        else:
+            low_noise_consecutive = 0
+
+    star_changed = False
+
+    # Rule 1: Sustained high noise → tighten (raise star threshold)
+    if high_noise_consecutive >= thresholds["consecutive_noise_high_days"]:
+        old = thresholds["star_threshold"]
+        new = min(old + thresholds["star_adjust_step"], thresholds["max_star_threshold"])
+        if new != old:
+            thresholds["star_threshold"] = new
+            star_changed = True
+            actions.append(
+                f"TIGHTEN: noise >{thresholds['noise_high_threshold_pct']}% for {high_noise_consecutive}d — star_threshold {old} → {new}"
+            )
+
+    # Rule 2: Sustained low noise + high signal → ease (lower star threshold)
+    elif good_signal_consecutive >= thresholds["consecutive_signal_good_days"] and low_noise_consecutive >= thresholds["consecutive_signal_good_days"]:
+        old = thresholds["star_threshold"]
+        new = max(old - thresholds["star_adjust_step"], thresholds["min_star_threshold"])
+        if new != old:
+            thresholds["star_threshold"] = new
+            star_changed = True
+            actions.append(
+                f"EASE: signal >{thresholds['signal_high_threshold_pct']}%, noise <{thresholds['noise_low_threshold_pct']}% for {good_signal_consecutive}d — star_threshold {old} → {new}"
+            )
+
+    # Rule 3: Sustained very low signal → aggressive tighten
+    elif low_signal_consecutive >= thresholds["consecutive_signal_low_days"]:
+        old = thresholds["star_threshold"]
+        new = min(old + thresholds["star_adjust_step"] * 2, thresholds["max_star_threshold"])
+        if new != old:
+            thresholds["star_threshold"] = new
+            star_changed = True
+            actions.append(
+                f"AGGRESSIVE TIGHTEN: signal <{thresholds['signal_low_threshold_pct']}% for {low_signal_consecutive}d — star_threshold {old} → {new}"
+            )
+
+    if not star_changed:
+        actions.append(
+            f"HOLD: noise {noise_rate_pct:.1f}%, signal {signal_rate_pct:.1f}% — thresholds unchanged"
+        )
+
+    # Record tuning event
+    now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    thresholds.setdefault("history", []).append({
+        "tuned_at": now,
+        "noise_rate_pct": noise_rate_pct,
+        "signal_rate_pct": signal_rate_pct,
+        "star_threshold": thresholds["star_threshold"],
+        "actions": list(actions),
+    })
+    # Keep last 90 tuning events
+    if len(thresholds["history"]) > 90:
+        thresholds["history"] = thresholds["history"][-90:]
+    thresholds["last_tuned"] = now
+
+    return thresholds, actions
+
+
 # ── Helpers ─────────────────────────────────────────────────────────
+
 
 def get_date_filter():
     """Returns the `created:>YYYY-MM-DD` qualifier for the recency window."""
@@ -104,10 +312,9 @@ def scrape_trending():
         with urllib.request.urlopen(req, timeout=15) as resp:
             html = resp.read().decode("utf-8", errors="replace")
 
-        import re
         repos = set()
         for match in re.finditer(
-            r'<h2[^>]*class="[^"]*h3[^"]*"[^>]*>.*?<a[^>]*href="/([^/"]+)/([^/"]+)"',
+            r'<h2[^>]*class="[^\"]*h3[^\"]*"[^>]*>.*?<a[^>]*href="/([^/\"]+)/([^/\"]+)"',
             html, re.DOTALL
         ):
             owner = match.group(1)
@@ -151,33 +358,43 @@ def extract_repo(item):
 
 # ── Pre-Filtering ──────────────────────────────────────────────────
 
-NOISE_PATTERNS = {
-    "awesome_list": lambda r: any(
-        kw in (r.get("description", "") + " " + " ".join(r.get("topics", []))).lower()
-        for kw in ["awesome", "curated list", "awesome list"]
-    ),
-    "tutorial_content": lambda r: any(
-        r["full_name"].lower().startswith(prefix)
-        for prefix in ["learn-", "awesome-", "tutorial-"]
-    ),
-    "dead_repo": lambda r: (
-        parse_star_count(r) < 10
-        or (r.get("forks", 0) or 0) > parse_star_count(r) * 3
-    ),
-    "non_code": lambda r: r.get("language", "") in ("HTML", "CSS", "Markdown", ""),
-    "name_noise": lambda r: any(
-        kw in r["full_name"].lower().split("/")[1]
-        for kw in ["awesome", "learn", "tutorial", "list", "resource", "cheatsheet"]
-    ),
-}
+
+def build_noise_patterns(thresholds):
+    """Build NOISE_PATTERNS dict from tuned thresholds."""
+    keywords = thresholds.get("noise_keywords", DEFAULT_THRESHOLDS["noise_keywords"])
+    lang_filters = thresholds.get("language_filters", DEFAULT_THRESHOLDS["language_filters"])
+    fork_ratio = thresholds.get("dead_repo_forks_ratio", 3.0)
+    dead_min = thresholds.get("dead_repo_min_stars", 10)
+
+    return {
+        "awesome_list": lambda r: any(
+            kw in (r.get("description", "") + " " + " ".join(r.get("topics", []))).lower()
+            for kw in ["awesome", "curated list", "awesome list"]
+        ),
+        "tutorial_content": lambda r: any(
+            r["full_name"].lower().startswith(prefix)
+            for prefix in ["learn-", "awesome-", "tutorial-"]
+        ),
+        "dead_repo": lambda r: (
+            parse_star_count(r) < dead_min
+            or (r.get("forks", 0) or 0) > parse_star_count(r) * fork_ratio
+        ),
+        "non_code": lambda r: r.get("language", "") in lang_filters,
+        "name_noise": lambda r: any(
+            kw in r["full_name"].lower().split("/")[1]
+            for kw in keywords
+        ),
+    }
+
 
 NOISE_ORDER = ["awesome_list", "non_code", "name_noise", "tutorial_content", "dead_repo"]
 
 
-def classify_noise(repo):
-    """Returns (is_noise: bool, reason: str)."""
+def classify_noise(repo, thresholds):
+    """Returns (is_noise: bool, reason: str). Uses tuned thresholds."""
+    patterns = build_noise_patterns(thresholds)
     for rule in NOISE_ORDER:
-        if NOISE_PATTERNS[rule](repo):
+        if patterns[rule](repo):
             return True, rule
     return False, ""
 
@@ -190,6 +407,9 @@ def deduplicate(repos):
         if name not in seen or parse_star_count(r) > parse_star_count(seen[name]):
             seen[name] = r
     return list(seen.values())
+
+
+# ── Cache ───────────────────────────────────────────────────────────
 
 
 def load_cache():
@@ -207,7 +427,7 @@ def load_cache():
 def save_cache(seen):
     """Save seen repo names with expiry."""
     try:
-        os.makedirs(os.path.dirname(CACHE_FILE), exist_ok=True)
+        os.makedirs(DATA_DIR, exist_ok=True)
         with open(CACHE_FILE, "w") as f:
             json.dump({"seen": list(seen)}, f)
     except Exception as e:
@@ -216,7 +436,8 @@ def save_cache(seen):
 
 # ── Main Pipeline ──────────────────────────────────────────────────
 
-def collect():
+
+def collect(queries):
     """Stage 1: Data Collection. Returns raw list of repos."""
     seen_cache = load_cache()
     seen = set(seen_cache)  # mutable working set
@@ -224,7 +445,7 @@ def collect():
     rate_limited = False
 
     # ── Primary + Secondary API searches ──
-    for query_def in QUERIES:
+    for query_def in queries:
         if rate_limited:
             break
         q = query_def["q"]
@@ -277,13 +498,14 @@ def collect():
     return all_repos
 
 
-def filter_repos(repos):
-    """Stage 2: Pre-filtering. Returns (keep, filtered_out_with_reasons)."""
+def filter_repos(repos, thresholds):
+    """Stage 2: Pre-filtering using tuned thresholds.
+    Returns (keep, filtered_out_with_reasons)."""
     keep = []
     filtered = defaultdict(list)
 
     for repo in repos:
-        is_noise, reason = classify_noise(repo)
+        is_noise, reason = classify_noise(repo, thresholds)
         if is_noise:
             filtered[reason].append(repo["full_name"])
         else:
@@ -291,7 +513,7 @@ def filter_repos(repos):
 
     print(f"FILTER: {len(keep)} kept, {len(repos) - len(keep)} filtered:",
           file=sys.stderr)
-    for reason, names in filtered.items():
+    for reason, names in sorted(filtered.items()):
         print(f"  {reason}: {len(names)}", file=sys.stderr)
 
     return keep, dict(filtered)
@@ -307,30 +529,71 @@ def deduplicate_repos(repos):
 
 
 def run_pipeline():
-    """Full pipeline: collect -> filter -> dedup -> output JSON."""
-    all_repos = collect()
-    filtered, filter_reasons = filter_repos(all_repos)
+    """Full pipeline: collect -> filter -> dedup -> tune -> output JSON."""
+
+    # Load thresholds
+    thresholds = load_thresholds()
+    queries = build_queries(thresholds)
+
+    print(f"CONFIG: star_threshold={thresholds['star_threshold']}, "
+          f"queries={len(queries)}",
+          file=sys.stderr)
+
+    # Stage 1: Collection
+    all_repos = collect(queries)
+
+    # Stage 2: Pre-filtering
+    filtered, filter_reasons = filter_repos(all_repos, thresholds)
+
+    # Stage 2b: Dedup
     final = deduplicate_repos(filtered)
 
+    # Compute metrics for this run
+    total = len(all_repos)
+    noise_count = total - len(filtered)
+    signal_count = len(final)
+    noise_rate_pct = round((noise_count / total * 100), 1) if total > 0 else 0.0
+    # Signal rate: repos that passed all filters / total collected
+    signal_rate_pct = round((signal_count / total * 100), 1) if total > 0 else 0.0
+
+    # Stage 3: Self-tuning
+    thresholds, tuning_actions = self_tune(thresholds, noise_rate_pct, signal_rate_pct)
+    save_thresholds(thresholds)
+
+    print("TUNING:", file=sys.stderr)
+    for action in tuning_actions:
+        print(f"  {action}", file=sys.stderr)
+
+    # Build output
     output = {
         "collected_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "stats": {
-            "total_collected": len(all_repos),
+            "total_collected": total,
             "after_filter": len(filtered),
             "after_dedup": len(final),
-            "collection_queries": len(QUERIES),
+            "collection_queries": len(queries),
+            "noise_rate_pct": noise_rate_pct,
+            "signal_rate_pct": signal_rate_pct,
+            "active_threshold": thresholds["star_threshold"],
         },
         "filter_reasons": {k: len(v) for k, v in filter_reasons.items()},
+        "tuning": {
+            "actions": tuning_actions,
+            "thresholds": {
+                "star_threshold": thresholds["star_threshold"],
+                "noise_keywords_count": len(thresholds.get("noise_keywords", [])),
+                "language_filters": thresholds.get("language_filters", []),
+            },
+        },
         "repos": final,
     }
 
-    # Write output to standard location
-    os.makedirs(os.path.dirname(OUTPUT_FILE), exist_ok=True)
+    # Write full output to disk
+    os.makedirs(DATA_DIR, exist_ok=True)
     with open(OUTPUT_FILE, "w") as f:
         json.dump(output, f, indent=2)
 
-    # Also output to stdout for cron agent consumption
-    # Limit stdout to 200 repos max to keep token usage sane
+    # Stdout output (capped at 200 repos for cron token budget)
     output_stdout = dict(output)
     output_stdout["repos"] = final[:200]
     if len(final) > 200:
@@ -338,6 +601,19 @@ def run_pipeline():
         output_stdout["stats"]["showing"] = 200
 
     print(json.dumps(output_stdout))
+
+    # Append metrics entry for next run's tuning loop
+    metrics_entry = {
+        "date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+        "total_repos": total,
+        "actionable": signal_count,
+        "noise": noise_count,
+        "signal_rate_pct": signal_rate_pct,
+        "noise_rate_pct": noise_rate_pct,
+        "star_threshold": thresholds["star_threshold"],
+    }
+    append_metrics_entry(metrics_entry)
+
     return output
 
 

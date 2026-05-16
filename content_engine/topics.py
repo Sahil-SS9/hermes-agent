@@ -41,6 +41,12 @@ TOPIC_BANKS: Dict[str, List[Dict]] = {
         {"pillar": "wry", "topic": "AI industry observation"},
         {"pillar": "build_in_public", "topic": "App milestone screenshot"},
         {"pillar": "ai_tools", "topic": "Agentic loop pattern"},
+        {"pillar": "tutorial", "topic": "How-to: content pipeline setup"},
+        {"pillar": "tutorial", "topic": "Framework: feature decision guide"},
+        {"pillar": "data", "topic": "Solo dev time breakdown"},
+        {"pillar": "data", "topic": "Content output before vs after automation"},
+        {"pillar": "promotion", "topic": "Plenishd problem-solution story"},
+        {"pillar": "promotion", "topic": "MatchdayMaestro feature origin story"},
     ],
     "sahil_linkedin": [
         {"pillar": "pm_thought", "topic": "Context over models thesis"},

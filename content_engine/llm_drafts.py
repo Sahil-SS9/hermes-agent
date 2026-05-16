@@ -53,7 +53,8 @@ def _choose_content_type(brand: str, pillar: str, platform: str) -> str:
 
 # ──────────────────────────────────────────────────────────────────────
 # MATCHDAYMAESTRO TEMPLATES
-# Voice: Friendly + Gamified + Smart-Casual. Duolingo for football.
+# Voice: The Smart Mate In The Group Chat. Knows ball, plays the game, competitive warmth.
+# Semi-professional, down to earth, banterish without being toxic.
 # ──────────────────────────────────────────────────────────────────────
 
 MM_LIVE_PREDICTIONS = [
@@ -61,7 +62,7 @@ MM_LIVE_PREDICTIONS = [
 
     "Last 10 minutes. Liverpool 1, City 1.\n\nGoal next? Card next?\n\nYou've got a 30-second window to call it.\n\nSpeed bonus active. Make the call.",
 
-    "Brace? Hat-trick? Off the bench heroics?\n\nYou've got 47 ways to predict what happens next. Not pre-match guesses. In-match calls. While it's actually happening.\n\nTap to play.",
+    "Brace? Hat-trick? Off the bench heroics?\n\nYou've got 47 ways to predict what happens next. Not pre-match guesses. In-match calls. While it's actually happening.\n\nGet in the app.",
 
     "Corner coming. 30 seconds to decide.\n\nWill it be goal, card, or cleared?\n\nThe window opens before the kick. Closes before the ball drops.\n\nGet in. Get out. Earn your bonus.",
 
@@ -75,7 +76,7 @@ MM_LIVE_PREDICTIONS = [
 ]
 
 MM_GAME_MODES = [
-    "Daily quiz. Day 28.\n\nFive questions. Twenty seconds each. Don't break the streak now.\n\nThree weeks ago you said you'd \"just try it once.\" Look at you.\n\nTap to play.",
+    "Daily quiz. Day 28.\n\nFive questions. Twenty seconds each. Don't break the streak now.\n\nThree weeks ago you said you'd \"just try it once.\" Look at you.\n\nGet in the app.",
 
     "Strike501 reset this week.\n\nNew board. Same three people who always hit the checkout.\n\nYou've got one token. Make it count.",
 
@@ -93,7 +94,7 @@ MM_GAME_MODES = [
 MM_FRIEND_BATTLES = [
     "Your mate's mini-league: 6 players.\n\nYou're 4th. Their cousin's 1st. Their cousin doesn't even watch football.\n\nDaily quiz at 9am. Strike501 token resets Monday. Three battles in your inbox.\n\nClimb the table.",
 
-    "Your mate just challenged you. 200 coins on the line.\n\nThey've won the last 3 of these. They won't win this one.\n\nTap to play.",
+    "Your mate just challenged you. 200 coins on the line.\n\nThey've won the last 3 of these. They won't win this one.\n\nMake the call.",
 
     "[Friend] is sitting on a 12-streak.\n\nTheir group chat name is now \"The Champion.\" It's insufferable.\n\nDaily quiz at 9am. This is your chance to stop the rot.\n\nMake the call.",
 
@@ -134,6 +135,12 @@ MM_FOOTBALL_BEAT = [
     "Autopilot report:\n\nAutopilot users earned 2,847 coins from predictions they weren't even watching for.\nThe Markov chain predicted the first card at 73% confidence. It was right.\n\nSometimes the best prediction is the one you don't make.",
 
     "Week 14 in numbers:\n\nMost popular prediction: \"Both teams score\" (selected by 64%).\nActually happened: 3 out of 8 matches.\nPeople who predicted \"neither score\": 11% of users. All of them were right.\n\nCounter-intuitive wins again.",
+
+    "Myth-busting edition:\n\nI keep hearing \"the big clubs always win at home.\"\n\nThis season, the top 6 sides have dropped points at home in 38% of fixtures.\nOnly 22% of MatchdayMaestro users bet against them.\nThe 22% are up 347 coins on average.\n\nConventional wisdom costs you.",
+
+    "Player watch — Mo Salah:\n\n9 goals in 12 games against teams in the bottom half.\n2 goals in 8 against the top half.\n\nWhen the fixture's easy, the numbers say he scores.\nWhen it's a battle, the patterns shift.\n\nMatchdayMaestro tracks form per opponent type. That's the stat the big boards miss.",
+
+    "Pattern worth watching:\n\nSix of the last eight Premier League matches between top-half sides had a red card.\nNot an injury. Not a substitution. A straight red.\n\nWe've been tracking this for 14 weeks. The Markov chain has it at 62% confidence.\n\nDon't just predict the goal. Predict the moment the game changes.",
 ]
 
 # ──────────────────────────────────────────────────────────────────────
@@ -258,6 +265,51 @@ SAHIL_TWITTER_WRY = [
     "United winning 1-0 at half time.\n\nEvery United fan I know already pacing.\n\nThe trauma is the brand at this point.\n\n#MUFC",
 
     "Three apps, one server, zero sleep.\n\nCoachOS is eating my evenings. Plenishd is eating my mornings. MatchdayMaestro is eating the margins.\n\nAt least Kick-tionary's shipped. One down. Three to go.\n\n#indiehacker",
+]
+
+# ──────────────────────────────────────────────────────────────────────
+# SAHIL TWITTER — TUTORIAL / HOW-TO (taxonomy: tutorial)
+# Concrete walkthroughs, setup guides, "here's how I did X"
+# ──────────────────────────────────────────────────────────────────────
+
+SAHIL_TWITTER_TUTORIAL = [
+    "How I set up my content pipeline across 4 apps with zero monthly spend:\n\n1. Hermes cron at 09:00 generates drafts.\n2. I approve via Telegram reply.\n3. Postiz schedules and publishes.\n\nCost: £0. Time: 15 minutes/day.\n\nSame pipeline powers all four apps. One config, four brands.\n\n#buildinpublic #ClaudeCode",
+
+    "The 3-file structure every solo dev should steal for AI-powered social content:\n\n1. `llm_drafts.py` — templates with proper narrative arc (no taglines)\n2. `database.py` — SQLite for draft lifecycle tracking\n3. `postiz_bridge.py` — direct DB insert (the API is broken)\n\nThat's it. Three files. Four brands. Zero subscription cost.\n\n#buildinpublic #indiehacker",
+
+    "Step-by-step: How I get Claude Code to debug a Convex schema mismatch in 5 minutes:\n\n1. Copy the full error traceback into the prompt.\n2. Paste the relevant schema file.\n3. Ask: 'What in this schema causes this error?'\n4. Read the response. It's usually right.\n5. If wrong, paste the actual Convex docs page.\n\nSaved me 5 hours in the last month alone.\n\n#ClaudeCode #buildinpublic",
+
+    "My 4-step framework for deciding whether a feature ships or dies:\n\n1. Does it remove a user drop-off point? → Ship.\n2. Does it add a new user decision? → Kill.\n3. Does it prevent a support ticket? → Ship.\n4. Is it 'cool' with no measurable impact? → Kill.\n\nApplied this last week. Killed a feature I spent 3 weeks building. The onboarding improved.\n\n#buildinpublic #indiehacker",
+]
+
+# ──────────────────────────────────────────────────────────────────────
+# SAHIL TWITTER — DATA-DRIVEN (taxonomy: data_driven)
+# Numbers, metrics, concrete results
+# ──────────────────────────────────────────────────────────────────────
+
+SAHIL_TWITTER_DATA = [
+    "4 apps. 30 drafts/day. 1 config. £0/month.\n\nBreakdown:\nMatchdayMaestro: 8 templates (game modes, predictions)\nPlenishd: 7 templates (kitchen, shopping, launch)\nCoachOS: 7 templates (session plans, coach life)\nSahil Twitter: varies (build, wry, tutorials)\n\nTotal: ~132 unique narratives cycling daily.\n\n#buildinpublic #indiehacker",
+
+    "Content output 3 months ago: 0 posts/week. No pipeline. Everything manual.\n\nContent output this month: 30 posts/day across 4 brands. Automated pipeline. 15 minutes of approval time.\n\nThe difference was investing in the pipeline, not the content.\n\n#buildinpublic #ClaudeCode",
+
+    "Time breakdown for a solo dev shipping 4 apps simultaneously:\n\n40% — Building (new features)\n30% — Fixing (bugs, UI issues)\n15% — Content pipeline (drafts, approval, scheduling)\n10% — Thinking (architecture decisions)\n5% — Panic (server issues at midnight)\n\nTotal: 100% of available waking hours.\n\n#indiehacker #buildinpublic",
+
+    "Most surprising metric from 3 months of automated content:\n\nReply engagement is 3x higher than 'like' engagement.\n\nNot because the content is controversial. Because the content is specific enough to earn a reply.\n\nSpecificity beats volume every time.\n\n#buildinpublic #indiehacker",
+]
+
+# ──────────────────────────────────────────────────────────────────────
+# SAHIL TWITTER — SUBTLE PROMOTION (taxonomy: promotion)
+# Product mentions framed as problem-solution stories
+# ──────────────────────────────────────────────────────────────────────
+
+SAHIL_TWITTER_PROMOTION = [
+    "The problem: UK supermarkets have different prices for the same item.\n\nThe old solution: Open 9 tabs, build a spreadsheet, cry at the total.\n\nThe new solution: One tap. Plenishd finds the split-optimised route.\n\nTesco for 4 items. Aldi for 6. Sainsbury's for 2.\n\nSaved £6.40 on one shop.\n\n#buildinpublic",
+
+    "MatchdayMaestro's prediction engine went through 3 rewrites:\n\nVersion 1: Markov chain (fast, inaccurate)\nVersion 2: Heuristic model (accurate, slow)\nVersion 3: Hybrid approach (fast, accurate, 47 prediction types)\n\nThe actual game isn't the product. The 30-second prediction window is.\n\n#buildinpublic",
+
+    "The feature that users actually cared about wasn't the one I spent weeks building.\n\nIt was the leaderboard.\n\nMatchdayMaestro has a friend challenge mode. I built the prediction engine first. Users ignored it until they could compare scores with their mates.\n\nAlways ship the social layer first.\n\n#buildinpublic #indiehacker",
+
+    "CoachOS update for grassroots coaches:\n\nSession planner: done.\nPlayer development tracker: done.\nDrill library: half done.\n\nThe thing I keep being asked about: 'Can Mum and Dad see their kid's progress?'\n\nBuilding that next. Parent visibility changes everything at grassroots level.\n\n#buildinpublic",
 ]
 
 # ──────────────────────────────────────────────────────────────────────
@@ -400,6 +452,9 @@ BRAND_TEMPLATES = {
         "sly_product": SAHIL_TWITTER_BUILD,
         "football": SAHIL_TWITTER_WRY,
         "wry": SAHIL_TWITTER_WRY,
+        "tutorial": SAHIL_TWITTER_TUTORIAL,
+        "data": SAHIL_TWITTER_DATA,
+        "promotion": SAHIL_TWITTER_PROMOTION,
     },
     "sahil_linkedin": {
         "pm_thought": SAHIL_LINKEDIN_PM,
@@ -456,6 +511,75 @@ def _parse_llm_response(response, brand, topic, platform, content_type):
     return _fallback_drafts(brand, topic, platform, content_type)
 
 
+def _audit_slop(body_text: str) -> dict:
+    """Evaluate a draft body for AI-detectable patterns (slop_score).
+    
+    Returns dict with:
+      - slop_score (0-10, higher = more detectable as AI-generated)
+      - issues (list of specific problems found)
+      - passed (bool: True if slop_score < 6)
+    
+    Pattern types detected:
+    - Boilerplate mantras recurring verbatim across templates
+    - Template-itis (identical sentence structure with one noun swapped)
+    - Generic filler (non-specific, abstract language)
+    - Repetitive hashtag patterns
+    - Over-polished structure (setup → tension → resolution that's too clean)
+    """
+    issues = []
+    slop_score = 0
+    
+    # Pattern 1: Boilerplate mantras (high weight)
+    boilerplate_mantras = [
+        "Shipping apps. Breaking things. Fixing them. Repeat.",
+        "Tap to play.",
+        "Make the call.",
+        "Your move.",
+        "Tomorrow's problem",
+    ]
+    for mantra in boilerplate_mantras:
+        if mantra.lower() in body_text.lower():
+            issues.append(f"Boilerplate mantra detected: '{mantra[:40]}'")
+            slop_score += 2
+    
+    # Pattern 2: Template-itis — identical structure with one noun swapped
+    # "Every AI tool now has a 'X' feature. Nobody solved why..."
+    import re
+    ai_tool_pattern = r"Every AI tool now has a '[\w\s]+' feature"
+    if re.search(ai_tool_pattern, body_text):
+        issues.append("Template-itis: 'Every AI tool now has a [X] feature' structure")
+        slop_score += 2
+    
+    # Pattern 3: Generic filler — no specific names, numbers, or concrete details
+    has_specific_number = bool(re.search(r'\b\d+%|\b\d+x|\b\d+ hours|\b£[\d.]+|\b\d+ items|\b\d+ apps|\b\d+ things\b', body_text))
+    has_specific_tool = bool(re.search(r'(Claude|Convex|Supabase|Hermes|MCP|Postiz|Kinexio|SoftwareOne)', body_text, re.IGNORECASE))
+    has_specific_app = bool(re.search(r'(Plenishd|MatchdayMaestro|CoachOS|Kick-tionary)', body_text, re.IGNORECASE))
+    has_specific_time = bool(re.search(r'\b\d+ (weeks?|months?|days?|years?)\b', body_text, re.IGNORECASE))
+    
+    specificity_count = sum([has_specific_number, has_specific_tool, has_specific_app, has_specific_time])
+    if specificity_count == 0:
+        issues.append("No specific details (numbers, tools, apps, timeframes)")
+        slop_score += 3
+    elif specificity_count == 1:
+        issues.append("Low specificity — only one concrete detail")
+        slop_score += 1
+    
+    # Pattern 4: Over-polished structure detection
+    # Triples with clean line breaks: short_line \n\n short_line \n\n short_line
+    lines = [l.strip() for l in body_text.split('\n') if l.strip()]
+    if len(lines) >= 4:
+        clean_breaks = sum(1 for i in range(len(lines)) if len(lines[i]) < 30)
+        if clean_breaks >= 3:
+            issues.append("Over-polished short-line structure (AI-typical)")
+            slop_score += 1
+    
+    return {
+        "slop_score": min(slop_score, 10),
+        "issues": issues,
+        "passed": slop_score < 6,
+    }
+
+
 def _fallback_drafts(brand, topic, platform, content_type):
     """Generate rich fallback drafts when LLM generation fails.
 
@@ -474,7 +598,21 @@ def _fallback_drafts(brand, topic, platform, content_type):
     if not pillar_templates:
         pillar_templates = ["Draft coming soon."]
 
-    body = pillar_templates[0]
+    # Pick a template, audit for slop, fall through if it fails
+    max_attempts = min(len(pillar_templates), 5)
+    body = None
+    audit_result = None
+    for _ in range(max_attempts):
+        candidate = random.choice(pillar_templates)
+        audit_result = _audit_slop(candidate)
+        if audit_result["passed"]:
+            body = candidate
+            break
+    
+    # If all attempts failed, use the best one anyway
+    if body is None:
+        body = random.choice(pillar_templates)
+        audit_result = _audit_slop(body)
 
     visual_descs = {
         "matchdaymaestro": "Dark background with neon red accents. Bold typography, game-style UI, MatchdayMaestro branding.",
@@ -492,6 +630,7 @@ def _fallback_drafts(brand, topic, platform, content_type):
         "topic": topic_text,
         "platform": platform,
         "content_type": content_type,
+        "slop_audit": audit_result,
     }]
 
 

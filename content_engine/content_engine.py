@@ -66,7 +66,17 @@ def run_stage_1(
         print(f"[{brand}] Generated {len(drafts)} draft(s)")
 
         for d in drafts:
+            slop_info = ""
+            audit = d.get("slop_audit")
+            if audit:
+                slop_mark = "✅" if audit["passed"] else "⚠️"
+                issues_str = "; ".join(audit["issues"][:2])
+                slop_info = f" slop={audit['slop_score']}/10 {slop_mark} {issues_str}"
+            
+            print(f"    {d['id']} [{d.get('pillar','')}]{slop_info}")
+            
             if not dry_run:
+                audit = d.get("slop_audit", {})
                 insert_draft(
                     draft_id=d["id"],
                     brand=d["brand"],
@@ -78,6 +88,8 @@ def run_stage_1(
                     content_type=d.get("content_type", "text"),
                     visual_description=d.get("visual_description"),
                     visual_path=d.get("visual_path"),
+                    slop_score=audit.get("slop_score", 0),
+                    slop_issues="; ".join(audit.get("issues", [])),
                 )
             all_drafts.append(d)
 
@@ -112,7 +124,7 @@ def run_stage_2(dry_run: bool = False) -> List[dict]:
         print(f"  [{draft_id}] brand={brand} type={content_type}")
 
         # Stage 2.1: Pillow static card (free, always)
-        static_path = make_pillow_card(brand, body_text, title=d.get("title"))
+        static_path = make_pillow_card(brand, body_text, title=d.get("title"), pillar=d.get("pillar", ""))
         if static_path:
             print(f"    Static: {static_path}")
 

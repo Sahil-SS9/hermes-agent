@@ -73,7 +73,7 @@ RSS_SOURCES = [
 
 X_ACCOUNT_QUERIES = [
     # AI News + Community — 20 targeted accounts across labs, curated AI, indie builders
-    {"query": "from:nousresearch OR from:ollama OR from:openai OR from:AnthropicAI OR from:deepseek_ai OR from:xai OR from:mistralai OR from:huggingface OR from:teknium OR from:intheworldofai OR from:claudedevs OR from:petergyang OR from:rileybrown OR from:rasmic OR from:godofprompt OR from:iam_elias1 OR from:davidondrej1 OR from:juliangoldieseo OR from:aaditsh OR from:akshay_pachaar", "lane": LANE_A},
+    {"query": "from:nousresearch OR from:ollama OR from:openai OR from:AnthropicAI OR from:deepseek_ai OR from:xai OR from:mistralai OR from:huggingface OR from:teknium OR from:intheworldofai OR from:claudedevs OR from:petergyang OR from:rileybrown OR from:rasmic OR from:godofprompt OR from:iam_elias1 OR from:davidondrej1 OR from:aaditsh OR from:akshay_pachaar", "lane": LANE_A},
     # DevTools & Platform — 11 accounts
     {"query": "from:OpenRouterAI OR from:vercel OR from:supabase OR from:expo OR from:github OR from:cloudflaredev OR from:langchainai OR from:modelcontextprot OR from:thdxr OR from:bccherny OR from:durov", "lane": LANE_B},
 ]

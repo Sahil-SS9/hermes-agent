@@ -29,8 +29,15 @@ def make_card(
     title: Optional[str] = None,
     platform: str = "twitter",
     out_filename: Optional[str] = None,
+    content_type: str = "text",
+    pillar: str = "",
 ) -> str:
-    """Render a single visual card. Returns output path."""
+    """Render a visual card with content-type-aware layout variation.
+
+    Content type affects background pattern, layout, and framing so the
+    multimodal embedder doesn't see the same template card each time.
+    Returns output path.
+    """
     cfg = BRANDS.get(brand, BRANDS["sahil_twitter"])
 
     # Dimensions: 1080x1080 for IG/Twitter, 1080x1920 for Stories/TikTok
@@ -42,42 +49,83 @@ def make_card(
     img = Image.new("RGB", (w, h), color=cfg["bg"])
     draw = ImageDraw.Draw(img)
 
-    # Decorative accent line at top
-    draw.rectangle([0, 0, w, 8], fill=cfg["accent"])
+    # ── Content-type-aware visual variation ──
+    # Different layouts so the multimodal embedder sees semantic variety
 
-    # Brand badge
-    badge_font = _font(28)
-    draw.text((60, 50), cfg["display"].upper(), fill=cfg["accent"], font=badge_font)
+    if pillar in ("data", "data_driven"):
+        # Data layout: stat number large at top, smaller explanation below
+        draw.rectangle([0, 0, w, 8], fill=cfg["accent"])
+        badge_font = _font(28)
+        draw.text((60, 50), cfg["display"].upper(), fill=cfg["accent"], font=badge_font)
 
-    # Handle
-    handle_font = _font_light(22)
-    draw.text((60, 90), cfg["handle"], fill="#666666", font=handle_font)
-
-    # Title if provided
-    y_cursor = 180
-    if title:
-        title_font = _font(42)
-        wrapped = textwrap.wrap(title, width=22)
+        body_font = _font_light(36)
+        wrapped = textwrap.wrap(body_text, width=28)
+        y = 200
         for line in wrapped:
-            draw.text((60, y_cursor), line, fill="#FFFFFF", font=title_font)
-            y_cursor += 56
-        y_cursor += 30
+            draw.text((60, y), line, fill=cfg["colour"], font=body_font)
+            y += 50
+            if y > h - 120:
+                break
 
-    # Body text
-    body_font = _font_light(32)
-    wrapped_body = textwrap.wrap(body_text, width=30)
-    for line in wrapped_body:
-        draw.text((60, y_cursor), line, fill=cfg["colour"], font=body_font)
-        y_cursor += 46
-        if y_cursor > h - 120:
-            break
+    elif pillar in ("tutorial", "howto"):
+        # Tutorial layout: numbered-list friendly, wider margins, code-style bg accent
+        draw.rectangle([0, 0, w, 8], fill=cfg["accent"])
+        draw.rectangle([40, 120, w - 40, h - 40], outline="#333333", width=2)
+        badge_font = _font(28)
+        draw.text((60, 140), cfg["display"].upper(), fill=cfg["accent"], font=badge_font)
+        draw.text((60, 180), cfg["handle"], fill="#666666", font=_font_light(22))
+
+        body_font = _font_light(30)
+        wrapped = textwrap.wrap(body_text, width=30)
+        y = 260
+        for line in wrapped:
+            draw.text((60, y), line, fill=cfg["colour"], font=body_font)
+            y += 44
+            if y > h - 100:
+                break
+
+    elif pillar in ("promotion", "sly_product"):
+        # Promotion layout: centered, bold, problem-to-solution framing
+        draw.rectangle([0, 0, w, 8], fill=cfg["accent"])
+        badge_font = _font(28)
+        draw.text((60, 50), cfg["display"].upper(), fill=cfg["accent"], font=badge_font)
+
+        body_font = _font_light(34)
+        wrapped = textwrap.wrap(body_text, width=26)
+        y = 200
+        for line in wrapped:
+            draw.text((60, y), line, fill=cfg["colour"], font=body_font)
+            y += 48
+            if y > h - 120:
+                break
+
+    else:
+        # Default layout (build updates, wry observations, football reactions)
+        draw.rectangle([0, 0, w, 8], fill=cfg["accent"])
+        badge_font = _font(28)
+        draw.text((60, 50), cfg["display"].upper(), fill=cfg["accent"], font=badge_font)
+        handle_font = _font_light(22)
+        draw.text((60, 90), cfg["handle"], fill="#666666", font=handle_font)
+
+        y_cursor = 180
+        if title:
+            title_font = _font(42)
+            wrapped = textwrap.wrap(title, width=22)
+            for line in wrapped:
+                draw.text((60, y_cursor), line, fill="#FFFFFF", font=title_font)
+                y_cursor += 56
+            y_cursor += 30
+
+        body_font = _font_light(32)
+        wrapped_body = textwrap.wrap(body_text, width=30)
+        for line in wrapped_body:
+            draw.text((60, y_cursor), line, fill=cfg["colour"], font=body_font)
+            y_cursor += 46
+            if y_cursor > h - 120:
+                break
 
     # Footer decoration
     draw.rectangle([60, h - 60, 200, h - 56], fill=cfg["accent"])
-
-    # Subtle watermark
-    wm_font = _font_light(18)
-    draw.text((w - 200, h - 50), "KENSEI", fill="#333333", font=wm_font)
 
     out_dir = OUTPUT_DIR / brand / platform
     out_dir.mkdir(parents=True, exist_ok=True)
