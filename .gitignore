@@ -39,6 +39,11 @@ content_engine/output/
 content_engine/generators/__pycache__/
 content_engine/visuals/__pycache__/
 
+# Postiz local runtime secrets/overrides
+postiz/.env
+postiz/docker-compose.override.yml
+postiz/patch-and-start.local.sh
+
 # Test artefacts
 .pytest_cache/
 .coverage
