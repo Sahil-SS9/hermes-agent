@@ -8,9 +8,13 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-# Load env vars from Hermes
+# Load env vars from Hermes. Use shell-native sourcing; do not pipe env files
+# through xargs because secrets can contain shell metacharacters.
 if [ -f /home/kensei/.hermes/.env ]; then
-    export $(cat /home/kensei/.hermes/.env | xargs)
+    set -a
+    # shellcheck disable=SC1091
+    source /home/kensei/.hermes/.env
+    set +a
 fi
 
 export TELEGRAM_CONTENT_CHAT_ID=${TELEGRAM_CONTENT_CHAT_ID:-"-1003922682700"}

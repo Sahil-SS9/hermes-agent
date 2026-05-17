@@ -8,8 +8,17 @@ output=$(/home/kensei/.hermes/hermes-agent/venv/bin/python3 /home/kensei/.hermes
 exit_code=$?
 
 if [ $exit_code -eq 0 ]; then
-    overall=$(echo "$output" | python3 -c "import sys, json; print(json.load(sys.stdin)['overall'])")
-    count=$(echo "$output" | python3 -c "import sys, json; d=json.load(sys.stdin); print(f\"expired={d['expired_count']} warnings={d['warnings_count']}\")" 2>/dev/null)
+    parsed=$(TOKEN_HEALTH_JSON="$output" /home/kensei/.hermes/hermes-agent/venv/bin/python3 - <<'PY'
+import json
+import os
+
+d = json.loads(os.environ["TOKEN_HEALTH_JSON"])
+print(d["overall"])
+print(f"expired={d['expired_count']} warnings={d['warnings_count']}")
+PY
+)
+    overall=$(printf '%s\n' "$parsed" | sed -n '1p')
+    count=$(printf '%s\n' "$parsed" | sed -n '2p')
     if [ "$overall" = "healthy" ]; then
         echo "✅ <b>Token health</b> · all OK ($count)"
         echo ""
@@ -18,13 +27,18 @@ if [ $exit_code -eq 0 ]; then
         echo "⚠️ <b>Token health</b> · $overall ($count)"
         echo ""
         echo "<b>Findings</b>"
-        echo "$output" | python3 -c "
-import sys, json
-d = json.load(sys.stdin)
-for a in d['accounts']:
-    if a.get('status') in ('expired', 'warning'):
-        print(f\"• <code>{a['provider']}</code> {a['email']} — {a.get('detail', a['status'])}\")
-"
+        TOKEN_HEALTH_JSON="$output" /home/kensei/.hermes/hermes-agent/venv/bin/python3 - <<'PY'
+import json
+import os
+
+d = json.loads(os.environ["TOKEN_HEALTH_JSON"])
+for account in d["accounts"]:
+    if account.get("status") in ("expired", "warning"):
+        provider = account["provider"]
+        email = account["email"]
+        detail = account.get("detail", account["status"])
+        print(f"• <code>{provider}</code> {email} — {detail}")
+PY
         echo ""
         echo "Re-auth needed for flagged accounts. See memory for the rotation pattern."
     fi
@@ -32,7 +46,7 @@ else
     echo "❌ <b>Token health</b> · check failed"
     echo ""
     echo "<b>Error</b>"
-    echo "$output" | head -5
+    printf '%s\n' "$output" | sed -n '1,5p'
 fi
 
 exit 0

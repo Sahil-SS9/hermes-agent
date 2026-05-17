@@ -104,7 +104,7 @@
 - `content_engine.py` — new orchestration
 - `llm_drafts.py` — LLM-based draft generation (new)
 - `telegram_digest_v2.py` — per-draft delivery with media (new)
-- `drafts.py` — delete (replaced by llm_drafts.py)
+
 - `telegram_digest.py` — rewrite for v2 format
 - `database.py` — add content_type column, visual_description
 - `postiz_bridge.py` — fix or replace

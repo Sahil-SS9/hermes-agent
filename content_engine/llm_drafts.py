@@ -1,6 +1,6 @@
 """LLM-based draft generator using brand voice skills and context.
 
-Replaces the old drafts.py template system. Each draft is generated via
+Canonical Content Engine v2 draft generator. Each draft is generated via
 Hermes gateway LLM calls using brand voice prompts, with content_type assignment
 and visual_description generation for Stage 2 media.
 

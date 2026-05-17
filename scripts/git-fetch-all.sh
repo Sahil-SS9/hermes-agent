@@ -5,11 +5,8 @@ set -euo pipefail
 
 repos=(
   /home/kensei/apps/hermes-workspace
-  /home/kensei/apps/content-engine
-  /home/kensei/apps/mission-control
   /home/kensei/apps/postiz-docker
   /home/kensei/repos/hermes-ACII-Skins
-  /home/kensei/repos/hermes-scripts
   /home/kensei/repos/KenseiAgent
 )
 

@@ -258,8 +258,8 @@ Start after the Now lane is boring.
    - Run one real end-to-end pilot before creating custom UI.
 
 2. **Custom Command Center**, paused until Hermes Kanban + dashboard have been exercised.
-   - If resumed, build it as Sahil's personal mission-control overlay, not a replacement for Hermes Kanban.
-   - Pick best bits from Hermes dashboard, Hermes Workspace, and OpenClaw mission controls only after identifying real gaps.
+   - If resumed, build it as a fresh, lightweight KENSEI overlay, not a revival of the scrapped dashboard codebase.
+   - Pick best bits from Hermes dashboard, Hermes Workspace, and OpenClaw-style control surfaces only after identifying real gaps.
    - First-class views should be decisions needed, active blockers, profile lanes, latest handoffs, and project/Obsidian links.
 
 3. **Simple operational runbooks**
