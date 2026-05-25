@@ -64,3 +64,7 @@ KENSEI is expected to use:
 This README is a lightweight public-facing summary for the private repo.
 
 The full planning source of truth is Sahil's local `NorthStar.md` document.
+## Installation
+
+For Windows users, see scripts/install.ps1 for setup instructions.
+For all other platforms, use the standard pip/uv installation. See upstream docs or run `hermes setup`.
