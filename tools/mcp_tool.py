@@ -3375,6 +3375,7 @@ def get_mcp_status() -> List[dict]:
 
     for name, cfg in configured.items():
         transport = cfg.get("transport", "http") if "url" in cfg else "stdio"
+        enabled = _parse_boolish(cfg.get("enabled", True), default=True)
         server = active_servers.get(name)
         if server and server.session is not None:
             entry = {
@@ -3382,6 +3383,7 @@ def get_mcp_status() -> List[dict]:
                 "transport": transport,
                 "tools": len(server._registered_tool_names) if hasattr(server, "_registered_tool_names") else len(server._tools),
                 "connected": True,
+                "enabled": enabled,
             }
             if server._sampling:
                 entry["sampling"] = dict(server._sampling.metrics)
@@ -3392,6 +3394,7 @@ def get_mcp_status() -> List[dict]:
                 "transport": transport,
                 "tools": 0,
                 "connected": False,
+                "enabled": enabled,
             })
 
     return result

@@ -596,6 +596,11 @@ def build_welcome_banner(console: Console, model: str, cwd: str,
                     f"[dim {dim}]{srv['name']}[/] [{text}]({srv['transport']})[/] "
                     f"[dim {dim}]—[/] [{text}]{srv['tools']} tool(s)[/]"
                 )
+            elif not srv.get("enabled", True):
+                right_lines.append(
+                    f"[dim {dim}]{srv['name']}[/] [dim {dim}]({srv['transport']})[/] "
+                    f"[dim {dim}]— disabled[/]"
+                )
             else:
                 right_lines.append(
                     f"[red]{srv['name']}[/] [dim]({srv['transport']})[/] "
