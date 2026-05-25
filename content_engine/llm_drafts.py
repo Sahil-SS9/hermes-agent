@@ -365,6 +365,117 @@ SAHIL_LINKEDIN_LEADERSHIP = [
 ]
 
 
+# ──────────────────────────────────────────────────────────────────────
+# SAHIL TWITTER — ACTIVITY-DRIVEN (variable substitution templates)
+# Generated from real signals via activity_collector.py
+# ──────────────────────────────────────────────────────────────────────
+
+SAHIL_TWITTER_GITHUB_PUSH = [
+    "Just pushed `{repo_name}`.\n\n{description}\n\n#buildinpublic",
+    "Shipped {repo_name} this week. {description}.\n\nMore in the repo.\n\n#buildinpublic",
+    "Friday push: `{repo_name}` — {description}.\n\n#buildinpublic",
+    "Pushed {repo_name}. {description}.\n\nShip small, ship often, ship everything public.\n\n#buildinpublic",
+]
+
+SAHIL_TWITTER_HERMES_PR = [
+    "Submitted `{pr_title}` upstream to {upstream_repo}.\n\nOpen source: you contribute, framework gets better, everyone wins.\n\n#buildinpublic",
+    "Another upstream contribution to {upstream_repo}: `{pr_title}`.\n\nSolo dev doesn't mean only building your own stuff.\n\n#buildinpublic",
+    "PR up: `{pr_title}` on {upstream_repo} — {status}.\n\n#buildinpublic",
+]
+
+SAHIL_TWITTER_SKILL = [
+    "Added a new skill to my Hermes setup today: {skill_name}.\n\nMy personal AI workforce just got another capability.\n\n#buildinpublic #AITools",
+    "New skill shipped: {skill_name}. One more tool in the agent toolkit.\n\n#buildinpublic",
+]
+
+SAHIL_TWITTER_RESEARCH_TOOL = [
+    "Research digest flagged this today: {title}\n\n{summary}\n\nWorth a look if you're in this space.\n\n#AITools",
+    "Interesting tool surfaced — {title}.\n\n{summary}\n\nWorth a deeper look.\n\n#AITools",
+]
+
+SAHIL_TWITTER_RESEARCH_SIGNAL = [
+    "Data point worth noting: {title}\n\n{summary}\n\n#AITools",
+]
+
+SAHIL_TWITTER_GITRADAR = [
+    "GitHub radar surfaced `{repo_name}` today.\n\n{finding}\n\n#buildinpublic",
+    "Radar pick: `{repo_name}`.\n\n{finding}\n\n#buildinpublic",
+]
+
+SAHIL_TWITTER_ARCHITECTURE = [
+    "Architecture thought: {topic_label}.\n\n{description}.\n\n#buildinpublic",
+    "On the architecture front: {topic_label}. {description}.\n\n#buildinpublic",
+]
+
+# ──────────────────────────────────────────────────────────────────────
+# SAHIL LINKEDIN — ACTIVITY-DRIVEN
+# Setup-Evidence-Frame structure tying activity to PM thinking
+# ──────────────────────────────────────────────────────────────────────
+
+SAHIL_LINKEDIN_GITHUB_PUSH = [
+    "Just shipped {repo_name}.\n\nHere's what it is: {description}.\n\nWhat's the product lesson? A solo developer ships faster than most teams because the feedback loop is direct — no handoffs, no approvals, no asynchronous reviews. The bottleneck is never the code. It's the context switching between shipping and thinking about what to ship next.\n\nBuilding in public means the shipping is the thinking.\n\n#ProductManagement #BuildInPublic",
+    "Shipped {repo_name} this week.\n\n{description}\n\nAs a PM, I've learned to treat every shipped thing as a hypothesis. The build is the fast part. Learning what people actually use it for — that takes longer.\n\n#ProductManagement #BuildInPublic",
+]
+
+SAHIL_LINKEDIN_HERMES_PR = [
+    "Open source contribution I'm proud of: `{pr_title}` on {upstream_repo}.\n\nWhat this taught me about product thinking: contributing upstream forces you to think about the API surface, not just your internal implementation. You can't paper over design decisions when the PR is going to someone else's codebase.\n\nIt's the same discipline that makes good product requirements: write for the consumer, not yourself.\n\n#ProductManagement #OpenSource",
+]
+
+SAHIL_LINKEDIN_RESEARCH_TOOL = [
+    "An interesting tool crossed my research desk today: {title}.\n\nWhat caught my attention: {summary}\n\nI evaluate tools the same way I evaluate features: does it solve a real problem, or does it solve a problem I only discovered because the tool exists? Most AI tools fall into the second bucket.\n\nThe product instinct is knowing the difference.\n\n#ProductManagement #AIProductManagement",
+]
+
+SAHIL_LINKEDIN_RESEARCH_SIGNAL = [
+    "Data point worth pausing on: {title}\n\n{summary}\n\nNumbers like this shape how I think about product strategy — what to invest in, what to deprioritise, what to watch.\n\n#ProductManagement #AIProductManagement",
+]
+
+SAHIL_LINKEDIN_ARCHITECTURE = [
+    "Architecture decision I made this week: {topic_label}.\n\nHere's the problem I was solving: {description}.\n\nWhy this is a product decision, not just an engineering one: how you structure your system determines what you can ship, how fast, and to whom. The architecture is the roadmap.\n\n#ProductManagement #AIProductManagement",
+]
+
+# Map signal_type → (twitter_templates, linkedin_templates)
+ACTIVITY_TEMPLATES = {
+    "github_push": (SAHIL_TWITTER_GITHUB_PUSH, SAHIL_LINKEDIN_GITHUB_PUSH),
+    "hermes_pr": (SAHIL_TWITTER_HERMES_PR, SAHIL_LINKEDIN_HERMES_PR),
+    "hermes_skill": (SAHIL_TWITTER_SKILL, None),
+    "research_tool": (SAHIL_TWITTER_RESEARCH_TOOL, SAHIL_LINKEDIN_RESEARCH_TOOL),
+    "research_signal": (SAHIL_TWITTER_RESEARCH_SIGNAL, SAHIL_LINKEDIN_RESEARCH_SIGNAL),
+    "gitradar_repo": (SAHIL_TWITTER_GITRADAR, None),
+    "architecture": (SAHIL_TWITTER_ARCHITECTURE, SAHIL_LINKEDIN_ARCHITECTURE),
+}
+
+
+def _fill_variables(template: str, variables: dict) -> Optional[str]:
+    """Safely fill template variables from activity data.
+
+    Uses format() with automatic escaping of missing keys.
+    Returns None if a required variable is missing.
+    """
+    try:
+        return template.format(**variables)
+    except KeyError:
+        return None
+    except ValueError:
+        return None
+
+
+ACTIVITY_SLOP_PATTERNS = [
+    "What this tells me:",
+    "[PM implication]",
+    "[lesson]",
+    "[reflection",
+    "[insert",
+]
+
+
+def _has_unfilled_placeholders(body: str) -> bool:
+    """Check if filled template still has unfilled placeholder patterns."""
+    for pattern in ACTIVITY_SLOP_PATTERNS:
+        if pattern in body:
+            return True
+    return False
+
+
 COACHOS_SESSION_PLAN = [
     "8:45am. Sunday.\n\nPitch is playable but soft. Four players texted they're running late. One forgot boots.\nThe opposition's coach is already setting up cones on the far side.\n\nYou've got a session plan you wrote at 11pm on Friday. It's in a notes app somewhere. Or was it a printed card? Either way, the warm-up needs adapting -- two of your usual starters are the ones running late.\n\nGrassroots coaching. No two Sundays are the same.\n\nCoachOS helps with the plan, the adaptation, and the post-session debrief. The late players and the forgotten boots are between you and the group chat.\n\nBuilt for the coach on the sideline.",
 
@@ -583,12 +694,57 @@ def _audit_slop(body_text: str) -> dict:
 def _fallback_drafts(brand, topic, platform, content_type):
     """Generate rich fallback drafts when LLM generation fails.
 
-    Uses hand-crafted templates matched to approved examples from brand voice skills.
-    These are proper narrative posts -- not 1-line hooks with taglines.
+    Handles activity-driven topics (from activity_collector) with variable
+    substitution, falling back to static templates for other content.
     """
     pillar = topic.get("pillar", "")
     topic_text = topic.get("topic", "")
 
+    # ── Activity-driven content (sahil_twitter / sahil_linkedin) ──
+    activity_data = topic.get("activity_data")
+    if activity_data and brand in ("sahil_twitter", "sahil_linkedin"):
+        signal_type = activity_data.get("signal_type")
+        variables = activity_data.get("variables", {})
+        templates_tuple = ACTIVITY_TEMPLATES.get(signal_type)
+        if templates_tuple:
+            is_linkedin = platform == "linkedin"
+            idx = 1 if is_linkedin else 0
+            templates = templates_tuple[idx]
+            if templates:
+                for _ in range(min(len(templates), 5)):
+                    candidate = random.choice(templates)
+                    filled = _fill_variables(candidate, variables)
+                    if filled is None:
+                        continue
+                    # Skip if unfilled placeholders remain
+                    if _has_unfilled_placeholders(filled):
+                        continue
+                    body = filled
+                    audit_result = _audit_slop(body)
+                    if audit_result["passed"]:
+                        break
+                # Fallback: use the filled version even if sloppy
+                if body is None:
+                    candidate = random.choice(templates)
+                    body = _fill_variables(candidate, variables) or candidate
+                    audit_result = _audit_slop(body)
+
+                visual_descs = {
+                    "sahil_twitter": "Dark terminal aesthetic. Code overlay, monospace font, build-in-public style.",
+                    "sahil_linkedin": "Professional graphic with clean typography. Quote-style layout, grey tones with red accent.",
+                }
+                return [{
+                    "body_text": body,
+                    "title": topic_text,
+                    "visual_description": visual_descs.get(brand, ""),
+                    "pillar": pillar,
+                    "topic": topic_text,
+                    "platform": platform,
+                    "content_type": content_type,
+                    "slop_audit": audit_result,
+                }]
+
+    # ── Static templates (all brands) ──
     templates = BRAND_TEMPLATES.get(brand, {})
     pillar_templates = templates.get(pillar, [])
 

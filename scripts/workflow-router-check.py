@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check for ops-lead blocked/ready tasks that need review children."""
+"""Check for wesker blocked/ready tasks that need review children."""
 import sqlite3, json, subprocess, sys
 
 DB = '/home/kensei/.hermes/kanban.db'
@@ -7,12 +7,12 @@ DB = '/home/kensei/.hermes/kanban.db'
 def get_candidates():
     conn = sqlite3.connect(DB)
     cur = conn.cursor()
-    # Find tasks: blocked or ready, assignee=ops-lead, workspace exists
+    # Find tasks: blocked or ready, assignee=wesker, workspace exists
     # created within last 72 hours, no active review child
     cur.execute('''
         SELECT id, title, body, workspace_path, status, workflow_template_id, result
         FROM tasks
-        WHERE assignee = 'ops-lead'
+        WHERE assignee = 'wesker'
         AND status IN ('blocked', 'ready')
         AND workspace_path IS NOT NULL
         AND created_at >= strftime('%s','now') - 259200

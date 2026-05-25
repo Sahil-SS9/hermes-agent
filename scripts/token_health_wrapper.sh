@@ -1,6 +1,6 @@
 #!/bin/bash
 # Daily token health check wrapper — formats token_health.py output for human delivery
-# Route: Topic 20 (System Health + Alerts)
+# Discord-safe output (no HTML tags)
 
 cd /home/kensei
 
@@ -9,9 +9,7 @@ exit_code=$?
 
 if [ $exit_code -eq 0 ]; then
     parsed=$(TOKEN_HEALTH_JSON="$output" /home/kensei/.hermes/hermes-agent/venv/bin/python3 - <<'PY'
-import json
-import os
-
+import json, os
 d = json.loads(os.environ["TOKEN_HEALTH_JSON"])
 print(d["overall"])
 print(f"expired={d['expired_count']} warnings={d['warnings_count']}")
@@ -20,32 +18,30 @@ PY
     overall=$(printf '%s\n' "$parsed" | sed -n '1p')
     count=$(printf '%s\n' "$parsed" | sed -n '2p')
     if [ "$overall" = "healthy" ]; then
-        echo "✅ <b>Token health</b> · all OK ($count)"
+        echo "✅ Token health · all OK ($count)"
         echo ""
         echo "All tokens valid. No re-auth needed."
     else
-        echo "⚠️ <b>Token health</b> · $overall ($count)"
+        echo "⚠️ Token health · $overall ($count)"
         echo ""
-        echo "<b>Findings</b>"
+        echo "Findings"
         TOKEN_HEALTH_JSON="$output" /home/kensei/.hermes/hermes-agent/venv/bin/python3 - <<'PY'
-import json
-import os
-
+import json, os
 d = json.loads(os.environ["TOKEN_HEALTH_JSON"])
 for account in d["accounts"]:
     if account.get("status") in ("expired", "warning"):
         provider = account["provider"]
         email = account["email"]
         detail = account.get("detail", account["status"])
-        print(f"• <code>{provider}</code> {email} — {detail}")
+        print(f"• `{provider}` {email} — {detail}")
 PY
         echo ""
-        echo "Re-auth needed for flagged accounts. See memory for the rotation pattern."
+        echo "Re-auth needed for flagged accounts."
     fi
 else
-    echo "❌ <b>Token health</b> · check failed"
+    echo "❌ Token health · check failed"
     echo ""
-    echo "<b>Error</b>"
+    echo "Error"
     printf '%s\n' "$output" | sed -n '1,5p'
 fi
 

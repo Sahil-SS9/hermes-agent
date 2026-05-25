@@ -8,10 +8,10 @@ conn = sqlite3.connect(DB)
 cur = conn.cursor()
 
 auto_promote_ops = [
-    ('t_cc16faad', 'ops-lead'),   # stale remote - mechanical git fix
-    ('t_be05c38b', 'ops-lead'),   # pipeline latency - infra monitoring
-    ('t_2e3ce1b3', 'ops-lead'),   # cron scheduler delays - infra/cron
-    ('t_70c0b9e6', 'ops-lead'),   # github-radar-merged 52min - infra/cron
+    ('t_cc16faad', 'wesker'),   # stale remote - mechanical git fix
+    ('t_be05c38b', 'wesker'),   # pipeline latency - infra monitoring
+    ('t_2e3ce1b3', 'wesker'),   # cron scheduler delays - infra/cron
+    ('t_70c0b9e6', 'wesker'),   # github-radar-merged 52min - infra/cron
 ]
 
 for tid, assignee in auto_promote_ops:
@@ -50,16 +50,16 @@ extract_ids = [
 plugin_ids = ['t_b7f60e9c', 't_989059e2']
 
 for tid in adopt_ids:
-    cur2.execute("UPDATE tasks SET status='todo', assignee='research-lead' WHERE id=? AND status='triage'", (tid,))
-    print(f"research: {tid} -> todo, research-lead [ADOPT]")
+    cur2.execute("UPDATE tasks SET status='todo', assignee='remii' WHERE id=? AND status='triage'", (tid,))
+    print(f"research: {tid} -> todo, remii [ADOPT]")
 
 for tid in extract_ids:
-    cur2.execute("UPDATE tasks SET status='todo', assignee='research-lead' WHERE id=? AND status='triage'", (tid,))
-    print(f"research: {tid} -> todo, research-lead [EXTRACT]")
+    cur2.execute("UPDATE tasks SET status='todo', assignee='remii' WHERE id=? AND status='triage'", (tid,))
+    print(f"research: {tid} -> todo, remii [EXTRACT]")
 
 for tid in plugin_ids:
-    cur2.execute("UPDATE tasks SET status='todo', assignee='research-lead' WHERE id=? AND status='triage'", (tid,))
-    print(f"research: {tid} -> todo, research-lead [PLUGIN]")
+    cur2.execute("UPDATE tasks SET status='todo', assignee='remii' WHERE id=? AND status='triage'", (tid,))
+    print(f"research: {tid} -> todo, remii [PLUGIN]")
 
 conn2.commit()
 conn2.close()

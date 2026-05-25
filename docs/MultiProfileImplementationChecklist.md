@@ -88,12 +88,12 @@ Use CLI profile creation, not ad-hoc directory copying.
 Recommended pattern:
 
 ```bash
-hermes profile create general-assist --clone
-hermes profile create research-lead --clone
-hermes profile create coding-lead --clone
-hermes profile create content-lead --clone
-hermes profile create knowledge-librarian --clone
-hermes profile create ops-lead --clone
+hermes profile create gojo --clone
+hermes profile create remii --clone
+hermes profile create octacon --clone
+hermes profile create ceecee --clone
+hermes profile create light --clone
+hermes profile create wesker --clone
 ```
 
 Why `--clone`:
@@ -108,12 +108,12 @@ After creation:
 
 ```bash
 hermes profile list
-hermes profile show general-assist
-hermes profile show research-lead
-hermes profile show coding-lead
-hermes profile show content-lead
-hermes profile show knowledge-librarian
-hermes profile show ops-lead
+hermes profile show gojo
+hermes profile show remii
+hermes profile show octacon
+hermes profile show ceecee
+hermes profile show light
+hermes profile show wesker
 hermes kanban assignees
 ```
 
@@ -126,7 +126,7 @@ Keep functional names as canonical profile IDs.
 Aliases can be added later:
 
 ```bash
-hermes profile alias research-lead --name <nickname>
+hermes profile alias remii --name <nickname>
 ```
 
 Rules:
@@ -145,12 +145,12 @@ Initial model policy:
 | Profile | Provider | Model | Notes |
 |---|---|---|---|
 | `default` | `openai-codex` | `gpt-5.5` | Temporary orchestrator while trial lasts. Later switch deliberately. |
-| `general-assist` | `ollama-cloud` | `kimi-k2.6:cloud` | General admin, booking, and secretary execution. |
-| `research-lead` | `ollama-cloud` | `kimi-k2.6:cloud` | Upgrade per task only if research quality is weak. |
-| `coding-lead` | `ollama-cloud` | `qwen3-coder:480b` | Live discovery confirmed availability on 2026-05-03. |
-| `content-lead` | `ollama-cloud` | `kimi-k2.6:cloud` | Brand voice skills matter more than raw model size. |
-| `knowledge-librarian` | `ollama-cloud` | `kimi-k2.6:cloud` | Documentation and synthesis. |
-| `ops-lead` | `ollama-cloud` | `kimi-k2.6:cloud` | Diagnosis, runbooks, monitoring. |
+| `gojo` | `ollama-cloud` | `kimi-k2.6:cloud` | General admin, booking, and secretary execution. |
+| `remii` | `ollama-cloud` | `kimi-k2.6:cloud` | Upgrade per task only if research quality is weak. |
+| `octacon` | `ollama-cloud` | `qwen3-coder:480b` | Live discovery confirmed availability on 2026-05-03. |
+| `ceecee` | `ollama-cloud` | `kimi-k2.6:cloud` | Brand voice skills matter more than raw model size. |
+| `light` | `ollama-cloud` | `kimi-k2.6:cloud` | Documentation and synthesis. |
+| `wesker` | `ollama-cloud` | `kimi-k2.6:cloud` | Diagnosis, runbooks, monitoring. |
 
 Before setting Qwen:
 
@@ -168,12 +168,12 @@ Then set profile-specific model/provider only after confirming the IDs.
 
 Implementation status on 2026-05-04:
 
-- [x] `general-assist` set to `ollama-cloud/kimi-k2.6:cloud`.
-- [x] `research-lead` set to `ollama-cloud/kimi-k2.6:cloud`.
-- [x] `coding-lead` set to `ollama-cloud/qwen3-coder:480b`.
-- [x] `content-lead` set to `ollama-cloud/kimi-k2.6:cloud`.
-- [x] `knowledge-librarian` set to `ollama-cloud/kimi-k2.6:cloud`.
-- [x] `ops-lead` set to `ollama-cloud/kimi-k2.6:cloud`.
+- [x] `gojo` set to `ollama-cloud/kimi-k2.6:cloud`.
+- [x] `remii` set to `ollama-cloud/kimi-k2.6:cloud`.
+- [x] `octacon` set to `ollama-cloud/qwen3-coder:480b`.
+- [x] `ceecee` set to `ollama-cloud/kimi-k2.6:cloud`.
+- [x] `light` set to `ollama-cloud/kimi-k2.6:cloud`.
+- [x] `wesker` set to `ollama-cloud/kimi-k2.6:cloud`.
 - [x] One smoke prompt passed for every specialist profile.
 
 Critical Kanban fix found during Pilot A:
@@ -181,7 +181,7 @@ Critical Kanban fix found during Pilot A:
 - `hermes profile create --clone` gives each profile its own `HERMES_HOME`, so Kanban workers initially looked at profile-local `kanban.db` files and could not see tasks created by default KENSEI.
 - Fixed by backing up profile-local `kanban.db` files where present and symlinking each specialist profile's `kanban.db` to `/home/kensei/.hermes/kanban.db`.
 - Also symlinked each profile's `kanban/` directory to `/home/kensei/.hermes/kanban` so scratch workspaces stay shared.
-- Verified with the Pilot A chain: `research-lead -> content-lead -> knowledge-librarian` completed through the shared board.
+- Verified with the Pilot A chain: `remii -> ceecee -> light` completed through the shared board.
 
 ---
 
@@ -191,12 +191,12 @@ Create these as repo docs first, then copy into each profile's `SOUL.md` only af
 
 ```text
 docs/profile-prompts/kensei-orchestrator.md
-docs/profile-prompts/general-assist.md
-docs/profile-prompts/research-lead.md
-docs/profile-prompts/coding-lead.md
-docs/profile-prompts/content-lead.md
-docs/profile-prompts/knowledge-librarian.md
-docs/profile-prompts/ops-lead.md
+docs/profile-prompts/gojo.md
+docs/profile-prompts/remii.md
+docs/profile-prompts/octacon.md
+docs/profile-prompts/ceecee.md
+docs/profile-prompts/light.md
+docs/profile-prompts/wesker.md
 ```
 
 Each prompt must include:
@@ -221,12 +221,12 @@ Do not load every tool into every profile. That kills prompt economy and increas
 | Profile | Default toolsets | Task-scoped toolsets | Always-relevant skills |
 |---|---|---|---|
 | `default` | kanban, skills, memory, session search, web, file, terminal as needed | Gmail/Outlook, GitHub, social posting | hermes-agent, hermes-build-plan-validation, kanban-orchestrator |
-| `general-assist` | memory, session search, clarify, web, file | Gmail/Outlook, calendar, booking platforms, shopping/browser, voice/calls | mailbox-agent, google-workspace when task assigned |
-| `research-lead` | web, search, browser when needed, file, skills | X/Reddit/social APIs, scraping tools, Tavily/Firecrawl/Exa if configured | tavily-dynamic-search, blogwatcher, arxiv, polymarket, ai-seo, programmatic-seo, seo |
-| `coding-lead` | terminal, file, git/GitHub, delegation, skills | browser, MCPs, external deploy tools | systematic-debugging, test-driven-development, github-pr-workflow, requesting-code-review |
-| `content-lead` | file, web, memory/session search, skills | social posting APIs, Postiz/direct APIs later | brand-voices, sahil-linkedin-voice, sahil-twitter-voice, plenishd-voice, matchdaymaestro-voice, avoid-ai-writing, humanizer, content-strategy, social-content |
-| `knowledge-librarian` | file, search, Obsidian, session search | git sync | obsidian, ocr-and-documents, humanizer |
-| `ops-lead` | terminal, file, web, skills | MCP admin, cronjob, system services | hermes-agent, hermes-cron-operations, native-mcp, google-workspace-mcp, code-security, clawsec-suite, 1password |
+| `gojo` | memory, session search, clarify, web, file | Gmail/Outlook, calendar, booking platforms, shopping/browser, voice/calls | mailbox-agent, google-workspace when task assigned |
+| `remii` | web, search, browser when needed, file, skills | X/Reddit/social APIs, scraping tools, Tavily/Firecrawl/Exa if configured | tavily-dynamic-search, blogwatcher, arxiv, polymarket, ai-seo, programmatic-seo, seo |
+| `octacon` | terminal, file, git/GitHub, delegation, skills | browser, MCPs, external deploy tools | systematic-debugging, test-driven-development, github-pr-workflow, requesting-code-review |
+| `ceecee` | file, web, memory/session search, skills | social posting APIs, Postiz/direct APIs later | brand-voices, sahil-linkedin-voice, sahil-twitter-voice, plenishd-voice, matchdaymaestro-voice, avoid-ai-writing, humanizer, content-strategy, social-content |
+| `light` | file, search, Obsidian, session search | git sync | obsidian, ocr-and-documents, humanizer |
+| `wesker` | terminal, file, web, skills | MCP admin, cronjob, system services | hermes-agent, hermes-cron-operations, native-mcp, google-workspace-mcp, code-security, clawsec-suite, 1password |
 
 Sensitive tools are task-scoped unless the profile's whole purpose requires them.
 
@@ -238,12 +238,12 @@ Based on Hermes docs and live CLI, use this:
 
 | Profile | Default workspace | Reason |
 |---|---|---|
-| `general-assist` | `scratch` | Admin outputs should be isolated unless assigned to a specific folder. |
-| `research-lead` | `scratch` | Research should produce clean summaries and source lists, not random files in project dirs. |
-| `content-lead` | `scratch` | Drafts can be handed off as task metadata or saved deliberately. |
-| `coding-lead` | `worktree` | Code edits need repo isolation and clean diffs. |
-| `knowledge-librarian` | `dir:/home/kensei/vaults/obsidian-master` only when writing notes, otherwise `scratch` | Vault writes must be explicit. |
-| `ops-lead` | `scratch` for diagnosis, `dir:/home/kensei/repos/KenseiAgent` only for KENSEI docs/scripts tasks | Keeps ops from spraying files into Hermes state. |
+| `gojo` | `scratch` | Admin outputs should be isolated unless assigned to a specific folder. |
+| `remii` | `scratch` | Research should produce clean summaries and source lists, not random files in project dirs. |
+| `ceecee` | `scratch` | Drafts can be handed off as task metadata or saved deliberately. |
+| `octacon` | `worktree` | Code edits need repo isolation and clean diffs. |
+| `light` | `dir:/home/kensei/vaults/obsidian-master` only when writing notes, otherwise `scratch` | Vault writes must be explicit. |
+| `wesker` | `scratch` for diagnosis, `dir:/home/kensei/repos/KenseiAgent` only for KENSEI docs/scripts tasks | Keeps ops from spraying files into Hermes state. |
 | `default` | task-specific | KENSEI should orchestrate, not accumulate artifacts. |
 
 Operational rule:
@@ -302,10 +302,10 @@ Each digest prepends its section header (🖥️ 📅 📬 🔬). Dark-themed HT
 | Topic | Purpose | Primary profile |
 |-------|---------|-----------------|
 | 1 | Daily Digest | All morning briefs |
-| 19 | Content Drafts | content-lead |
-| 20 | Build Log | coding-lead |
-| 21 | Ops & Alerts | ops-lead |
-| 22 | Research Deep Dives | research-lead |
+| 19 | Content Drafts | ceecee |
+| 20 | Build Log | octacon |
+| 21 | Ops & Alerts | wesker |
+| 22 | Research Deep Dives | remii |
 | 23 | Archive / Low-priority | any |
 
 ### Routing principle
@@ -365,7 +365,7 @@ Task graph:
 
 ```bash
 RESEARCH=$(hermes kanban create "Research free multi-platform posting options" \
-  --assignee research-lead \
+  --assignee remii \
   --tenant kensei-profile-pilot \
   --workspace scratch \
   --priority 2 \
@@ -374,7 +374,7 @@ RESEARCH=$(hermes kanban create "Research free multi-platform posting options" \
   --json | jq -r .id)
 
 CONTENT=$(hermes kanban create "Draft content from posting-options research" \
-  --assignee content-lead \
+  --assignee ceecee \
   --tenant kensei-profile-pilot \
   --workspace scratch \
   --priority 2 \
@@ -385,7 +385,7 @@ CONTENT=$(hermes kanban create "Draft content from posting-options research" \
   --json | jq -r .id)
 
 KNOWLEDGE=$(hermes kanban create "Capture posting-options pilot in Obsidian" \
-  --assignee knowledge-librarian \
+  --assignee light \
   --tenant kensei-profile-pilot \
   --workspace dir:/home/kensei/vaults/obsidian-master \
   --priority 2 \

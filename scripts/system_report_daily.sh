@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-TODAY="$(date +%F)"
+TODAY="$(TZ=Europe/London date +%d-%m-%y)"
 OUT_DIR="/home/kensei/.hermes/runbooks/system-report/${TODAY}"
 cd /home/kensei/repos/KenseiAgent
 python3 scripts/system_report.py \
@@ -11,36 +11,41 @@ python3 - <<'PY'
 import json
 from pathlib import Path
 from datetime import datetime
-out = Path('/home/kensei/.hermes/runbooks/system-report') / datetime.now().strftime('%Y-%m-%d')
+now = datetime.now()
+out = Path('/home/kensei/.hermes/runbooks/system-report') / now.strftime('%d-%m-%y')
+# Backwards compatibility if collector still wrote ISO dir internally.
+if not (out / 'system-report.json').exists():
+    iso = Path('/home/kensei/.hermes/runbooks/system-report') / now.strftime('%Y-%m-%d')
+    if (iso / 'system-report.json').exists():
+        out = iso
+
 data = json.loads((out / 'system-report.json').read_text())
-ts = datetime.now().strftime('%a %d %b · %H:%M')
+html_path = out / 'system-report.html'
 services = data.get('services', {})
 cron_info = data.get('cron', {})
 system = data.get('system', {})
 doctor = data.get('doctor', {})
-token = data.get('token_health', {})
 issues = []
 for name, state in services.items():
     if state != 'active':
-        issues.append(f'Service <code>{name}</code> is <code>{state}</code>')
+        issues.append(f'Service `{name}` is `{state}`')
 for item in doctor.get('failures', []):
-    issues.append(item)
+    issues.append(str(item))
 for item in doctor.get('warnings', []):
-    if 'computer_use' not in item:
-        issues.append(item)
+    if 'computer_use' not in str(item):
+        issues.append(str(item))
 if cron_info.get('error', 0):
-    issues.append(f"<code>{cron_info.get('error')}</code> cron job(s) failing")
+    issues.append(f"{cron_info.get('error')} cron job(s) failing")
 emoji = '✅' if not issues else '⚠️'
-print(f"{emoji} <b>System report</b> · {ts}")
-print(f"{cron_info.get('ok', 0)}/{cron_info.get('total', 0)} crons ok · disk {system.get('disk_pct', '?')} · mem {system.get('mem_used', '?')}")
+print(f"{emoji} System report · {now.strftime('%d/%m/%y %H:%M:%S')}")
+print(f"checked · {cron_info.get('total', 0)} crons · {len(issues)} issue(s)")
 print()
-if issues:
-    print('<b>Watchlist</b>')
-    for item in issues[:5]:
-        print(f'• {item}')
+print(f"• Crons ok: {cron_info.get('ok', 0)}/{cron_info.get('total', 0)}")
+print(f"• Disk: {system.get('disk_pct', '?')}")
+print(f"• Memory: {system.get('mem_used', '?')}")
+for item in issues[:2]:
+    print(f"• {item}")
+if html_path.exists():
     print()
-print('<b>Full report</b>')
-print(f"<code>{out / 'system-report.html'}</code>")
-print()
-print(f"MEDIA:{out / 'system-report.html'}")
+    print(f"MEDIA:{html_path}")
 PY

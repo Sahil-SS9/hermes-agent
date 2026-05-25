@@ -35,7 +35,7 @@ For each issue found, run:
 
 hermes kanban create "<concise-title>" \
   --triage \
-  --assignee ops-lead \
+  --assignee wesker \
   --priority 3 \
   --body "<2-3 sentence description of the issue and why it matters>" \
   --idempotency-key "audit-<TARGET>-<UNIQUE-HASH>-$(date +%F)" \

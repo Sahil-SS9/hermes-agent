@@ -47,7 +47,7 @@ def output_paths(out_dir: Path) -> OutputPaths:
 
 
 def default_output_dir(now: datetime) -> Path:
-    return OUTPUT_BASE / now.strftime("%Y-%m-%d")
+    return OUTPUT_BASE / now.strftime("%d-%m-%y")
 
 
 # ── collectors ──────────────────────────────────────────
@@ -186,7 +186,7 @@ def classify(payload: dict) -> tuple[str, list[str], list[str], list[str]]:
     # cron
     cron = payload.get("cron", {})
     if cron.get("error", 0) > 0:
-        watchlist.append(f"{cron['error']} cron job(s) with errors: {', '.join(cron.get('degraded', []))}")
+        watchlist.append(f"{cron['error']} cron job(s) with errors — see attached report")
     if cron.get("total", 0) > 0:
         healthy.append(f"{cron['ok']}/{cron['total']} cron jobs ok")
 
@@ -252,45 +252,34 @@ def recommendation(overall: str, fires: list[str], watchlist: list[str]) -> str:
 
 
 def telegram_text(payload: dict, html_path: Path, include_media_tag: bool = False) -> str:
+    """Legacy function name; output is now Discord-safe plain text."""
     now = datetime.fromisoformat(payload["generated_at"])
-    date_label = now.strftime("%A, %B %-d")
-    time_label = now.strftime("%-I:%M %p")
-
     overall, fires, watchlist, healthy = classify(payload)
 
-    status_emoji = {"healthy": "🟢", "attention": "🟡", "degraded": "🔴"}
-    status_line = f"{status_emoji.get(overall, '⚪')} Status: {overall}"
+    status_emoji = {"healthy": "✅", "attention": "⚠️", "degraded": "🚨"}
+    top_items = fires or watchlist or healthy
+    cron = payload.get("cron", {})
+    stats = payload.get("system", {})
+    signal = recommendation(overall, fires, watchlist)
 
     lines = [
-        f"🏗 System Report, {date_label}, {time_label}",
+        f"{status_emoji.get(overall, '⚪')} System report · {now.strftime('%d/%m/%y %H:%M:%S')}",
+        f"checked · {cron.get('ok', 0)}/{cron.get('total', 0)} crons ok · disk {stats.get('disk_pct', '?')}",
         "",
-        status_line,
     ]
 
-    if fires:
-        lines.extend(["", "🚨 Fires"])
-        for f in fires[:5]:
-            lines.append(f"• {f}")
+    section = "Fires" if fires else ("Watchlist" if watchlist else "Healthy")
+    if top_items:
+        lines.append(section)
+        for item in top_items[:5]:
+            lines.append(f"• {item}")
 
-    if watchlist:
-        lines.extend(["", "⚠️ Watchlist"])
-        for w in watchlist[:5]:
-            lines.append(f"• {w}")
-
-    if healthy:
-        lines.extend(["", "✅ Healthy"])
-        for h in healthy[:5]:
-            lines.append(f"• {h}")
-
-    lines.extend([
-        "",
-        f"🔧 → {recommendation(overall, fires, watchlist)}",
-        "",
-        "📎 HTML report attached" if include_media_tag else f"📎 HTML report: {html_path}",
-    ])
+    lines.extend(["", f"Action · {signal}"])
 
     if include_media_tag:
-        lines.append(f"MEDIA:{html_path}")
+        lines.extend(["", f"MEDIA:{html_path}"])
+    else:
+        lines.extend(["", f"HTML report: {html_path}"])
 
     return "\n".join(lines)
 
