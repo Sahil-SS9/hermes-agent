@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from agent.web_search_provider import WebSearchProvider
 
@@ -70,6 +70,27 @@ def _tavily_request(endpoint: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     response = httpx.post(url, json=payload, headers=headers, timeout=60)
     response.raise_for_status()
     return response.json()
+
+
+def _status_code_from_exception(exc: Exception) -> Optional[int]:
+    """Return an HTTP status code from an httpx-style exception, if present."""
+    response = getattr(exc, "response", None)
+    status_code = getattr(response, "status_code", None)
+    if isinstance(status_code, int):
+        return status_code
+    return None
+
+
+def _tavily_error_response(operation: str, exc: Exception) -> Dict[str, Any]:
+    """Build a provider error payload that the web dispatcher can fail over."""
+    status_code = _status_code_from_exception(exc)
+    error = f"Tavily {operation} failed: {exc}"
+    payload: Dict[str, Any] = {"success": False, "error": error}
+    if status_code is not None:
+        payload["status_code"] = status_code
+        payload["provider"] = "tavily"
+        payload["fallback_eligible"] = 400 <= status_code < 500
+    return payload
 
 
 def _normalize_tavily_search_results(response: Dict[str, Any]) -> Dict[str, Any]:
@@ -185,7 +206,7 @@ class TavilyWebSearchProvider(WebSearchProvider):
             return {"success": False, "error": str(exc)}
         except Exception as exc:  # noqa: BLE001 — including httpx errors
             logger.warning("Tavily search error: %s", exc)
-            return {"success": False, "error": f"Tavily search failed: {exc}"}
+            return _tavily_error_response("search", exc)
 
     def extract(self, urls: List[str], **kwargs: Any) -> List[Dict[str, Any]]:
         """Extract content from one or more URLs via Tavily.
@@ -216,8 +237,17 @@ class TavilyWebSearchProvider(WebSearchProvider):
             return [{"url": u, "title": "", "content": "", "error": str(exc)} for u in urls]
         except Exception as exc:  # noqa: BLE001
             logger.warning("Tavily extract error: %s", exc)
+            error = _tavily_error_response("extract", exc)
             return [
-                {"url": u, "title": "", "content": "", "error": f"Tavily extract failed: {exc}"}
+                {
+                    "url": u,
+                    "title": "",
+                    "content": "",
+                    "error": error["error"],
+                    "status_code": error.get("status_code"),
+                    "provider": "tavily",
+                    "fallback_eligible": error.get("fallback_eligible", False),
+                }
                 for u in urls
             ]
 

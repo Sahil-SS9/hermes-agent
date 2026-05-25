@@ -231,6 +231,74 @@ def get_active_search_provider() -> Optional[WebSearchProvider]:
     return _resolve(explicit, capability="search")
 
 
+def _fallback_provider(
+    *,
+    capability: str,
+    exclude: Optional[str] = None,
+    configured: Optional[str] = None,
+) -> Optional[WebSearchProvider]:
+    """Resolve a secondary provider for runtime failover.
+
+    Fallback selection is separate from active-provider selection: explicit
+    ``web.<capability>_fallback_backend`` / ``web.fallback_backend`` wins when
+    configured, otherwise we walk the normal preference order while excluding
+    the failed primary. Availability is always required for fallback candidates.
+    """
+    with _lock:
+        snapshot = dict(_providers)
+
+    exclude_name = (exclude or "").strip()
+
+    def _capable(p: WebSearchProvider) -> bool:
+        if capability == "search":
+            return bool(p.supports_search())
+        if capability == "extract":
+            return bool(p.supports_extract())
+        if capability == "crawl":
+            return bool(p.supports_crawl())
+        return False
+
+    def _is_available_safe(p: WebSearchProvider) -> bool:
+        try:
+            return bool(p.is_available())
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("provider %s.is_available() raised %s", p.name, exc)
+            return False
+
+    def _eligible(p: Optional[WebSearchProvider]) -> Optional[WebSearchProvider]:
+        if p is None:
+            return None
+        if p.name == exclude_name:
+            return None
+        if not _capable(p):
+            return None
+        if not _is_available_safe(p):
+            return None
+        return p
+
+    if configured:
+        provider = _eligible(snapshot.get(configured))
+        if provider is not None:
+            return provider
+        logger.debug(
+            "web fallback backend '%s' unavailable for '%s'; walking candidates",
+            configured,
+            capability,
+        )
+
+    for legacy in _LEGACY_PREFERENCE:
+        provider = _eligible(snapshot.get(legacy))
+        if provider is not None:
+            return provider
+    return None
+
+
+def get_fallback_search_provider(exclude: Optional[str] = None) -> Optional[WebSearchProvider]:
+    """Resolve a secondary web search provider for runtime failover."""
+    explicit = _read_config_key("web", "search_fallback_backend") or _read_config_key("web", "fallback_backend")
+    return _fallback_provider(capability="search", exclude=exclude, configured=explicit)
+
+
 def get_active_extract_provider() -> Optional[WebSearchProvider]:
     """Resolve the currently-active web extract provider.
 
@@ -239,6 +307,12 @@ def get_active_extract_provider() -> Optional[WebSearchProvider]:
     """
     explicit = _read_config_key("web", "extract_backend") or _read_config_key("web", "backend")
     return _resolve(explicit, capability="extract")
+
+
+def get_fallback_extract_provider(exclude: Optional[str] = None) -> Optional[WebSearchProvider]:
+    """Resolve a secondary web extract provider for runtime failover."""
+    explicit = _read_config_key("web", "extract_fallback_backend") or _read_config_key("web", "fallback_backend")
+    return _fallback_provider(capability="extract", exclude=exclude, configured=explicit)
 
 
 def get_active_crawl_provider() -> Optional[WebSearchProvider]:

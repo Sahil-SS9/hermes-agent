@@ -245,7 +245,49 @@ def _ddgs_package_importable() -> bool:
     except ImportError:
         return False
 
-# ─── Firecrawl Client ────────────────────────────────────────────────────────
+
+def _is_fallback_eligible_response(response: Any) -> bool:
+    """Return True when a provider response should trigger fallback routing."""
+    if not isinstance(response, dict):
+        return False
+    if response.get("fallback_eligible") is True:
+        return True
+    status_code = response.get("status_code")
+    if isinstance(status_code, int) and 400 <= status_code < 500:
+        return True
+    error = str(response.get("error", "")).lower()
+    return any(
+        marker in error
+        for marker in (
+            "432",
+            "quota",
+            "subscription_required",
+            "subscription required",
+            "paid_access_required",
+        )
+    )
+
+
+def _is_fallback_eligible_results(results: Any) -> bool:
+    """Return True when all provider extract results are fallback-eligible failures."""
+    if not isinstance(results, list) or not results:
+        return False
+    return all(
+        isinstance(item, dict)
+        and item.get("error")
+        and _is_fallback_eligible_response(item)
+        for item in results
+    )
+
+
+async def _call_extract_provider(provider: Any, urls: List[str], *, format: str = None) -> List[Dict[str, Any]]:
+    """Call a sync or async extract provider without blocking the event loop."""
+    import inspect
+    if inspect.iscoroutinefunction(provider.extract):
+        return await provider.extract(urls, format=format)
+    return await asyncio.to_thread(provider.extract, urls, format=format)
+
+# ─── Basic search providers helpers (shared by plugin providers) ─────────────
 
 # ─── Firecrawl Client ────────────────────────────────────────────────────────
 # After PR #25182, the firecrawl client, lazy SDK proxy, dual-auth config
@@ -805,6 +847,7 @@ def web_search_tool(query: str, limit: int = 5) -> str:
         # delegation. Sync only — every provider's search() is sync.
         from agent.web_search_registry import (
             get_active_search_provider,
+            get_fallback_search_provider,
             get_provider as _wsp_get_provider,
         )
 
@@ -830,6 +873,19 @@ def web_search_tool(query: str, limit: int = 5) -> str:
                 provider.name, query, limit,
             )
             response_data = provider.search(query, limit)
+            if _is_fallback_eligible_response(response_data):
+                fallback = get_fallback_search_provider(exclude=provider.name)
+                if fallback is not None:
+                    logger.warning(
+                        "Web search provider %s failed with %s; retrying via %s",
+                        provider.name,
+                        response_data.get("status_code", "4xx"),
+                        fallback.name,
+                    )
+                    fallback_response = fallback.search(query, limit)
+                    if isinstance(fallback_response, dict):
+                        fallback_response.setdefault("fallback_from", provider.name)
+                    response_data = fallback_response
 
         debug_call_data["results_count"] = len(response_data.get("data", {}).get("web", []))
         result_json = json.dumps(response_data, indent=2, ensure_ascii=False)
@@ -937,6 +993,7 @@ async def web_extract_tool(
             # provider itself for the firecrawl per-URL loop).
             from agent.web_search_registry import (
                 get_active_extract_provider,
+                get_fallback_extract_provider,
                 get_provider as _wsp_get_provider,
             )
 
@@ -981,15 +1038,18 @@ async def web_extract_tool(
 
             # Async-or-sync dispatch: parallel + firecrawl have async
             # extract(); exa + tavily are sync.
-            import inspect
-            if inspect.iscoroutinefunction(provider.extract):
-                results = await provider.extract(safe_urls, format=format)
-            else:
-                # Run sync extract() in a thread so we don't block the
-                # event loop on network I/O.
-                results = await asyncio.to_thread(
-                    provider.extract, safe_urls, format=format
-                )
+            results = await _call_extract_provider(provider, safe_urls, format=format)
+            if _is_fallback_eligible_results(results):
+                fallback = get_fallback_extract_provider(exclude=provider.name)
+                if fallback is not None:
+                    logger.warning(
+                        "Web extract provider %s failed with 4xx; retrying via %s",
+                        provider.name,
+                        fallback.name,
+                    )
+                    results = await _call_extract_provider(
+                        fallback, safe_urls, format=format
+                    )
 
         # Merge any SSRF-blocked results back in
         if ssrf_blocked:

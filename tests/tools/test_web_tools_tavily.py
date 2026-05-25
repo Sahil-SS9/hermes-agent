@@ -191,6 +191,59 @@ class TestWebSearchTavily:
             assert len(result["data"]["web"]) == 1
             assert result["data"]["web"][0]["title"] == "Result"
 
+    def test_tavily_432_falls_back_to_firecrawl_provider(self):
+        from agent.web_search_provider import WebSearchProvider
+        from agent.web_search_registry import _reset_for_tests, register_provider
+        from tools.web_tools import web_search_tool
+
+        class FailingTavily(WebSearchProvider):
+            @property
+            def name(self):
+                return "tavily"
+
+            def is_available(self):
+                return True
+
+            def search(self, query, limit=5):
+                return {
+                    "success": False,
+                    "error": "Tavily search failed: 432 Client Error",
+                    "status_code": 432,
+                    "provider": "tavily",
+                    "fallback_eligible": True,
+                }
+
+        class FirecrawlFallback(WebSearchProvider):
+            @property
+            def name(self):
+                return "firecrawl"
+
+            def is_available(self):
+                return True
+
+            def search(self, query, limit=5):
+                return {
+                    "success": True,
+                    "data": {"web": [{"title": "Fallback", "url": "https://fallback.test", "description": "ok", "position": 1}]},
+                }
+
+        _reset_for_tests()
+        try:
+            register_provider(FailingTavily())
+            register_provider(FirecrawlFallback())
+
+            with patch("tools.web_tools._get_backend", return_value="tavily"), \
+                 patch("tools.interrupt.is_interrupted", return_value=False):
+                result = json.loads(web_search_tool("quota fallback", limit=3))
+
+            assert result["success"] is True
+            assert result["fallback_from"] == "tavily"
+            assert result["data"]["web"][0]["title"] == "Fallback"
+        finally:
+            _reset_for_tests()
+            from plugins.web.tavily.provider import TavilyWebSearchProvider
+            register_provider(TavilyWebSearchProvider())
+
 
 # ─── web_extract_tool (Tavily dispatch) ───────────────────────────────────────
 
