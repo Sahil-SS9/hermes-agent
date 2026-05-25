@@ -49,3 +49,5 @@ postiz/patch-and-start.local.sh
 .coverage
 htmlcov/
 
+.venv/
+*.egg-info/
