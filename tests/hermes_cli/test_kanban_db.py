@@ -1088,6 +1088,47 @@ def test_dispatch_promotes_ready_and_spawns(kanban_home, all_assignees_spawnable
         assert kb.get_task(conn, c).status == "running"
 
 
+def test_dispatch_blocks_task_when_forced_skill_missing_from_assignee_profile(kanban_home):
+    default_skill = kanban_home / "skills" / "default-only" / "SKILL.md"
+    default_skill.parent.mkdir(parents=True)
+    default_skill.write_text(
+        "---\nname: default-only\ndescription: default profile only\n---\n# Default only\n",
+        encoding="utf-8",
+    )
+    profile_home = kanban_home / "profiles" / "orchestrator"
+    (profile_home / "skills").mkdir(parents=True)
+
+    spawns = []
+
+    def fake_spawn(task, workspace):
+        spawns.append(task.id)
+
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn,
+            title="needs invisible skill",
+            assignee="orchestrator",
+            skills=["default-only"],
+        )
+        res = kb.dispatch_once(conn, spawn_fn=fake_spawn)
+        task = kb.get_task(conn, tid)
+        events = kb.list_events(conn, tid)
+        runs = kb.list_runs(conn, tid)
+
+    assert spawns == []
+    assert res.auto_blocked == [tid]
+    assert task is not None
+    assert task.status == "blocked"
+    assert task.current_run_id is None
+    assert task.claim_lock is None
+    assert runs[-1].outcome == "blocked"
+    assert "default-only" in (runs[-1].summary or "")
+    assert "orchestrator" in (runs[-1].summary or "")
+    kinds = [event.kind for event in events]
+    assert "forced_skill_rejected" in kinds
+    assert "blocked" in kinds
+
+
 def test_dispatch_spawn_failure_releases_claim(kanban_home, all_assignees_spawnable):
     def boom(task, workspace):
         raise RuntimeError("spawn failed")

@@ -506,8 +506,15 @@ DEFAULT_CONFIG = {
     "model": "",
     "providers": {},
     "fallback_providers": [],
-    "credential_pool_strategies": {},
-    "toolsets": ["hermes-cli"],
+    'credential_pool_strategies': {},
+    'governance': {
+        'profile_activity_ledger': {
+            # Append-only SQLite + JSONL audit ledger for profile/worker activity.
+            # Default false: inline hooks are passive until explicitly enabled.
+            'enabled': False,
+        },
+    },
+    'toolsets': ['hermes-cli'],
     "agent": {
         "max_turns": 90,
         # Inactivity timeout for gateway agent execution (seconds).

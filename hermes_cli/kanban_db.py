@@ -88,6 +88,7 @@ from pathlib import Path
 from typing import Any, Iterable, Optional
 
 from toolsets import get_toolset_names
+from hermes_cli.profile_activity_ledger import record_event_if_enabled
 
 _log = logging.getLogger(__name__)
 
@@ -1750,6 +1751,23 @@ def create_task(
                         "skills": list(skills_list) if skills_list else None,
                     },
                 )
+            record_event_if_enabled(
+                source="kanban.db",
+                actor_profile=created_by,
+                target_profile=assignee,
+                event_type="kanban.task.created",
+                object_type="kanban_task",
+                object_id=task_id,
+                board=board,
+                status_to=task_status,
+                summary=f"Created kanban task {task_id}",
+                payload={
+                    "title": title.strip(),
+                    "parents": list(parents),
+                    "tenant": tenant,
+                    "skills": list(skills_list) if skills_list else None,
+                },
+            )
             return task_id
         except sqlite3.IntegrityError:
             if attempt == 1:
@@ -2069,11 +2087,31 @@ def _append_event(
     """
     now = int(time.time())
     pl = json.dumps(payload, ensure_ascii=False) if payload else None
-    conn.execute(
+    cur = conn.execute(
         "INSERT INTO task_events (task_id, run_id, kind, payload, created_at) "
         "VALUES (?, ?, ?, ?, ?)",
         (task_id, run_id, kind, pl, now),
     )
+    try:
+        task_row = conn.execute(
+            "SELECT assignee, status FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+        record_event_if_enabled(
+            source="kanban.db",
+            actor_profile=os.environ.get("HERMES_PROFILE"),
+            target_profile=(task_row["assignee"] if task_row else None),
+            event_type=f"kanban.{kind}",
+            object_type="kanban_task",
+            object_id=task_id,
+            board=get_current_board(),
+            status_to=(task_row["status"] if task_row else None),
+            summary=f"Kanban event {kind} for {task_id}",
+            payload={"run_id": run_id, "kind": kind, "payload": payload},
+            event_id=f"kanban:{get_current_board()}:{task_id}:event:{cur.lastrowid}",
+        )
+    except Exception:
+        # Ledger hooks are best-effort and must never break board writes.
+        pass
 
 
 def _end_run(
@@ -3035,6 +3073,18 @@ def complete_task(
     _clear_failure_counter(conn, task_id)
     # Recompute ready status for dependents (separate txn so children see done).
     recompute_ready(conn)
+    task = get_task(conn, task_id)
+    record_event_if_enabled(
+        source="kanban.db",
+        actor_profile=os.environ.get("HERMES_PROFILE"),
+        target_profile=task.assignee if task else None,
+        event_type="kanban.task.completed",
+        object_type="kanban_task",
+        object_id=task_id,
+        status_to="done",
+        summary=summary or result or f"Completed kanban task {task_id}",
+        payload={"run_id": run_id, "created_cards": verified_cards},
+    )
     # Clean up the scratch workspace and any stale tmux session for the worker.
     _cleanup_workspace(conn, task_id)
     return True
@@ -5191,7 +5241,7 @@ def dispatch_once(
         )
 
     ready_rows = conn.execute(
-        "SELECT id, assignee FROM tasks "
+        "SELECT id, assignee, skills FROM tasks "
         "WHERE status = 'ready' AND claim_lock IS NULL "
         "ORDER BY priority DESC, created_at ASC"
     ).fetchall()
@@ -5260,6 +5310,17 @@ def dispatch_once(
                         {"reason": guard_reason},
                     )
             continue
+        if not dry_run:
+            task_for_skills = get_task(conn, row["id"])
+            missing_skills = _missing_worker_forced_skills(
+                row["assignee"], task_for_skills.skills if task_for_skills else None
+            )
+            if missing_skills:
+                if _block_missing_forced_skills(
+                    conn, row["id"], row["assignee"], missing_skills
+                ):
+                    result.auto_blocked.append(row["id"])
+                continue
         if dry_run:
             result.spawned.append((row["id"], row["assignee"], ""))
             continue
@@ -5339,6 +5400,14 @@ def dispatch_once(
         if profile_exists is not None and not profile_exists(row["assignee"]):
             result.skipped_nonspawnable.append(row["id"])
             continue
+        if not dry_run:
+            missing_skills = _missing_worker_forced_skills(row["assignee"], ["sdlc-review"])
+            if missing_skills:
+                if _block_missing_forced_skills(
+                    conn, row["id"], row["assignee"], missing_skills
+                ):
+                    result.auto_blocked.append(row["id"])
+                continue
         if dry_run:
             result.spawned.append((row["id"], row["assignee"], ""))
             continue
@@ -5601,25 +5670,191 @@ def _kanban_worker_skill_available(hermes_home: Optional[str]) -> bool:
     the kanban lifecycle contract is still injected via ``KANBAN_GUIDANCE``, so
     omitting the flag only drops the supplementary pattern library.
     """
-    from pathlib import Path as _Path
+    base = Path(hermes_home) if hermes_home else (Path.home() / ".hermes")
+    return _worker_skill_visible_in_home("kanban-worker", base)
 
-    # An unset HERMES_HOME means the worker falls back to the default root
-    # home (``~/.hermes``), which ships the bundled skill.
-    base = _Path(hermes_home) if hermes_home else (_Path.home() / ".hermes")
-    skills_root = base / "skills"
-    if not skills_root.is_dir():
-        return False
-    # Canonical bundled location first (cheap), then a bounded scan for
-    # profiles that have it nested elsewhere.
-    if (skills_root / "devops" / "kanban-worker" / "SKILL.md").is_file():
-        return True
+
+def _profile_external_skill_dirs(profile_home: Path) -> list[Path]:
+    """Return ``skills.external_dirs`` as the child profile will resolve them."""
+    config_path = profile_home / "config.yaml"
+    if not config_path.exists():
+        return []
     try:
-        for skill_md in skills_root.rglob("kanban-worker/SKILL.md"):
-            if skill_md.is_file():
+        from agent.skill_utils import yaml_load
+        parsed = yaml_load(config_path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    if not isinstance(parsed, dict):
+        return []
+    skills_cfg = parsed.get("skills")
+    if not isinstance(skills_cfg, dict):
+        return []
+    raw_dirs = skills_cfg.get("external_dirs")
+    if not raw_dirs:
+        return []
+    if isinstance(raw_dirs, str):
+        raw_dirs = [raw_dirs]
+    if not isinstance(raw_dirs, list):
+        return []
+
+    local_skills = (profile_home / "skills").resolve()
+    seen: set[Path] = set()
+    result: list[Path] = []
+    for entry in raw_dirs:
+        entry_s = str(entry or "").strip()
+        if not entry_s:
+            continue
+        expanded = os.path.expandvars(entry_s.replace("~", str(Path.home()), 1))
+        candidate = Path(expanded)
+        if not candidate.is_absolute():
+            candidate = profile_home / candidate
+        try:
+            candidate = candidate.resolve()
+        except OSError:
+            continue
+        if candidate == local_skills or candidate in seen or not candidate.is_dir():
+            continue
+        seen.add(candidate)
+        result.append(candidate)
+    return result
+
+
+def _skill_visible_in_search_dirs(skill_name: str, search_dirs: Iterable[Path]) -> bool:
+    """Mirror the local-skill lookup strategies used by ``skill_view``."""
+    name = (skill_name or "").strip()
+    if not name:
+        return True
+
+    local_category_name: Optional[str] = None
+    if ":" in name:
+        namespace, _, bare = name.partition(":")
+        if namespace and bare:
+            local_category_name = f"{namespace}/{bare}"
+
+    try:
+        from agent.skill_utils import is_excluded_skill_path, iter_skill_index_files
+    except Exception:
+        is_excluded_skill_path = lambda path: False  # type: ignore[assignment]
+        iter_skill_index_files = None  # type: ignore[assignment]
+
+    for search_dir in search_dirs:
+        if not search_dir.is_dir():
+            continue
+        direct_path = search_dir / name
+        if direct_path.is_dir() and (direct_path / "SKILL.md").is_file():
+            return True
+        if direct_path.with_suffix(".md").is_file():
+            return True
+        if local_category_name:
+            categorized_path = search_dir / local_category_name
+            if categorized_path.is_dir() and (categorized_path / "SKILL.md").is_file():
                 return True
-    except OSError:
-        pass
+            if categorized_path.with_suffix(".md").is_file():
+                return True
+        try:
+            skill_files = (
+                iter_skill_index_files(search_dir, "SKILL.md")
+                if iter_skill_index_files is not None
+                else search_dir.rglob("SKILL.md")
+            )
+            for skill_md in skill_files:
+                if is_excluded_skill_path(skill_md):
+                    continue
+                if skill_md.parent.name == name and skill_md.is_file():
+                    return True
+            for found_md in search_dir.rglob(f"{name}.md"):
+                if is_excluded_skill_path(found_md):
+                    continue
+                if found_md.name != "SKILL.md" and found_md.is_file():
+                    return True
+        except OSError:
+            continue
     return False
+
+
+def validate_forced_skills_visible(forced_skills: list[str], profile_home: str) -> list[str]:
+    """Public API: return forced skill names not visible under a profile home.
+
+    Mirrors the visibility check used by the dispatcher pre-spawn gate.
+    Used by SDK consumers and tests; does not resolve profile env vars.
+    """
+    roots = [Path(profile_home) / "skills"]
+    roots.extend(_profile_external_skill_dirs(Path(profile_home)))
+
+    missing: list[str] = []
+    seen: set[str] = set()
+    for raw in forced_skills:
+        skill_name = str(raw or "").strip()
+        if not skill_name or skill_name in seen:
+            continue
+        seen.add(skill_name)
+        if not _skill_visible_in_search_dirs(skill_name, roots):
+            missing.append(skill_name)
+    return missing
+
+
+def _worker_skill_visible_in_home(skill_name: str, profile_home: Path) -> bool:
+    search_dirs: list[Path] = []
+    local_skills = profile_home / "skills"
+    if local_skills.is_dir():
+        search_dirs.append(local_skills)
+    search_dirs.extend(_profile_external_skill_dirs(profile_home))
+    return _skill_visible_in_search_dirs(skill_name, search_dirs)
+
+
+def _missing_worker_forced_skills(profile_name: str, skills: Optional[Iterable[Any]]) -> list[str]:
+    """Return forced skills that would make the child CLI abort at startup."""
+    requested: list[str] = []
+    seen: set[str] = set()
+    for raw in skills or []:
+        name = str(raw or "").strip()
+        if not name or name == "kanban-worker" or name in seen:
+            continue
+        seen.add(name)
+        requested.append(name)
+    if not requested:
+        return []
+
+    try:
+        from hermes_cli.profiles import normalize_profile_name, resolve_profile_env
+        profile_arg = normalize_profile_name(profile_name)
+        profile_home = Path(resolve_profile_env(profile_arg))
+    except Exception:
+        return []
+
+    return [
+        name for name in requested
+        if not _worker_skill_visible_in_home(name, profile_home)
+    ]
+
+
+def _block_missing_forced_skills(
+    conn: sqlite3.Connection,
+    task_id: str,
+    assignee: str,
+    missing: list[str],
+) -> bool:
+    missing_display = ", ".join(missing)
+    reason = (
+        f"forced skill(s) not visible to assignee profile '{assignee}': "
+        f"{missing_display}. Install/copy the skill into that profile or "
+        "remove it from task.skills before dispatch."
+    )
+    blocked = block_task(conn, task_id, reason=reason)
+    if blocked:
+        with write_txn(conn):
+            _append_event(
+                conn,
+                task_id,
+                "forced_skill_rejected",
+                {
+                    "reason": "missing_forced_skills",
+                    "assignee": assignee,
+                    "missing_skills": list(missing),
+                    "forced_skills": None,
+                },
+            )
+    return blocked
 
 
 def _worker_terminal_timeout_env(
@@ -5677,6 +5912,21 @@ def _default_spawn(
     from hermes_cli.profiles import normalize_profile_name
 
     profile_arg = normalize_profile_name(task.assignee)
+
+    # Defense-in-depth: double-check forced skills before spawning.
+    # The primary gate is in dispatch_once() at the ready-task loop;
+    # this catches any code path that calls _default_spawn directly
+    # (e.g. _spawn_review_worker, test stubs, manual claim completion).
+    all_forced_skills = list(task.skills or []) + (
+        ["kanban-worker"] if _kanban_worker_skill_available(None) else []
+    )
+    missing = _missing_worker_forced_skills(profile_arg, all_forced_skills)
+    if missing:
+        raise RuntimeError(
+            f"Forced skill(s) not visible under profile '{profile_arg}': "
+            f"{', '.join(missing)}. The pre-spawn gate in dispatch_once "
+            f"should have blocked this task before reaching _default_spawn."
+        )
 
     prompt = f"work kanban task {task.id}"
     env = dict(os.environ)
@@ -5816,6 +6066,24 @@ def _default_spawn(
     # handle is kept alive by the child's inheritance.  The parent's
     # reference goes out of scope and is GC'd, but the OS-level FD stays
     # open in the child until the child exits.
+    record_event_if_enabled(
+        source="kanban.dispatcher",
+        actor_profile=os.environ.get("HERMES_PROFILE") or "dispatcher",
+        target_profile=profile_arg,
+        event_type="kanban.worker.dispatched",
+        object_type="kanban_task",
+        object_id=task.id,
+        board=board,
+        status_from=task.status,
+        status_to="running",
+        summary=f"Dispatched kanban task {task.id} to {profile_arg}",
+        payload={
+            "pid": proc.pid,
+            "run_id": task.current_run_id,
+            "skills": task.skills or [],
+            "workspace": workspace,
+        },
+    )
     return proc.pid
 
 
