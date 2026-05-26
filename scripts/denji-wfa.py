@@ -13,6 +13,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import sqlite3
+import shutil
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -401,6 +402,10 @@ def main() -> int:
     by_kind = Counter(f["kind"] for f in findings)
     by_board = Counter(f["board"] for f in findings)
     by_severity = Counter(f["severity"] for f in findings)
+    live_findings = [f for f in findings if f.get("status") not in TERMINAL_STATUSES]
+    historical_findings = [f for f in findings if f.get("status") in TERMINAL_STATUSES]
+    live_by_kind = Counter(f["kind"] for f in live_findings)
+    live_by_severity = Counter(f["severity"] for f in live_findings)
 
     payload = {
         "timestamp": scan_time.isoformat(),
@@ -414,46 +419,60 @@ def main() -> int:
         "summary": {
             "task_count": sum(b.get("task_count", 0) for b in board_results),
             "finding_count": len(findings),
+            "live_finding_count": len(live_findings),
+            "historical_terminal_finding_count": len(historical_findings),
             "by_kind": dict(by_kind),
             "by_board": dict(by_board),
             "by_severity": dict(by_severity),
+            "live_by_kind": dict(live_by_kind),
+            "live_by_severity": dict(live_by_severity),
             "integrity_failure_count": len(integrity_failures),
             "scan_error_count": len(scan_errors),
         },
         "findings": findings,
     }
 
-    logfile = OUT_DIR / f"worker-failure-analysis-{scan_time.strftime('%Y-%m-%d')}.json"
+    logfile = OUT_DIR / f"worker-failure-analysis-{scan_time.strftime('%Y%m%d-%H%M%S')}.json"
     logfile.write_text(json.dumps(payload, indent=2, ensure_ascii=False, default=str), encoding="utf-8")
+    latest = OUT_DIR / "worker-failure-analysis-latest.json"
+    shutil.copy2(logfile, latest)
 
     if not findings and not integrity_failures and not scan_errors:
         print("[SILENT]")
         return 0
 
     print(f"Worker Failure Analysis · {display_now(scan_time)}")
-    print(f"DBs scanned: {len(dbs)} · tasks: {payload['summary']['task_count']} · findings: {len(findings)}")
+    print(
+        f"DBs scanned: {len(dbs)} · tasks: {payload['summary']['task_count']} · "
+        f"live findings: {len(live_findings)} · historical terminal drift: {len(historical_findings)}"
+    )
     print(f"Integrity: {'OK' if not integrity_failures else 'FAIL ' + str(len(integrity_failures))}")
-    if by_severity:
-        sev_bits = [f"{k}={v}" for k, v in sorted(by_severity.items())]
-        print("Severity: " + ", ".join(sev_bits))
+    if live_by_severity:
+        sev_bits = [f"{k}={v}" for k, v in sorted(live_by_severity.items())]
+        print("Live severity: " + ", ".join(sev_bits))
+    elif historical_findings:
+        print("Live severity: none")
+    if live_by_kind:
+        print("Live issue types: " + ", ".join(f"{k}={v}" for k, v in live_by_kind.most_common(5)))
     if by_kind:
-        print("Top issue types: " + ", ".join(f"{k}={v}" for k, v in by_kind.most_common(5)))
-    if findings:
-        print("Highest-risk examples:")
+        print("Historical issue types: " + ", ".join(f"{k}={v}" for k, v in by_kind.most_common(5)))
+    if live_findings:
+        print("Highest-risk live examples:")
         sev_order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
-        ordered = sorted(findings, key=lambda x: (sev_order.get(x["severity"], 9), x["board"], x["task_id"]))
-        selected: list[dict[str, Any]] = []
-        for fixture_id in SMOKE_FIXTURE_TASK_IDS:
-            fixture = next((f for f in ordered if f["task_id"] == fixture_id), None)
-            if fixture:
-                selected.append(fixture)
+        ordered = sorted(live_findings, key=lambda x: (sev_order.get(x["severity"], 9), x["board"], x["task_id"]))
+        seen_ids = set()
+        printed = 0
         for f in ordered:
-            if len(selected) >= 8:
-                break
-            if f not in selected:
-                selected.append(f)
-        for f in selected:
+            key = (f["board"], f["task_id"])
+            if key in seen_ids:
+                continue
+            seen_ids.add(key)
             print(f"- {f['severity'].upper()} {f['board']}:{f['task_id']} {f['kind']} · {f['status']} · {f['title'][:80]}")
+            printed += 1
+            if printed >= 8:
+                break
+    elif historical_findings:
+        print("No live task/run drift found. Historical terminal drift is retained in JSON for cleanup/audit.")
     if scan_errors:
         print("Scan warnings:")
         for b in scan_errors[:5]:
