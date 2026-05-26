@@ -105,7 +105,7 @@ def tavily_health_finding(now: datetime) -> dict | None:
 
 MEM_THRESHOLD_MB = 500
 SERVICES_WATCH_NAMES = ['hermes-gateway', 'docker', 'postgresql']
-MAX_CRON_GAP_HOURS = 3
+CRON_MISSED_GRACE_MINUTES = 10
 
 
 def memory_health_finding(now: datetime) -> dict | None:
@@ -136,62 +136,151 @@ def memory_health_finding(now: datetime) -> dict | None:
 
 
 def cron_gap_finding(now: datetime) -> dict | None:
-    """Check last_run_at freshness for critical daily crons."""
+    """Check for cron jobs whose scheduled next run is overdue.
+
+    A new cron with ``last_run_at=None`` is healthy while its first
+    ``next_run_at`` is still in the future. Alert only when the scheduler has
+    missed a due time, not merely because a job has never had a first run.
+    """
     try:
         data = json.loads(JOBS.read_text(errors='replace'), strict=False)
     except Exception:
         return None
     jobs = data.get('jobs', [])
     gaps = []
+    grace = timedelta(minutes=CRON_MISSED_GRACE_MINUTES)
     for j in jobs:
         if not j.get('enabled'):
             continue
         name = j.get('name', '?')
-        last_run = j.get('last_run_at')
         schedule = j.get('schedule', {})
         if isinstance(schedule, dict):
             expr = schedule.get('expr', '')
         else:
             expr = str(schedule)
-        # Only check daily crons (those with a HH:MM pattern, not intervals)
+        # Only inspect explicit cron expressions here; interval jobs use their
+        # own next-run cadence and are already visible in cron status.
         if not expr or '*/' in expr or 'interval' in str(schedule):
             continue
-        if not last_run:
-            gaps.append(f'`{name}` — never run')
+
+        next_run = j.get('next_run_at')
+        if not next_run:
+            if not j.get('last_run_at'):
+                gaps.append(f'`{name}` — no last_run_at or next_run_at')
             continue
         try:
-            from datetime import timezone
-            last_dt = datetime.fromisoformat(last_run)
-            age_hours = (now - last_dt).total_seconds() / 3600
-            if age_hours > MAX_CRON_GAP_HOURS:
-                gaps.append(f'`{name}` — last run {age_hours:.0f}h ago')
+            next_dt = datetime.fromisoformat(next_run)
         except Exception:
             continue
+        if now <= next_dt + grace:
+            continue
+
+        last_run = j.get('last_run_at')
+        overdue_minutes = int((now - next_dt).total_seconds() / 60)
+        if not last_run:
+            gaps.append(f'`{name}` — first run overdue by {overdue_minutes}m (next_run_at {next_run})')
+            continue
+        try:
+            last_dt = datetime.fromisoformat(last_run)
+            age_hours = (now - last_dt).total_seconds() / 3600
+            gaps.append(f'`{name}` — next run overdue by {overdue_minutes}m; last run {age_hours:.0f}h ago')
+        except Exception:
+            gaps.append(f'`{name}` — next run overdue by {overdue_minutes}m; last_run_at unreadable')
     if gaps:
         return {
-            'title': f'{len(gaps)} cron(s) missed schedule',
-            'body': 'Daily cron jobs that have not run recently:\\n' + '\\n'.join(gaps[:6]),
+            'title': f'{len(gaps)} cron(s) overdue',
+            'body': 'Cron jobs whose next_run_at is overdue beyond the scheduler grace window:\\n' + '\\n'.join(gaps[:6]),
             'assignee': 'wesker', 'priority': 'P2',
             'key': f'audit-cron-gap-{now.date()}',
         }
     return None
 
 
+def _enumerate_gateway_units() -> dict[str, int | None]:
+    """Return {unit_name: MainPID, ...} for every hermes-gateway*.service unit."""
+    code, out = run(['systemctl', 'list-unit-files', '--type=service', '--all'], timeout=15)
+    if code != 0:
+        return {}
+    units = {}
+    for line in out.splitlines():
+        parts = line.split()
+        if not parts or not parts[0].startswith('hermes-gateway'):
+            continue
+        name = parts[0].removesuffix('.service')
+        code2, pid_out = run(['systemctl', 'show', '-p', 'MainPID', '--value', f'{name}.service'], timeout=10)
+        pid = int(pid_out.strip()) if code2 == 0 and pid_out.strip().isdigit() else None
+        units[name] = pid if pid and pid > 0 else None
+    return units
+
+
 def duplicate_gateway_finding(now: datetime) -> dict | None:
-    """Check for duplicate gateway processes (one main PID + its workers is normal)."""
+    """Check for duplicate or orphan gateway processes using systemd unit enumeration.
+
+    Every intentional gateway should be tracked by a hermes-gateway*.service
+    systemd unit. Orphan gateways (running outside systemd) or multiple PIDs
+    within a single unit are the real anomalies.
+    """
+    units = _enumerate_gateway_units()
+    unit_pids = {pid for pid in units.values() if pid is not None}
+
+    # Live gateway PIDs via pgrep — verify each candidate is actually a python
+    # gateway process (not a subshell/hyphen-echo artifact from pgrep itself).
     code, out = run(['pgrep', '-f', 'hermes_cli.main gateway'], timeout=10)
     if code != 0:
+        live_pids: set[str] = set()
+    else:
+        raw = [p.strip() for p in out.splitlines() if p.strip()]
+        live_pids = set()
+        for pid in raw:
+            code2, args_out = run(['ps', '-p', pid, '-o', 'args=', '--no-headers'], timeout=10)
+            args = args_out.strip()
+            if 'python' in args and 'hermes_cli.main' in args and 'gateway' in args:
+                live_pids.add(pid)
+
+    # Normalise to str for cross-type set comparison.
+    unit_pids_str: set[str] = {str(p) for p in unit_pids}
+
+    # Orphans: running gateway PIDs not tracked by any systemd unit.
+    orphans = live_pids - unit_pids_str
+
+    # Multi-PID units: systemd units whose MainPID isn't in the live set.
+    # Only flag the primary hermes-gateway unit — profile-specific units
+    # (hermes-gateway-*) have MainPID=None when idle, which is intentional.
+    unhealthy_units = []
+    for name, main_pid in units.items():
+        if main_pid is not None and str(main_pid) not in live_pids:
+            unhealthy_units.append(f'{name}: MainPID {main_pid} not in live gateway set')
+    if units.get('hermes-gateway') is None:
+        unhealthy_units.append('hermes-gateway: no MainPID (service not running)')
+
+    findings = []
+    if orphans:
+        findings.append(
+            f'`{len(orphans)}` gateway PIDs not owned by any hermes-gateway*.service: '
+        )
+    if unhealthy_units:
+        findings.extend(unhealthy_units)
+
+    if not findings and not orphans:
         return None
-    pids = [p.strip() for p in out.splitlines() if p.strip()]
-    # Normal: 12 gateway instances for 8 bots + workers. More than 16 is suspicious.
-    if len(pids) > 16:
-        return {
-            'title': f'Potential duplicate gateway: {len(pids)} PIDs',
-            'body': f'`pgrep -f hermes_cli.main gateway` returned {len(pids)} PIDs. Expected ~12 for 8-bot setup. Check `ps aux | grep gateway`.',
-            'assignee': 'wesker', 'priority': 'P2',
-            'key': f'audit-duplicate-gateway-{now.date()}',
-        }
-    return None
+
+    lines = []
+    if orphans:
+        pid_list = ', '.join(sorted(orphans))
+        lines.append(f'Orphan gateway PIDs: `{pid_list}`. Not tracked by any systemd `hermes-gateway*.service` unit.')
+    if unhealthy_units:
+        lines.append('Unhealthy gateway units:')
+        lines.extend(f'  - {u}' for u in unhealthy_units)
+    if unit_pids:
+        lines.append(f'Known systemd gateway units: `{len(unit_pids)}` active MainPIDs.')
+    lines.append(f'`systemctl list-unit-files | grep hermes-gateway` shows `{len(units)}` total units.')
+
+    return {
+        'title': f'Gateway PID anomaly: {len(orphans)} orphan(s), {len(unhealthy_units)} unhealthy unit(s)',
+        'body': '\\n'.join(lines),
+        'assignee': 'wesker', 'priority': 'P2',
+        'key': f'audit-gateway-anomaly-{now.date()}',
+    }
 
 
 def main() -> int:
