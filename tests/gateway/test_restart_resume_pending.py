@@ -43,6 +43,7 @@ from gateway.run import (
 )
 from gateway.session import SessionEntry, SessionSource, SessionStore
 from tests.gateway.restart_test_helpers import (
+    RestartTestAdapter,
     make_restart_runner,
     make_restart_source,
 )
@@ -1072,6 +1073,11 @@ async def test_restart_banner_uses_try_to_resume_wording():
     still escalate to suspended)."""
     runner, adapter = make_restart_runner()
     runner._restart_requested = True
+    runner.config.platforms[Platform.TELEGRAM].home_channel = HomeChannel(
+        platform=Platform.TELEGRAM,
+        chat_id="home-42",
+        name="Ops Home",
+    )
     runner._running_agents["agent:main:telegram:dm:999"] = MagicMock()
 
     await runner._notify_active_sessions_of_shutdown()
@@ -1117,31 +1123,32 @@ async def test_restart_home_channel_notification_dedupes_active_chat():
 
 
 @pytest.mark.asyncio
-async def test_restart_home_channel_notification_not_deduped_across_threads():
+async def test_restart_home_channel_notification_not_deduped_across_platforms():
+    """Home channel notifications are sent per-platform, not cross-platform deduped."""
     runner, adapter = make_restart_runner()
     runner._restart_requested = True
-    session_key = "agent:main:telegram:group:999"
-    runner.session_store._entries[session_key] = MagicMock(
-        origin=SessionSource(
-            platform=Platform.TELEGRAM,
-            chat_id="999",
-            chat_type="group",
-            user_id="u1",
-            thread_id="topic-7",
-        )
-    )
-    runner._running_agents[session_key] = MagicMock()
     runner.config.platforms[Platform.TELEGRAM].home_channel = HomeChannel(
         platform=Platform.TELEGRAM,
         chat_id="999",
         name="Ops Home",
     )
+    # A second adapters for a different platform verifies per-platform sending
+    adapter2 = RestartTestAdapter()
+    runner.adapters[Platform.DISCORD] = adapter2
+    runner.config.platforms[Platform.DISCORD] = PlatformConfig(
+        enabled=True, token="***",
+        home_channel=HomeChannel(
+            platform=Platform.DISCORD,
+            chat_id="1506021205797507265",
+            name="Operator Home",
+        ),
+    )
 
     await runner._notify_active_sessions_of_shutdown()
 
-    assert len(adapter.sent) == 2
-    assert adapter.sent_calls[0][2] == {"thread_id": "topic-7"}
-    assert adapter.sent_calls[1][2] is None
+    # One per platform home channel
+    assert len(adapter.sent) == 1
+    assert len(adapter2.sent) == 1
 
 
 @pytest.mark.asyncio

@@ -209,8 +209,12 @@ async def test_launch_detached_restart_command_uses_setsid(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_shutdown_notification_sent_to_active_sessions():
-    """Active sessions receive a notification when the gateway starts shutting down."""
+    """Home channel receives a notification when the gateway starts shutting down."""
     runner, adapter = make_restart_runner()
+    from gateway.config import HomeChannel, Platform
+    runner.config.platforms[Platform.TELEGRAM].home_channel = HomeChannel(
+        platform=Platform.TELEGRAM, chat_id="home-42", name="Home",
+    )
     source = make_restart_source(chat_id="999", chat_type="dm")
     session_key = f"agent:main:telegram:dm:999"
     runner._running_agents[session_key] = MagicMock()
@@ -226,6 +230,10 @@ async def test_shutdown_notification_sent_to_active_sessions():
 async def test_shutdown_notification_says_restarting_when_restart_requested():
     """When _restart_requested is True, the message says 'restarting' and mentions /retry."""
     runner, adapter = make_restart_runner()
+    from gateway.config import HomeChannel, Platform
+    runner.config.platforms[Platform.TELEGRAM].home_channel = HomeChannel(
+        platform=Platform.TELEGRAM, chat_id="home-42", name="Home",
+    )
     runner._restart_requested = True
     session_key = "agent:main:telegram:dm:999"
     runner._running_agents[session_key] = MagicMock()
@@ -238,9 +246,13 @@ async def test_shutdown_notification_says_restarting_when_restart_requested():
 
 
 @pytest.mark.asyncio
-async def test_shutdown_notification_deduplicates_per_chat():
-    """Multiple sessions in the same chat only get one notification."""
+async def test_shutdown_notification_deduplicates_home_channel():
+    """Multiple sessions only trigger one notification — routed to the home channel."""
     runner, adapter = make_restart_runner()
+    from gateway.config import HomeChannel, Platform
+    runner.config.platforms[Platform.TELEGRAM].home_channel = HomeChannel(
+        platform=Platform.TELEGRAM, chat_id="home-42", name="Home",
+    )
     # Two sessions (different users) in the same chat
     runner._running_agents["agent:main:telegram:group:chat1:u1"] = MagicMock()
     runner._running_agents["agent:main:telegram:group:chat1:u2"] = MagicMock()
@@ -251,8 +263,8 @@ async def test_shutdown_notification_deduplicates_per_chat():
 
 
 @pytest.mark.asyncio
-async def test_shutdown_notification_skipped_when_no_active_agents():
-    """No notification is sent when there are no active agents."""
+async def test_shutdown_notification_skipped_when_no_home_channel():
+    """No notification is sent when no home channel is configured."""
     runner, adapter = make_restart_runner()
 
     await runner._notify_active_sessions_of_shutdown()
@@ -320,9 +332,13 @@ async def test_shutdown_notification_home_channel_suppressed_when_flag_disabled(
 
 
 @pytest.mark.asyncio
-async def test_shutdown_notification_uses_persisted_origin_for_colon_ids():
-    """Shutdown notifications should route from persisted origin, not reparsed keys."""
+async def test_shutdown_notification_sends_to_home_channel():
+    """Shutdown notifications route to home channel, not active session origin."""
     runner, adapter = make_restart_runner()
+    from gateway.config import HomeChannel, Platform
+    runner.config.platforms[Platform.TELEGRAM].home_channel = HomeChannel(
+        platform=Platform.TELEGRAM, chat_id="home-42", name="Home",
+    )
     adapter.send = AsyncMock()
     source = make_restart_source(chat_id="!room123:example.org", chat_type="group")
     source.platform = gateway_run.Platform.MATRIX
@@ -339,9 +355,10 @@ async def test_shutdown_notification_uses_persisted_origin_for_colon_ids():
             chat_type=source.chat_type,
         )
     }
-    runner.adapters = {gateway_run.Platform.MATRIX: adapter}
+    runner.adapters = {gateway_run.Platform.TELEGRAM: adapter}
 
     await runner._notify_active_sessions_of_shutdown()
 
+    # Notification goes to home channel, not the active session's origin
     assert adapter.send.await_count == 1
-    assert adapter.send.await_args.args[0] == "!room123:example.org"
+    assert adapter.send.await_args.args[0] == "home-42"

@@ -606,8 +606,13 @@ async def test_send_restart_notification_logs_info_on_sendresult_success(
 
 
 @pytest.mark.asyncio
-async def test_shutdown_notifications_use_cached_live_thread_source_when_origin_missing():
+async def test_shutdown_notifications_send_to_home_channel_when_origin_missing():
+    """Shutdown notifications route to home channel, not cached session source."""
+    from gateway.config import HomeChannel, Platform
     runner, adapter = make_restart_runner()
+    runner.config.platforms[Platform.TELEGRAM].home_channel = HomeChannel(
+        platform=Platform.TELEGRAM, chat_id="home-42", name="Home",
+    )
     source = make_restart_source(chat_id="parent-42", chat_type="group", thread_id="topic-7")
     session_key = build_session_key(source)
 
@@ -619,7 +624,6 @@ async def test_shutdown_notifications_use_cached_live_thread_source_when_origin_
     await runner._notify_active_sessions_of_shutdown()
 
     adapter.send.assert_awaited_once_with(
-        "parent-42",
+        "home-42",
         "⚠️ Gateway shutting down — Your current task will be interrupted.",
-        metadata={"thread_id": "topic-7"},
     )

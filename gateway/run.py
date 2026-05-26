@@ -3356,14 +3356,12 @@ class GatewayRunner:
                 logger.debug("Failed interrupting agent during shutdown: %s", e)
 
     async def _notify_active_sessions_of_shutdown(self) -> None:
-        """Send shutdown/restart notifications to active chats and home channels.
+        """Send shutdown/restart notifications only to configured home channels.
 
-        Called at the very start of stop() — adapters are still connected so
-        messages can be delivered. Best-effort: individual send failures are
-        logged and swallowed so they never block the shutdown sequence.
+        Never notify active session channels. In multi-Discord deployments that
+        creates cross-server/channel cascades during systemd restarts. Discord
+        lifecycle pings are further hard-limited to Sahil's operator channels.
         """
-        active = self._snapshot_running_agents()
-
         action = "restarting" if self._restart_requested else "shutting down"
         hint = (
             "Your current task will be interrupted. "
@@ -3373,89 +3371,13 @@ class GatewayRunner:
         )
         msg = f"⚠️ Gateway {action} — {hint}"
 
+        discord_operator_channels = {"1506021205797507265"}
         notified: set[tuple[str, str, Optional[str]]] = set()
-        for session_key in active:
-            source = None
-            try:
-                if getattr(self, "session_store", None) is not None:
-                    self.session_store._ensure_loaded()
-                    entry = self.session_store._entries.get(session_key)
-                    source = getattr(entry, "origin", None) if entry else None
-            except Exception as e:
-                logger.debug(
-                    "Failed to load session origin for shutdown notification %s: %s",
-                    session_key,
-                    e,
-                )
-
-            if source is None:
-                source = self._get_cached_session_source(session_key)
-
-            if source is not None:
-                platform_str = source.platform.value
-                chat_id = str(source.chat_id)
-                thread_id = source.thread_id
-            else:
-                # Fall back to parsing the session key when no persisted
-                # origin is available (legacy sessions/tests).
-                _parsed = _parse_session_key(session_key)
-                if not _parsed:
-                    continue
-                platform_str = _parsed["platform"]
-                chat_id = _parsed["chat_id"]
-                thread_id = _parsed.get("thread_id")
-
-            # Deduplicate only identical delivery targets. Thread/topic-aware
-            # platforms can share a parent chat while still routing to distinct
-            # destinations via metadata.
-            dedup_key = (platform_str, chat_id, str(thread_id) if thread_id else None)
-            if dedup_key in notified:
-                continue
-
-            try:
-                platform = Platform(platform_str)
-                adapter = self.adapters.get(platform)
-                if not adapter:
-                    continue
-
-                platform_cfg = self.config.platforms.get(platform)
-                if platform_cfg is not None and not platform_cfg.gateway_restart_notification:
-                    logger.info(
-                        "Shutdown notification suppressed for active session: %s has gateway_restart_notification=false",
-                        platform_str,
-                    )
-                    continue
-
-                # Include thread_id if present so the message lands in the
-                # correct forum topic / thread.
-                metadata = {"thread_id": thread_id} if thread_id else None
-
-                result = await adapter.send(chat_id, msg, metadata=metadata)
-                if result is not None and getattr(result, "success", True) is False:
-                    logger.debug(
-                        "Failed to send shutdown notification to %s:%s: %s",
-                        platform_str,
-                        chat_id,
-                        getattr(result, "error", "send returned success=False"),
-                    )
-                    continue
-
-                notified.add(dedup_key)
-                logger.info(
-                    "Sent shutdown notification to active chat %s:%s",
-                    platform_str, chat_id,
-                )
-            except Exception as e:
-                logger.debug(
-                    "Failed to send shutdown notification to %s:%s: %s",
-                    platform_str, chat_id, e,
-                )
 
         # Snapshot adapters up front: adapter.send() can hit a fatal error
         # path that pops the adapter from self.adapters (see _handle_fatal
         # elsewhere), which would otherwise trigger
-        # ``RuntimeError: dictionary changed size during iteration`` —
-        # observed in a user report during gateway shutdown.
+        # ``RuntimeError: dictionary changed size during iteration``.
         for platform, adapter in list(self.adapters.items()):
             home = self.config.get_home_channel(platform)
             if not home or not home.chat_id:
@@ -3469,16 +3391,24 @@ class GatewayRunner:
                 )
                 continue
 
-            dedup_key = (platform.value, str(home.chat_id), str(home.thread_id) if home.thread_id else None)
+            chat_id = str(home.chat_id)
+            if platform == Platform.DISCORD and chat_id not in discord_operator_channels:
+                logger.info(
+                    "Shutdown notification suppressed for Discord home channel %s; not an operator channel",
+                    chat_id,
+                )
+                continue
+
+            dedup_key = (platform.value, chat_id, str(home.thread_id) if home.thread_id else None)
             if dedup_key in notified:
                 continue
 
             try:
                 metadata = {"thread_id": home.thread_id} if home.thread_id else None
                 if metadata:
-                    result = await adapter.send(str(home.chat_id), msg, metadata=metadata)
+                    result = await adapter.send(chat_id, msg, metadata=metadata)
                 else:
-                    result = await adapter.send(str(home.chat_id), msg)
+                    result = await adapter.send(chat_id, msg)
                 if result is not None and getattr(result, "success", True) is False:
                     logger.debug(
                         "Failed to send shutdown notification to home channel %s:%s: %s",
@@ -18432,16 +18362,37 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
         return True
     
     # Start background cron ticker so scheduled jobs fire automatically.
-    # Pass the event loop so cron delivery can use live adapters (E2EE support).
+    # Specialist/profile-isolated gateways can disable this with either:
+    # - HERMES_CRON_TICKER_DISABLED=1 in the service environment, or
+    # - cron.ticker_enabled: false in the active profile config.
+    # Root Kensei remains the scheduler of record.
     cron_stop = threading.Event()
-    cron_thread = threading.Thread(
-        target=_start_cron_ticker,
-        args=(cron_stop,),
-        kwargs={"adapters": runner.adapters, "loop": asyncio.get_running_loop()},
-        daemon=True,
-        name="cron-ticker",
-    )
-    cron_thread.start()
+    cron_thread = None
+    cron_ticker_disabled = os.environ.get("HERMES_CRON_TICKER_DISABLED", "").strip().lower() in {
+        "1", "true", "yes", "on"
+    }
+    if not cron_ticker_disabled:
+        try:
+            from hermes_cli.config import load_config as _load_config
+            _cfg = _load_config()
+            _cron_cfg = _cfg.get("cron", {}) if isinstance(_cfg, dict) else {}
+            if _cron_cfg.get("ticker_enabled") is False:
+                cron_ticker_disabled = True
+        except Exception as exc:
+            logger.debug("Cron ticker config check failed; defaulting enabled: %s", exc)
+
+    if cron_ticker_disabled:
+        logger.info("Cron ticker disabled for this gateway")
+    else:
+        # Pass the event loop so cron delivery can use live adapters (E2EE support).
+        cron_thread = threading.Thread(
+            target=_start_cron_ticker,
+            args=(cron_stop,),
+            kwargs={"adapters": runner.adapters, "loop": asyncio.get_running_loop()},
+            daemon=True,
+            name="cron-ticker",
+        )
+        cron_thread.start()
     
     # Wait for shutdown
     await runner.wait_for_shutdown()
@@ -18452,8 +18403,9 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
         return False
     
     # Stop cron ticker cleanly
-    cron_stop.set()
-    cron_thread.join(timeout=5)
+    if cron_thread is not None:
+        cron_stop.set()
+        cron_thread.join(timeout=5)
 
     # Close MCP server connections
     try:

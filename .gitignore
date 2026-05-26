@@ -46,8 +46,15 @@ postiz/patch-and-start.local.sh
 
 # Test artefacts
 .pytest_cache/
+.pytest-cache/
 .coverage
 htmlcov/
+
+# Generated frontend/static build output
+hermes_cli/web_dist/
+
+# Runtime state snapshots
+content_engine/data/activity_state.json
 
 .venv/
 *.egg-info/
