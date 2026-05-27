@@ -19,7 +19,7 @@ import subprocess
 import tempfile
 import threading
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 from typing import Callable, Dict, List, Optional, Any, Tuple
 
 logger = logging.getLogger(__name__)
@@ -584,6 +584,9 @@ class DiscordAdapter(BasePlatformAdapter):
         self._allowed_user_ids: set = set()  # For button approval authorization
         self._allowed_role_ids: set = set()  # For DISCORD_ALLOWED_ROLES filtering
         self.gateway_runner = None  # Set by gateway/run.py for cross-platform delivery
+        # Per-channel rolling log of author kind (bot vs human) for the
+        # bot-to-bot loop-guard. channel_id -> deque[bool].
+        self._channel_author_log: Dict[int, deque] = {}
         # Voice channel state (per-guild)
         self._voice_clients: Dict[int, Any] = {}  # guild_id -> VoiceClient
         self._voice_locks: Dict[int, asyncio.Lock] = {}  # guild_id -> serialize join/leave
@@ -774,6 +777,11 @@ class DiscordAdapter(BasePlatformAdapter):
                 if message.type not in {discord.MessageType.default, discord.MessageType.reply}:
                     return
 
+                # Record author kind for the bot loop-guard before any branching
+                # so a human turn always resets the chain, even for messages this
+                # bot ultimately ignores (e.g. addressed to another agent).
+                adapter_self._note_channel_author(message)
+
                 # Bot message filtering (DISCORD_ALLOW_BOTS):
                 #   "none"     — ignore all other bots (default)
                 #   "mentions" — accept bot messages only when they @mention us
@@ -790,6 +798,16 @@ class DiscordAdapter(BasePlatformAdapter):
                             return
                     # "all" falls through; bot is permitted — skip the
                     # human-user allowlist below (bots aren't in it).
+                    # Loop-guard: stop replying once a bot-only chain runs long
+                    # enough that no human has spoken — prevents two bots
+                    # @mentioning each other indefinitely.
+                    if adapter_self._bot_loop_would_exceed(message):
+                        logger.debug(
+                            "[%s] bot loop-guard tripped in channel %s; staying silent",
+                            adapter_self.name,
+                            getattr(message.channel, "id", "?"),
+                        )
+                        return
                 else:
                     # Non-bot: enforce the configured user/role allowlists.
                     # Pass guild + is_dm so role checks are scoped to the
@@ -3619,6 +3637,65 @@ class DiscordAdapter(BasePlatformAdapter):
             return bool(configured)
         return os.getenv("DISCORD_REQUIRE_MENTION", "true").lower() not in {"false", "0", "no", "off"}
 
+    def _discord_max_bot_hops(self) -> int:
+        """Max consecutive bot messages allowed before this bot stops replying.
+
+        Guards against two bots @mentioning each other forever in a shared
+        channel. 0 disables the guard.
+        """
+        configured = self.config.extra.get("max_bot_hops")
+        if configured is None:
+            configured = os.getenv("DISCORD_MAX_BOT_HOPS")
+        if configured is None or configured == "":
+            return 6
+        try:
+            value = int(configured)
+        except (TypeError, ValueError):
+            logger.warning("[Discord] Invalid max_bot_hops value %r, falling back to 6", configured)
+            return 6
+        return max(0, value)
+
+    def _note_channel_author(self, message) -> None:
+        """Record whether the latest channel message came from a bot.
+
+        Feeds the bot loop-guard from an in-process, per-channel log rather
+        than a Discord REST history fetch on every bot message. Each gateway
+        receives every message in channels it can see, so this log reflects the
+        true author sequence without a network round-trip or shared state.
+        Called once per accepted message (after the RESUME-dedup check) for
+        both humans and bots so a human turn always resets the chain.
+        """
+        channel_id = getattr(getattr(message, "channel", None), "id", None)
+        if channel_id is None:
+            return
+        log = self._channel_author_log.get(channel_id)
+        if log is None:
+            log = deque(maxlen=64)
+            self._channel_author_log[channel_id] = log
+        log.append(bool(getattr(message.author, "bot", False)))
+
+    def _bot_loop_would_exceed(self, message) -> bool:
+        """True when this (already-recorded) bot message extends a bot-only chain past the cap.
+
+        Counts consecutive trailing bot messages in the channel log, including
+        the current one. A human message breaks the chain.
+        """
+        max_hops = self._discord_max_bot_hops()
+        if max_hops <= 0:
+            return False
+        channel_id = getattr(getattr(message, "channel", None), "id", None)
+        log = self._channel_author_log.get(channel_id)
+        if not log:
+            return False
+        consecutive = 0
+        for is_bot in reversed(log):
+            if not is_bot:
+                break
+            consecutive += 1
+            if consecutive > max_hops:
+                return True
+        return False
+
     def _discord_allow_any_attachment(self) -> bool:
         """Return whether Discord attachments bypass the SUPPORTED_DOCUMENT_TYPES allowlist.
 
@@ -6167,6 +6244,24 @@ def _apply_yaml_config(yaml_cfg: dict, discord_cfg: dict) -> dict | None:
     if _discord_rtm is not None and not os.getenv("DISCORD_REPLY_TO_MODE"):
         _rtm_str = "off" if _discord_rtm is False else str(_discord_rtm).lower()
         os.environ["DISCORD_REPLY_TO_MODE"] = _rtm_str
+    # allow_bots: whether the bot reacts to other bots (none | mentions | all).
+    # Top-level preferred, falls back to extra.allow_bots. Without this the
+    # adapter's DISCORD_ALLOW_BOTS read defaults to "none" and bot-to-bot
+    # co-working in shared channels silently never fires.
+    _discord_allow_bots = (
+        discord_cfg["allow_bots"] if "allow_bots" in discord_cfg
+        else _discord_extra.get("allow_bots")
+    )
+    if _discord_allow_bots is not None and not os.getenv("DISCORD_ALLOW_BOTS"):
+        os.environ["DISCORD_ALLOW_BOTS"] = str(_discord_allow_bots).strip().lower()
+    # max_bot_hops: cap on consecutive bot messages before the loop-guard
+    # stays silent. Top-level preferred, falls back to extra.max_bot_hops.
+    _discord_max_hops = (
+        discord_cfg["max_bot_hops"] if "max_bot_hops" in discord_cfg
+        else _discord_extra.get("max_bot_hops")
+    )
+    if _discord_max_hops is not None and not os.getenv("DISCORD_MAX_BOT_HOPS"):
+        os.environ["DISCORD_MAX_BOT_HOPS"] = str(_discord_max_hops).strip()
     return None  # all settings flow through env; nothing to merge into extras
 
 
