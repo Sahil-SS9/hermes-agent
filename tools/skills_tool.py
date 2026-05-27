@@ -78,6 +78,7 @@ from typing import Dict, Any, List, Optional, Set, Tuple
 
 from tools.registry import registry, tool_error
 from hermes_cli.config import cfg_get
+from hermes_cli.profile_activity_ledger import record_event_if_enabled
 from utils import env_var_enabled
 from agent.skill_utils import EXCLUDED_SKILL_DIRS as _EXCLUDED_SKILL_DIRS
 
@@ -1432,6 +1433,23 @@ def skill_view(
             result["compatibility"] = frontmatter["compatibility"]
         if isinstance(metadata, dict):
             result["metadata"] = metadata
+
+        record_event_if_enabled(
+            source="skill.loader",
+            actor_profile=os.environ.get("HERMES_PROFILE"),
+            target_profile=os.environ.get("HERMES_PROFILE"),
+            event_type="skill.loaded",
+            object_type="skill",
+            object_id=skill_name,
+            summary=f"Loaded skill {skill_name}",
+            payload={
+                "requested_name": name,
+                "file_path": file_path,
+                "skill_dir": str(skill_dir) if skill_dir else None,
+                "preprocess": preprocess,
+                "task_id": task_id,
+            },
+        )
 
         return json.dumps(result, ensure_ascii=False)
 

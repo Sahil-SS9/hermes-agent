@@ -436,6 +436,82 @@ def _resolve_stdio_command(command: str, env: dict) -> tuple[str, dict]:
 
 
 # ---------------------------------------------------------------------------
+# STDIO command allowlist validation
+# ---------------------------------------------------------------------------
+
+# Commands that MCP server configs are allowed to spawn via stdio transport.
+# This prevents accidental or malicious execution of arbitrary binaries by
+# restricting the server config to a known-safe set.
+_STDIO_ALLOWLIST = frozenset({
+    "gitnexus",
+    "node",
+    "python",
+    "python3",
+    "uv",
+    "uvx",
+    "poetry",
+    "npx",
+    "docker",
+    "bash",
+})
+
+# Shell metacharacters that are never allowed in STDIO args.  These would
+# allow command injection via an MCP server config that embeds shell syntax
+# in what should be literal positional arguments.
+_STDIO_ARG_FORBIDDEN = re.compile(r"[;&|`$()\n#]|\\n|\\$(?!\\{)")
+
+
+def _validate_stdio_mcp_config(server_name: str, command: str, args: list) -> None:
+    """Validate that *command* is in the allowlist and *args* contain no shell
+    metacharacters.
+
+    Raises ``ValueError`` with an actionable message when validation fails.
+    Logs a warning on each rejection so operators can monitor config issues.
+
+    Parameters
+    ----------
+    server_name:
+        Human-readable server label (for error messages and logs).
+    command:
+        The resolved or bare command string from the MCP config.
+    args:
+        The list of positional arguments for the command.
+    """
+    # Resolve to bare basename — /usr/bin/node → node, npx → npx
+    basename = os.path.basename(os.path.normpath(command.strip()))
+
+    if basename not in _STDIO_ALLOWLIST:
+        logger.warning(
+            "MCP server '%s': command '%s' (basename '%s') is not in the "
+            "STDIO allowlist. Allowed: %s",
+            server_name, command, basename,
+            ", ".join(sorted(_STDIO_ALLOWLIST)),
+        )
+        raise ValueError(
+            f"MCP server '{server_name}': command '{basename}' is not "
+            f"allowed. Permitted commands: "
+            f"{', '.join(sorted(_STDIO_ALLOWLIST))}. "
+            f"If you need to add a new command, contact the ops team."
+        )
+
+    # Check each arg for shell metacharacters
+    for i, arg in enumerate(args):
+        match = _STDIO_ARG_FORBIDDEN.search(arg)
+        if match:
+            bad_char = match.group()
+            logger.warning(
+                "MCP server '%s': arg[%d] contains forbidden shell "
+                "metacharacter %r in %r",
+                server_name, i, bad_char, arg,
+            )
+            raise ValueError(
+                f"MCP server '{server_name}': argument {i} ({arg!r}) "
+                f"contains forbidden character {bad_char!r}. "
+                f"Shell metacharacters are not allowed in MCP server args."
+            )
+
+
+# ---------------------------------------------------------------------------
 # MCP ImageContent block → Hermes MEDIA tag
 # ---------------------------------------------------------------------------
 
@@ -1275,6 +1351,9 @@ class MCPServerTask:
 
         safe_env = _build_safe_env(user_env)
         command, safe_env = _resolve_stdio_command(command, safe_env)
+
+        # Validate against STDIO command allowlist before spawning
+        _validate_stdio_mcp_config(self.name, command, args)
 
         # Check package against OSV malware database before spawning
         from tools.osv_check import check_package_for_malware

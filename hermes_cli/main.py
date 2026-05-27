@@ -6205,6 +6205,14 @@ def cmd_doctor(args):
     run_doctor(args)
 
 
+def cmd_validate_config(args):
+    """Run all config validations and exit non-zero on warnings."""
+    from hermes_cli.validate_config import run_validate_config
+
+    code = run_validate_config(args)
+    sys.exit(code)
+
+
 def cmd_security(args):
     """Dispatch `hermes security <subcmd>`."""
     sub = getattr(args, "security_command", None)
@@ -12083,6 +12091,19 @@ def main():
         ),
     )
     doctor_parser.set_defaults(func=cmd_doctor)
+
+    # =========================================================================
+    # validate-config command — run config validations
+    # =========================================================================
+    validate_parser = subparsers.add_parser(
+        "validate-config",
+        help="Run all config validations and exit non-zero on warnings",
+        description=(
+            "Scans config.yaml for common misconfigurations including "
+            "auxiliary tasks with empty base_url and 'auto' provider."
+        ),
+    )
+    validate_parser.set_defaults(func=cmd_validate_config)
 
     # =========================================================================
     # security command — on-demand supply-chain audit

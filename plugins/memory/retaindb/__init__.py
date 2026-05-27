@@ -247,18 +247,18 @@ class _Client:
             return self.request("POST", "/v1/memory", json_body={
                 "project": self.project, "content": content, "memory_type": memory_type,
                 "user_id": user_id, "session_id": session_id, "importance": importance, "write_mode": "sync",
-            }, timeout=5.0)
+            }, timeout=15.0)
         except Exception:
             return self.request("POST", "/v1/memories", json_body={
                 "project": self.project, "content": content, "memory_type": memory_type,
                 "user_id": user_id, "session_id": session_id, "importance": importance,
-            }, timeout=5.0)
+            }, timeout=15.0)
 
     def delete_memory(self, memory_id: str) -> dict:
         try:
-            return self.request("DELETE", f"/v1/memory/{quote(memory_id, safe='')}", timeout=5.0)
+            return self.request("DELETE", f"/v1/memory/{quote(memory_id, safe='')}", timeout=15.0)
         except Exception:
-            return self.request("DELETE", f"/v1/memories/{quote(memory_id, safe='')}", timeout=5.0)
+            return self.request("DELETE", f"/v1/memories/{quote(memory_id, safe='')}", timeout=15.0)
 
     def ingest_session(self, user_id: str, session_id: str, messages: list, timeout: float = 15.0) -> dict:
         return self.request("POST", "/v1/memory/ingest/session", json_body={

@@ -3445,7 +3445,19 @@ def block_task(
                 summary=reason,
             )
         _append_event(conn, task_id, "blocked", {"reason": reason}, run_id=run_id)
-        return True
+    task = get_task(conn, task_id)
+    record_event_if_enabled(
+        source="kanban.db",
+        actor_profile=os.environ.get("HERMES_PROFILE"),
+        target_profile=task.assignee if task else None,
+        event_type="kanban.task.blocked",
+        object_type="kanban_task",
+        object_id=task_id,
+        status_to="blocked",
+        summary=reason or f"Blocked kanban task {task_id}",
+        payload={"reason": reason, "run_id": run_id},
+    )
+    return True
 
 
 
@@ -4146,6 +4158,10 @@ class DispatchResult:
     Reasons: ``"blocker_auth"`` (quota/auth error — also auto-blocked),
     ``"recent_success"`` (completed run within guard window),
     ``"active_pr"`` (GitHub PR URL in a recent comment)."""
+    dispatcher_rejected: list[str] = field(default_factory=list)
+    """Task ids rejected before claim/spawn because dispatcher-visible
+    invariants failed, for example forced skills missing from the target
+    profile's skill search path."""
 
 
 # Bounded registry of recently-reaped worker child exits, populated by the
@@ -5289,6 +5305,23 @@ def dispatch_once(
             # of human-pulled work.
             result.skipped_nonspawnable.append(row["id"])
             continue
+        ready_task = get_task(conn, row["id"])
+        forced_skills = list(ready_task.skills or []) if ready_task else []
+        missing_forced_skills = _missing_forced_skills_for_profile(
+            row["assignee"], forced_skills,
+        )
+        if missing_forced_skills:
+            result.dispatcher_rejected.append(row["id"])
+            if not dry_run:
+                _reject_missing_forced_skills(
+                    conn,
+                    row["id"],
+                    assignee=row["assignee"],
+                    forced_skills=forced_skills,
+                    missing_skills=missing_forced_skills,
+                    board=board,
+                )
+            continue
         # Respawn guard: refuse to re-spawn when useful work is already
         # in-flight/recent, or when the last failure is a deterministic
         # blocker (quota / auth). The guard defers the spawn this tick so
@@ -5383,7 +5416,7 @@ def dispatch_once(
     # against max_spawn alongside ready tasks, so the total number of
     # running workers stays bounded.
     review_rows = conn.execute(
-        "SELECT id, assignee FROM tasks "
+        "SELECT id, assignee, skills FROM tasks "
         "WHERE status = 'review' AND claim_lock IS NULL "
         "ORDER BY priority DESC, created_at ASC"
     ).fetchall()

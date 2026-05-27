@@ -3059,6 +3059,63 @@ def test_default_spawn_dedupes_kanban_worker_from_task_skills(kanban_home, monke
     )
 
 
+def test_dispatch_rejects_invisible_forced_skill_before_spawn(kanban_home):
+    """Regression fixture for t_d05cdaac: invisible forced skill blocks pre-spawn."""
+    profile_home = kanban_home / "profiles" / "orchestrator"
+    visible_skill = profile_home / "skills" / "devops" / "kanban-orchestrator"
+    visible_skill.mkdir(parents=True)
+    (visible_skill / "SKILL.md").write_text(
+        "---\nname: kanban-orchestrator\ndescription: visible\n---\n\n# Visible\n",
+        encoding="utf-8",
+    )
+
+    spawn_calls = []
+
+    def fail_if_spawned(task, workspace):
+        spawn_calls.append((task.id, workspace))
+        raise AssertionError("dispatcher spawned despite invisible forced skill")
+
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(
+            conn,
+            title="t_d05cdaac fixture",
+            assignee="orchestrator",
+            skills=["kanban-orchestrator", "external-skill-integration"],
+        )
+
+        result = kb.dispatch_once(conn, spawn_fn=fail_if_spawned)
+
+        task = kb.get_task(conn, tid)
+        events = conn.execute(
+            "SELECT kind, payload FROM task_events WHERE task_id = ? ORDER BY id",
+            (tid,),
+        ).fetchall()
+        rejected_events = [
+            (row["kind"], json.loads(row["payload"] or "{}"))
+            for row in events
+            if row["kind"] == "forced_skill_rejected"
+        ]
+    finally:
+        conn.close()
+
+    assert spawn_calls == []
+    assert result.spawned == []
+    assert tid in result.dispatcher_rejected
+    assert task.status == "blocked"
+    assert rejected_events == [
+        (
+            "forced_skill_rejected",
+            {
+                "reason": "missing_forced_skills",
+                "assignee": "orchestrator",
+                "missing_skills": ["external-skill-integration"],
+                "forced_skills": ["kanban-orchestrator", "external-skill-integration"],
+            },
+        )
+    ]
+
+
 def test_cli_create_skill_flag_repeatable(kanban_home):
     """`hermes kanban create --skill a --skill b` persists the list."""
     out = run_slash(

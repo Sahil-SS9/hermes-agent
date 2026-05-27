@@ -181,6 +181,37 @@ def ensure_dirs():
     _secure_dir(OUTPUT_DIR)
 
 
+def _record_cron_activity(event_type: str, job: Dict[str, Any], **extra: Any) -> None:
+    """Best-effort Profile Activity Ledger hook for cron job changes."""
+    try:
+        from governance.profile_activity_ledger import record_if_enabled
+
+        job_id = str(job.get("id") or "")
+        idempotency_key = extra.pop("idempotency_key", None)
+        payload = {
+            "job_id": job_id,
+            "name": job.get("name"),
+            "schedule_display": job.get("schedule_display"),
+            "deliver": job.get("deliver"),
+            "model": job.get("model"),
+            "provider": job.get("provider"),
+            "profile": job.get("profile"),
+        }
+        payload.update(extra)
+        record_if_enabled(
+            source="cron",
+            profile=job.get("profile"),
+            event_type=event_type,
+            severity="error" if event_type.endswith("error") else "info",
+            summary=f"cron {event_type} for {job_id or job.get('name') or 'job'}",
+            payload=payload,
+            correlation_id=job_id or None,
+            idempotency_key=idempotency_key,
+        )
+    except Exception:
+        pass
+
+
 # =============================================================================
 # Schedule Parsing
 # =============================================================================
@@ -689,6 +720,11 @@ def create_job(
     jobs = load_jobs()
     jobs.append(job)
     save_jobs(jobs)
+    _record_cron_activity(
+        "job_created",
+        job,
+        idempotency_key=f"cron:{job_id}:created:{now}",
+    )
 
     return job
 
@@ -810,7 +846,14 @@ def update_job(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]
 
         jobs[i] = updated
         save_jobs(jobs)
-        return _normalize_job_record(jobs[i])
+        normalized = _normalize_job_record(jobs[i])
+        _record_cron_activity(
+            "job_updated",
+            normalized,
+            updated_fields=sorted((updates or {}).keys()),
+            idempotency_key=f"cron:{job_id}:updated:{_hermes_now().isoformat()}",
+        )
+        return normalized
     return None
 
 
@@ -881,6 +924,11 @@ def remove_job(job_id: str) -> bool:
         # half-applying the removal.
         job_output_dir = _job_output_dir(canonical_id)
         save_jobs(jobs)
+        _record_cron_activity(
+            "job_removed",
+            job,
+            idempotency_key=f"cron:{canonical_id}:removed:{_hermes_now().isoformat()}",
+        )
         # Clean up output directory to prevent orphaned dirs accumulating
         if job_output_dir.exists():
             shutil.rmtree(job_output_dir)
@@ -956,6 +1004,14 @@ def mark_job_run(job_id: str, success: bool, error: Optional[str] = None,
                     job["state"] = "scheduled"
 
                 save_jobs(jobs)
+                _record_cron_activity(
+                    "job_run_ok" if success else "job_run_error",
+                    _normalize_job_record(job),
+                    success=success,
+                    error=error,
+                    delivery_error=delivery_error,
+                    idempotency_key=f"cron:{job_id}:run:{now}",
+                )
                 return
 
         logger.warning("mark_job_run: job_id %s not found, skipping save", job_id)

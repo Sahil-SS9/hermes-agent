@@ -40,6 +40,7 @@ from hermes_constants import get_hermes_home
 from hermes_cli._subprocess_compat import windows_hide_flags
 from hermes_cli.config import load_config, _expand_env_vars
 from hermes_time import now as _hermes_now
+from hermes_cli.profile_activity_ledger import record_event_if_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -1190,8 +1191,32 @@ def _scan_assembled_cron_prompt(assembled: str, job: dict) -> str:
 def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
     """Execute a single cron job, applying any per-job profile override."""
     job_id = job["id"]
+    target_profile = job.get("profile") or os.environ.get("HERMES_PROFILE") or "default"
+    record_event_if_enabled(
+        source="cron.scheduler",
+        actor_profile=os.environ.get("HERMES_PROFILE") or "cron",
+        target_profile=str(target_profile),
+        event_type="cron.job.started",
+        object_type="cron_job",
+        object_id=str(job_id),
+        summary=f"Cron job {job_id} started",
+        payload={"name": job.get("name"), "profile": job.get("profile")},
+    )
     with _job_profile_context(job_id, job.get("profile")):
-        return _run_job_impl(job)
+        result = _run_job_impl(job)
+    success, _output, _final_response, error = result
+    record_event_if_enabled(
+        source="cron.scheduler",
+        actor_profile=os.environ.get("HERMES_PROFILE") or "cron",
+        target_profile=str(target_profile),
+        event_type="cron.job.completed" if success else "cron.job.failed",
+        object_type="cron_job",
+        object_id=str(job_id),
+        status_to="ok" if success else "failed",
+        summary=f"Cron job {job_id} {'completed' if success else 'failed'}",
+        payload={"name": job.get("name"), "profile": job.get("profile"), "error": error},
+    )
+    return result
 
 
 def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:

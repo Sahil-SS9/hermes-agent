@@ -1783,12 +1783,27 @@ def _validate_proxy_env_urls() -> None:
             ) from exc
 
 
-def _validate_base_url(base_url: str) -> None:
-    """Reject obviously broken custom endpoint URLs before they reach httpx."""
+def _validate_base_url(base_url: Optional[str], *, name: str = "", provider: str = "") -> None:
+    """Reject obviously broken custom endpoint URLs before they reach httpx.
+
+    When *name* and *provider* are provided, also warns if the user configured
+    an auxiliary task with an empty base_url and ``auto`` provider — the
+    empty base_url is harmless on its own but combined with ``auto`` means
+    the task silently falls through the full auto-detection chain rather
+    than using a pinned custom endpoint, which is often unintended.
+    """
     from urllib.parse import urlparse
 
     candidate = str(base_url or "").strip()
-    if not candidate or candidate.startswith("acp://"):
+    if not candidate:
+        if provider == "auto" and name:
+            logger.warning(
+                "Auxiliary config '%s': base_url is empty with provider 'auto'. "
+                "May fall back unexpectedly.",
+                name,
+            )
+        return
+    if candidate.startswith("acp://"):
         return
     try:
         parsed = urlparse(candidate)

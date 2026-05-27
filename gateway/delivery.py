@@ -160,14 +160,51 @@ class DeliveryRouter:
                     "success": True,
                     "result": result
                 }
+                self._record_delivery_activity(target, True, job_id, job_name, metadata)
             except Exception as e:
                 results[target.to_string()] = {
                     "success": False,
                     "error": str(e)
                 }
+                self._record_delivery_activity(target, False, job_id, job_name, metadata, error=str(e))
         
         return results
     
+    def _record_delivery_activity(
+        self,
+        target: DeliveryTarget,
+        success: bool,
+        job_id: Optional[str],
+        job_name: Optional[str],
+        metadata: Optional[Dict[str, Any]],
+        *,
+        error: Optional[str] = None,
+    ) -> None:
+        """Best-effort Profile Activity Ledger hook for gateway delivery."""
+        try:
+            from governance.profile_activity_ledger import record_if_enabled
+
+            record_if_enabled(
+                source="gateway-dispatcher",
+                event_type="delivery_ok" if success else "delivery_error",
+                severity="info" if success else "error",
+                summary=f"gateway delivery {'ok' if success else 'error'} to {target.to_string()}",
+                payload={
+                    "target": target.to_string(),
+                    "platform": target.platform.value,
+                    "is_origin": target.is_origin,
+                    "is_explicit": target.is_explicit,
+                    "job_id": job_id,
+                    "job_name": job_name,
+                    "metadata": metadata or {},
+                    "error": error,
+                },
+                correlation_id=job_id,
+                idempotency_key=None,
+            )
+        except Exception:
+            pass
+
     def _deliver_local(
         self,
         content: str,

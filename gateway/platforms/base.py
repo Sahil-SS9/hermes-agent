@@ -3505,6 +3505,33 @@ class BasePlatformAdapter(ABC):
             if getattr(result, "success", False):
                 delivery_succeeded = True
 
+        def _record_gateway_activity(event_type: str, outcome: str | None = None) -> None:
+            try:
+                from hermes_cli.profile_activity_ledger import record_event_if_enabled
+
+                source = getattr(event, "source", None)
+                record_event_if_enabled(
+                    source="gateway.dispatcher",
+                    actor_profile=os.environ.get("HERMES_PROFILE") or "gateway",
+                    target_profile=os.environ.get("HERMES_PROFILE"),
+                    event_type=event_type,
+                    object_type="gateway_message",
+                    object_id=str(getattr(event, "message_id", "") or ""),
+                    status_to=outcome,
+                    summary=f"Gateway message {event_type}",
+                    payload={
+                        "platform": str(getattr(source, "platform", "") or ""),
+                        "chat_id": str(getattr(source, "chat_id", "") or ""),
+                        "thread_id": str(getattr(source, "thread_id", "") or ""),
+                        "message_type": str(getattr(event, "message_type", "") or ""),
+                        "session_key": session_key,
+                    },
+                )
+            except Exception:
+                logger.debug("[%s] profile activity gateway hook failed", self.name, exc_info=True)
+
+        _record_gateway_activity("gateway.message.received")
+
         # Reuse the interrupt event set by handle_message() (which marks
         # the session active before spawning this task to prevent races).
         # Fall back to a new Event only if the entry was removed externally.
@@ -3800,6 +3827,10 @@ class BasePlatformAdapter(ABC):
 
             # Determine overall success for the processing hook
             processing_ok = delivery_succeeded if delivery_attempted else not bool(response)
+            _record_gateway_activity(
+                "gateway.message.completed",
+                "success" if processing_ok else "failure",
+            )
             await self._run_processing_hook(
                 "on_processing_complete",
                 event,
@@ -3855,9 +3886,11 @@ class BasePlatformAdapter(ABC):
             outcome = ProcessingOutcome.CANCELLED
             if current_task is None or current_task not in self._expected_cancelled_tasks:
                 outcome = ProcessingOutcome.FAILURE
+            _record_gateway_activity("gateway.message.completed", outcome.value if hasattr(outcome, "value") else str(outcome))
             await self._run_processing_hook("on_processing_complete", event, outcome)
             raise
         except Exception as e:
+            _record_gateway_activity("gateway.message.completed", "failure")
             await self._run_processing_hook("on_processing_complete", event, ProcessingOutcome.FAILURE)
             logger.error("[%s] Error handling message: %s", self.name, e, exc_info=True)
             # Send the error to the user so they aren't left with radio silence
