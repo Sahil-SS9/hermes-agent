@@ -17,7 +17,7 @@ def get_token():
     """Read token from dotenv."""
     dotenv = Path("/home/kensei/.hermes/.env")
     if dotenv.exists():
-        for line in dotenv.read_text().splitlines():
+        for line in dotenv.read_text(encoding="utf-8").splitlines():
             line = line.strip()
             if line.startswith("DISCORD_BOT_TOKEN="):
                 key = line[len("DISCORD_BOT_TOKEN="):].strip().strip('"').strip("'")
@@ -46,14 +46,14 @@ def discord_api(endpoint, data=None):
 def load_state():
     if STATE.exists():
         try:
-            return json.loads(STATE.read_text())
+            return json.loads(STATE.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, Exception):
             pass
     return {"processed": [], "last": 0}
 
 def save_state(st):
     STATE.parent.mkdir(parents=True, exist_ok=True)
-    STATE.write_text(json.dumps(st))
+    STATE.write_text(json.dumps(st), encoding="utf-8")
 
 def extract_repo(text):
     m = re.search(r'[Aa]pprove\s+["\']?([a-zA-Z0-9][-a-zA-Z0-9._/]+)["\']?', text)

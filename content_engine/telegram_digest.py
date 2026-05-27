@@ -223,7 +223,7 @@ def deliver_digest(drafts: List[dict]) -> bool:
     os.makedirs(out_dir, exist_ok=True)
     html_path = f"{out_dir}/drafts-{datetime.now().strftime('%Y%m%d-%H%M')}.html"
     
-    with open(html_path, 'w') as f:
+    with open(html_path, 'w', encoding="utf-8") as f:
         f.write(html)
 
     # Send summary message

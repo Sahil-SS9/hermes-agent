@@ -34,7 +34,7 @@ def load_env_key(env_file: Path = DEFAULT_ENV) -> str | None:
         return key.strip()
     if not env_file.exists():
         return None
-    for raw in env_file.read_text(errors='replace').splitlines():
+    for raw in env_file.read_text(encoding='utf-8', errors='replace').splitlines():
         line = raw.strip()
         if not line or line.startswith('#') or '=' not in line:
             continue
@@ -48,7 +48,7 @@ def load_state(path: Path) -> dict:
     if not path.exists():
         return {'consecutive_failures': 0}
     try:
-        data = json.loads(path.read_text(errors='replace'))
+        data = json.loads(path.read_text(encoding='utf-8', errors='replace'))
         if isinstance(data, dict):
             return data
     except Exception:

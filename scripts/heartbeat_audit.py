@@ -8,6 +8,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from croniter import croniter as _croniter
+
 HERMES = Path('/home/kensei/.hermes')
 JOBS = HERMES / 'cron' / 'jobs.json'
 SKILLS = HERMES / 'skills'
@@ -106,6 +108,7 @@ def tavily_health_finding(now: datetime) -> dict | None:
 MEM_THRESHOLD_MB = 500
 SERVICES_WATCH_NAMES = ['hermes-gateway', 'docker', 'postgresql']
 CRON_MISSED_GRACE_MINUTES = 10
+CRON_OUTPUT = HERMES / 'cron' / 'output'
 
 
 def memory_health_finding(now: datetime) -> dict | None:
@@ -194,6 +197,141 @@ def cron_gap_finding(now: datetime) -> dict | None:
             'key': f'audit-cron-gap-{now.date()}',
         }
     return None
+
+
+def _newest_output_mtime(job_id: str) -> float | None:
+    """Return the mtime (epoch) of the newest output file in a cron's output dir.
+
+    Returns None if the output dir doesn't exist or has no files.
+    Skips legacy subdirectories like 22-05-26/.
+    """
+    outdir = CRON_OUTPUT / job_id
+    if not outdir.is_dir():
+        return None
+    newest = None
+    for entry in outdir.iterdir():
+        if not entry.is_file():
+            continue
+        mtime = entry.stat().st_mtime
+        if newest is None or mtime > newest:
+            newest = mtime
+    return newest
+
+
+def cron_stale_check(jobs: list[dict], now: datetime) -> list[dict]:
+    """Run stale-detection on enabled cron jobs.
+
+    Returns a list of stale findings, one per suspect job. Each finding has
+    ``name``, ``reason``, and optionally ``details`` for the LLM to format.
+
+    Three false-positive guards built in:
+
+    1. **File mtime primary**: If the newest output file mtime falls within the
+       cron schedule's previous expected window, the job is live even if
+       ``last_run_at`` metadata is stale (in-flight LLM cron, metadata-updates-after
+       pattern, etc.).
+
+    2. **New-cron skip**: If a cron has ``last_run_at=None`` and its
+       ``next_run_at`` is in the future, it's a brand-new cron waiting for its
+       first slot. This is healthy, not stale. (Fixes ``denji-self-eval-reminder``
+       SUSPEND false positive.)
+
+    3. **Scheduled-window jobs**: Crons like ``0 9-20 * * *`` (active 9AM-8PM
+       only) are not expected to produce output outside their window. The
+       ``prev_due`` from croniter correctly reflects the last schedule firing,
+       so no special handling needed — croniter handles ranges naturally.
+
+    Jobs without a parseable cron expression (interval, one-shot) are skipped.
+    """
+    TZ = now.tzinfo or ZoneInfo('Europe/London')
+    if TZ is None:
+        TZ = ZoneInfo('Europe/London')
+
+    stale: list[dict] = []
+
+    for j in jobs:
+        if not j.get('enabled'):
+            continue
+        name = j.get('name', '?')
+        job_id = j.get('id', '')
+        schedule = j.get('schedule', {})
+        if isinstance(schedule, dict):
+            expr = schedule.get('expr', '')
+        else:
+            expr = str(schedule)
+        # Skip interval and one-shot jobs — only cron expressions here.
+        if not expr or '*/' in expr or 'interval' in str(schedule) or 'oneshot' in str(schedule):
+            continue
+
+        # Guard 2: new cron with future first-run and no history.
+        last_run_at = j.get('last_run_at')
+        next_run_at = j.get('next_run_at')
+        if not last_run_at and next_run_at:
+            try:
+                next_dt = datetime.fromisoformat(next_run_at).astimezone(TZ)
+                if next_dt > now:
+                    # Brand-new cron, first run hasn't happened yet — skip.
+                    continue
+            except Exception:
+                pass  # fall through to normal check
+
+        # Get the cron expression's previous due time.
+        try:
+            import datetime as _dt_mod
+            prev_due = _croniter(expr, now).get_prev(_dt_mod.datetime).astimezone(TZ)
+        except Exception:
+            # Unparseable expression — skip.
+            continue
+
+        grace = timedelta(minutes=CRON_MISSED_GRACE_MINUTES)
+
+        # Signal 1: last_run_at metadata.
+        last_dt = None
+        if last_run_at:
+            try:
+                last_dt = datetime.fromisoformat(last_run_at).astimezone(TZ)
+            except Exception:
+                pass
+        metadata_ok = last_dt is not None and last_dt >= prev_due - grace
+
+        # Signal 2: newest output file mtime (primary).
+        newest_mtime = _newest_output_mtime(job_id)
+        file_ok = newest_mtime is not None
+        if file_ok and newest_mtime is not None:
+            file_dt = datetime.fromtimestamp(newest_mtime, TZ)
+            file_ok = file_dt >= prev_due - grace
+
+        # Signal 3: next_run_at freshness (for in-flight crons).
+        next_ok = False
+        if next_run_at:
+            try:
+                next_dt = datetime.fromisoformat(next_run_at).astimezone(TZ)
+                # If next_run is recent or imminent, job is alive.
+                if next_dt > now - timedelta(hours=2):
+                    next_ok = True
+            except Exception:
+                pass
+
+        if not metadata_ok and not file_ok and not next_ok:
+            lines = []
+            lines.append(f'Stale check failed: prev_due {prev_due.isoformat()}')
+            if last_run_at:
+                lines.append(f'last_run_at {last_run_at} (ok={metadata_ok})')
+            else:
+                lines.append(f'last_run_at missing')
+            if newest_mtime is not None:
+                lines.append(f'newest output mtime {datetime.fromtimestamp(newest_mtime, TZ).isoformat()} (ok={file_ok})')
+            else:
+                lines.append(f'no output files')
+            if next_run_at:
+                lines.append(f'next_run_at {next_run_at} (ok={next_ok})')
+            stale.append({
+                'name': name,
+                'reason': 'no recent run detected from metadata, output files, or next_run schedule',
+                'details': ' | '.join(lines),
+            })
+
+    return stale
 
 
 def _enumerate_gateway_units() -> dict[str, int | None]:
@@ -353,6 +491,19 @@ def main() -> int:
     gap_finding = cron_gap_finding(now)
     if gap_finding:
         findings.append(gap_finding)
+
+    # Stale-detection: uses file mtime as primary signal to avoid false positives
+    # on in-flight LLM crons, metadata-update-after patterns, and new crons with
+    # future first-run schedules.
+    stale_findings = cron_stale_check(jobs, now)
+    for sf in stale_findings:
+        findings.append({
+            'title': f"Cron {sf['name']} appears stale",
+            'body': f"Cron `{sf['name']}` {sf['reason']}. Details: {sf.get('details', '')}. Check status and consider pausing or removing.",
+            'assignee': 'wesker',
+            'priority': 'P2',
+            'key': f"audit-stale-cron-{sf['name']}-{now.date()}",
+        })
 
     dup_gw_finding = duplicate_gateway_finding(now)
     if dup_gw_finding:

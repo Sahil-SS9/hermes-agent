@@ -77,7 +77,7 @@ def main() -> int:
     parser.add_argument('--latest', action='store_true', help='also scan latest historical output files')
     args = parser.parse_args()
 
-    data = json.loads(JOBS.read_text())
+    data = json.loads(JOBS.read_text(encoding='utf-8'))
     rows = []
     for job in data.get('jobs', []):
         if not job.get('enabled'):

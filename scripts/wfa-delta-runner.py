@@ -84,7 +84,7 @@ def compare_findings(old_keys: set, new_findings: list) -> dict:
     if STATE_FILE.exists():
         try:
             # rebuild old key -> severity
-            for f in json.loads(STATE_FILE.read_text()).get("findings", []):
+            for f in json.loads(STATE_FILE.read_text(encoding="utf-8")).get("findings", []):
                 old_map[build_finding_key(f)] = f.get("severity", "info")
         except Exception:
             pass
@@ -118,7 +118,7 @@ def save_state(stdout: str, findings: list):
             for f in findings
         ],
     }
-    STATE_FILE.write_text(json.dumps(state, indent=2))
+    STATE_FILE.write_text(json.dumps(state, indent=2), encoding="utf-8")
 
 
 def main():
@@ -129,7 +129,7 @@ def main():
     if STATE_FILE.exists():
         try:
             old_keys = {build_finding_key(f) for f in
-                        json.loads(STATE_FILE.read_text()).get("findings", [])}
+                        json.loads(STATE_FILE.read_text(encoding="utf-8")).get("findings", [])}
         except Exception:
             pass
 
