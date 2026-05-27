@@ -27,7 +27,7 @@ def fmt_ts(ts):
     if not ts:
         return ''
     try:
-        return dt.datetime.fromtimestamp(int(ts), TZ).strftime('%d/%m/%y %H:%M:%S')
+        return dt.datetime.fromtimestamp(int(ts), TZ).strftime('%d/%m/%Y %H:%M:%S')
     except Exception:
         return ''
 
@@ -56,7 +56,7 @@ needs = groups['Blocked / needs call']
 emoji = '⚠️' if needs else '✅'
 signal = f'{len(needs)} need action' if needs else 'no blockers surfaced'
 lines = [
-    f"{emoji} Kanban digest · {now.strftime('%d/%m/%y %H:%M:%S')}",
+    f"{emoji} Kanban digest · {now.strftime('%d/%m/%Y %H:%M:%S')}",
     f"checked · {len(rows)} tasks · {signal}",
     '',
 ]
@@ -93,7 +93,7 @@ for heading, items in groups.items():
 
 html_doc = f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Kanban digest · {yesterday.strftime('%d/%m/%y')}</title>
+<title>Kanban digest · {yesterday.strftime('%d/%m/%Y')}</title>
 <style>
 :root {{ color-scheme: dark; --bg:#11100f; --card:#1c1917; --line:#34302c; --text:#f5f5f4; --muted:#a8a29e; --accent:#fbbf24; }}
 body {{ margin:0; background:var(--bg); color:var(--text); font:14px/1.5 system-ui,-apple-system,Segoe UI,sans-serif; }}
@@ -106,8 +106,8 @@ h2 {{ margin:0; padding:14px 16px; border-bottom:1px solid var(--line); color:va
 table {{ width:100%; border-collapse:collapse; }} th,td {{ padding:10px 12px; border-bottom:1px solid var(--line); vertical-align:top; text-align:left; }} th {{ color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.04em; }}
 code {{ color:#fde68a; }}
 </style></head><body><main>
-<h1>Kanban digest · {yesterday.strftime('%d/%m/%y')}</h1>
-<p class="muted">Generated {now.strftime('%d/%m/%y %H:%M:%S')} · {len(rows)} relevant task updates</p>
+<h1>Kanban digest · {yesterday.strftime('%d/%m/%Y')}</h1>
+<p class="muted">Generated {now.strftime('%d/%m/%Y %H:%M:%S')} · {len(rows)} relevant task updates</p>
 <div class="summary">
 <div class="pill">Completed: {len(groups['Completed yesterday'])}</div>
 <div class="pill">Running: {len(groups['Still running'])}</div>

@@ -37,7 +37,7 @@ for item in doctor.get('warnings', []):
 if cron_info.get('error', 0):
     issues.append(f"{cron_info.get('error')} cron job(s) failing")
 emoji = '✅' if not issues else '⚠️'
-print(f"{emoji} System report · {now.strftime('%d/%m/%y %H:%M:%S')}")
+print(f"{emoji} System report · {now.strftime('%d/%m/%Y %H:%M:%S')}")
 print(f"checked · {cron_info.get('total', 0)} crons · {len(issues)} issue(s)")
 print()
 print(f"• Crons ok: {cron_info.get('ok', 0)}/{cron_info.get('total', 0)}")

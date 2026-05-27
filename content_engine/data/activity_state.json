@@ -1,5 +1,54 @@
 {
-  "used_signals": [],
-  "last_run": null,
+  "used_signals": [
+    {
+      "id": "hermes-pr:https://github.com/NousResearch/hermes-agent/pull/31781",
+      "used_at": "2026-05-27T08:00:29.426705+00:00"
+    },
+    {
+      "id": "hermes-pr:https://github.com/NousResearch/hermes-agent/pull/29526",
+      "used_at": "2026-05-27T08:00:29.426718+00:00"
+    },
+    {
+      "id": "hermes-skill:cron-output-contract",
+      "used_at": "2026-05-27T08:00:29.426722+00:00"
+    },
+    {
+      "id": "arch:lead_sub_agent_architecture",
+      "used_at": "2026-05-27T08:00:29.426727+00:00"
+    },
+    {
+      "id": "research:MCP spec release candidate \u2014 stateless core, OAuth alignment",
+      "used_at": "2026-05-27T08:00:29.426731+00:00"
+    },
+    {
+      "id": "research:ByteDance Lance \u2014 3B native multimodal model",
+      "used_at": "2026-05-27T08:00:29.426735+00:00"
+    },
+    {
+      "id": "arch:lead_sub_agent_architecture",
+      "used_at": "2026-05-27T08:00:30.259806+00:00"
+    },
+    {
+      "id": "research:Reasonix \u2014 DeepSeek-native terminal coding agent",
+      "used_at": "2026-05-27T08:00:30.259829+00:00"
+    },
+    {
+      "id": "research:Anthropic plans Claude Memory Files for distributed persiste",
+      "used_at": "2026-05-27T08:00:30.259840+00:00"
+    },
+    {
+      "id": "research:Skills/repos explosion: GitHub trending is flooded with codi",
+      "used_at": "2026-05-27T08:00:30.259849+00:00"
+    },
+    {
+      "id": "gitradar:scheidydude/codeindex",
+      "used_at": "2026-05-27T08:00:30.259858+00:00"
+    },
+    {
+      "id": "gitradar:MobiusQuant/OpenMobius-skill",
+      "used_at": "2026-05-27T08:00:30.259868+00:00"
+    }
+  ],
+  "last_run": "2026-05-27T08:00:30.259677+00:00",
   "cycle_signals": {}
 }

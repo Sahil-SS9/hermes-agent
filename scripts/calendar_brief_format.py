@@ -15,7 +15,7 @@ out_dir.mkdir(parents=True, exist_ok=True)
 html_path = out_dir / f"calendar-brief-{now.strftime('%d%m%y-%H%M%S')}.html"
 
 if not EVENTS_FILE.exists():
-    print(f"⚠️ Calendar brief · {now.strftime('%d/%m/%y %H:%M:%S')}")
+    print(f"⚠️ Calendar brief · {now.strftime('%d/%m/%Y %H:%M:%S')}")
     print("failed · 0 events · fetch data missing")
     print("• Calendar fetch output was not found.")
     raise SystemExit(0)
@@ -47,7 +47,7 @@ def fmt_range(ev):
 
 def fmt_day(ev):
     start = parse_dt(ev.get("start", ""))
-    return start.strftime("%d/%m/%y") if start else "unknown date"
+    return start.strftime("%d/%m/%Y") if start else "unknown date"
 
 def clean(value):
     return str(value or "").strip()
@@ -57,7 +57,7 @@ count = len(today)
 signal = f"{len(issues)} fetch issue(s)" if issues else ("clear day" if count == 0 else "today mapped")
 
 lines = [
-    f"{status} Calendar brief · {now.strftime('%d/%m/%y %H:%M:%S')}",
+    f"{status} Calendar brief · {now.strftime('%d/%m/%Y %H:%M:%S')}",
     f"checked · {count} today · {signal}",
     "",
 ]
@@ -76,7 +76,7 @@ html_lines = [
     "<title>Calendar brief</title>",
     "<style>body{background:#11100f;color:#f5f5f4;font-family:Inter,Arial,sans-serif;margin:32px;line-height:1.5} h1,h2{color:#fbbf24} .card{background:#1c1917;border:1px solid #3f3f46;border-radius:14px;padding:16px;margin:14px 0}.muted{color:#a8a29e}</style>",
     "</head><body>",
-    f"<h1>Calendar brief · {html.escape(now.strftime('%d/%m/%y %H:%M:%S'))}</h1>",
+    f"<h1>Calendar brief · {html.escape(now.strftime('%d/%m/%Y %H:%M:%S'))}</h1>",
     f"<p class='muted'>{len(today)} today · {len(week)} week ahead · {len(issues)} issue(s)</p>",
     "<h2>Today</h2>",
 ]

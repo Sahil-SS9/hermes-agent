@@ -38,15 +38,13 @@ def update_wiki_page(repo_name):
     """Update a wiki repo page's frontmatter to mark it as implemented."""
     page_path = WIKI_REPOS / f"{repo_name}.md"
     if not page_path.exists():
-        print(f"SKIP: wiki page not found: {page_path}")
-        return False
+        return "missing"
     
     content = page_path.read_text()
     
     # Check if already implemented
     if 'adoption_status: implemented' in content:
-        print(f"SKIP: {repo_name} already implemented")
-        return False
+        return "already"
     
     # Update frontmatter adoption_status
     updated = re.sub(
@@ -77,8 +75,7 @@ def update_wiki_page(repo_name):
         )
     
     page_path.write_text(updated)
-    print(f"UPDATED: {repo_name} → adoption_status: implemented")
-    return True
+    return "updated"
 
 def main():
     if not KANBAN_DB.exists():
@@ -101,22 +98,33 @@ def main():
     
     tasks = cur.fetchall()
     if not tasks:
-        print("SILENT: no completed tasks with wiki references")
         conn.close()
         return
-    
-    updated_count = 0
+
+    updated = []
+    missing = []
     for task_id, title, result, body in tasks:
         ref = find_wiki_reference(result) or find_wiki_reference(body) or find_wiki_reference(title)
-        if ref and update_wiki_page(ref):
-            updated_count += 1
-    
+        if not ref:
+            continue
+        outcome = update_wiki_page(ref)
+        if outcome == "updated":
+            updated.append(ref)
+        elif outcome == "missing":
+            missing.append(ref)
+
     conn.close()
-    
-    if updated_count > 0:
-        print(f"DONE: updated {updated_count} wiki repo pages to 'implemented'")
-    else:
-        print("SILENT: no wiki pages updated (references found but pages missing or already implemented)")
+
+    # no_agent silence contract: no stdout when there was no action and no real error.
+    if not updated and not missing:
+        return
+
+    if updated:
+        print(f"📚 Wiki sync · {now.strftime('%d/%m/%Y %H:%M:%S')}")
+        print(f"updated · {len(updated)} repo page(s): {', '.join(updated)}")
+    if missing:
+        print(f"⚠️ Wiki sync missing pages · {now.strftime('%d/%m/%Y %H:%M:%S')}")
+        print(f"missing · {len(missing)} repo page(s): {', '.join(missing)}")
 
 if __name__ == "__main__":
     main()

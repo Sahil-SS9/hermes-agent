@@ -47,11 +47,11 @@ def fmt_ts(value: int | None) -> str | None:
         return None
     # Historic rows may be seconds; defensive support for ms.
     seconds = value / 1000 if value > 10_000_000_000 else value
-    return dt.datetime.fromtimestamp(seconds, tz=TZ).strftime("%d/%m/%y %H:%M:%S")
+    return dt.datetime.fromtimestamp(seconds, tz=TZ).strftime("%d/%m/%Y %H:%M:%S")
 
 
 def display_now(ts: dt.datetime) -> str:
-    return ts.strftime("%d/%m/%y %H:%M:%S")
+    return ts.strftime("%d/%m/%Y %H:%M:%S")
 
 
 def discover_dbs() -> list[dict[str, Any]]:

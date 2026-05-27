@@ -19,7 +19,7 @@ HEADERS = {"Authorization": f"Bot {BOT_TOKEN}", "Content-Type": "application/jso
 
 
 def log(msg):
-    ts = time.strftime("%d/%m/%y %H:%M:%S")
+    ts = time.strftime("%d/%m/%Y %H:%M:%S")
     line = f"[{ts}] {msg}"
     print(line, flush=True)
     with open(LOG_FILE, "a") as f:

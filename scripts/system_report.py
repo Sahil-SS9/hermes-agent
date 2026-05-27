@@ -263,7 +263,7 @@ def telegram_text(payload: dict, html_path: Path, include_media_tag: bool = Fals
     signal = recommendation(overall, fires, watchlist)
 
     lines = [
-        f"{status_emoji.get(overall, '⚪')} System report · {now.strftime('%d/%m/%y %H:%M:%S')}",
+        f"{status_emoji.get(overall, '⚪')} System report · {now.strftime('%d/%m/%Y %H:%M:%S')}",
         f"checked · {cron.get('ok', 0)}/{cron.get('total', 0)} crons ok · disk {stats.get('disk_pct', '?')}",
         "",
     ]

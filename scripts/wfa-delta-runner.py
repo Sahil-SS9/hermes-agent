@@ -15,14 +15,15 @@ import json
 import os
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from pathlib import Path
 
 WFA_SCRIPT = "/home/kensei/.hermes/scripts/denji-wfa.py"
 STATE_FILE = Path("/home/kensei/.hermes/governance/wfa-delta-state.json")
 LOG_DIR = Path("/home/kensei/.hermes/governance/logboard")
 
-TZ = timezone.utc
+TZ = ZoneInfo("Europe/London")
 
 
 def run_wfa() -> tuple[str, dict | None]:
@@ -61,7 +62,7 @@ def run_wfa() -> tuple[str, dict | None]:
 def build_finding_key(finding: dict) -> str:
     """Stable key for dedup: task_id + issue_type + severity."""
     tid = finding.get("task_id", finding.get("id", "?"))
-    itype = finding.get("issue_type", finding.get("type", "?"))
+    itype = finding.get("kind", finding.get("issue_type", finding.get("type", "?")))
     sev = finding.get("severity", "?")
     return f"{tid}|{itype}|{sev}"
 
@@ -109,7 +110,7 @@ def save_state(stdout: str, findings: list):
         "findings": [
             {
                 "task_id": f.get("task_id", f.get("id", "?")),
-                "issue_type": f.get("issue_type", f.get("type", "?")),
+                "kind": f.get("kind", f.get("issue_type", f.get("type", "?"))),
                 "severity": f.get("severity", "?"),
                 "title": f.get("title", ""),
                 "board": f.get("board", ""),
@@ -160,9 +161,9 @@ def main():
 
     # Findings removed — brief delta-only output
     if delta["removed"]:
-        print(f"WFA Delta · {datetime.now(TZ).strftime('%d/%m/%y %H:%M:%S')} UTC")
+        print(f"WFA Delta · {datetime.now(TZ).strftime('%d/%m/%Y %H:%M:%S')}")
         print(f"Findings: {delta['total']} total · {len(delta['removed'])} removed")
-        print("Removed findings (task_id | issue_type):")
+        print("Removed findings (task_id | kind | severity):")
         for r in delta["removed"]:
             print(f"  - {r}")
         save_state(stdout, findings)

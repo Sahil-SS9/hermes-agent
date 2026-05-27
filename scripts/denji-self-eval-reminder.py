@@ -5,7 +5,7 @@ import datetime as dt
 TZ = dt.timezone(dt.timedelta(hours=1))
 now = dt.datetime.now(TZ)
 
-print(f"🔄 Self-Eval Reminder · {now.strftime('%d/%m/%y · %H:%M:%S')}")
+print(f"🔄 Self-Eval Reminder · {now.strftime('%d/%m/%Y · %H:%M:%S')}")
 print()
 print("It's Friday — time for this week's self-evaluation.")
 print()

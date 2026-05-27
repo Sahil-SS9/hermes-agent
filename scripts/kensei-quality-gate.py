@@ -152,7 +152,22 @@ count = len(tasks_in_review)
 dispatched = len([r for r in results if r["outcome"] == "dispatched"])
 skipped = len([r for r in results if r["outcome"] == "skip"])
 
-print(f"🔬 Quality gate · {now.strftime('%d/%m/%y %H:%M:%S')}")
+# Save every run to logboard for auditability, but keep no_agent stdout silent
+# when there is nothing to review.
+log_entry = {
+    "timestamp": now.isoformat(),
+    "total_review": count,
+    "dispatched": dispatched,
+    "skipped": skipped,
+    "results": results,
+}
+logfile = OUT_DIR / f"quality-gate-{now.strftime('%d-%m-%y-%H%M')}.json"
+logfile.write_text(json.dumps(log_entry, indent=2, default=str))
+
+if count == 0:
+    sys.exit(0)
+
+print(f"🔬 Quality gate · {now.strftime('%d/%m/%Y %H:%M:%S')}")
 print(f"checked · {count} review tasks · {dispatched} gated / {skipped} skipped")
 
 if results:
@@ -163,14 +178,3 @@ if results:
         else:
             gates_str = ", ".join(f"`{g['gate']}`→{g['worker']}" for g in r["gates"])
             print(f"• `{r['task']}` {' · '.join(gates_str)}")
-
-# Save to logboard
-log_entry = {
-    "timestamp": now.isoformat(),
-    "total_review": count,
-    "dispatched": dispatched,
-    "skipped": skipped,
-    "results": results,
-}
-logfile = OUT_DIR / f"quality-gate-{now.strftime('%d-%m-%y-%H%M')}.json"
-logfile.write_text(json.dumps(log_entry, indent=2, default=str))
