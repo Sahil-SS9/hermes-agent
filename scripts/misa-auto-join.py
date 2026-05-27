@@ -22,7 +22,7 @@ def log(msg):
     ts = time.strftime("%d/%m/%Y %H:%M:%S")
     line = f"[{ts}] {msg}"
     print(line, flush=True)
-    with open(LOG_FILE, "a") as f:
+    with open(LOG_FILE, "a", encoding="utf-8") as f:
         f.write(line + "\n")
 
 
@@ -148,5 +148,5 @@ def main_loop():
 
 
 if __name__ == "__main__":
-    PID_FILE.write_text(str(os.getpid()))
+    PID_FILE.write_text(str(os.getpid()), encoding="utf-8")
     main_loop()

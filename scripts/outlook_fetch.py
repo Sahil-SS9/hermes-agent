@@ -7,7 +7,7 @@ now = dt.datetime.now(TZ)
 start = now.replace(hour=0, minute=0, second=0, microsecond=0)
 end = start + dt.timedelta(days=8)
 
-with open('/home/kensei/.config/ms-365-mcp-server/token-cache.json') as f:
+with open('/home/kensei/.config/ms-365-mcp-server/token-cache.json', encoding='utf-8') as f:
     top = json.load(f)
 inner = json.loads(top['data'])
 
@@ -56,5 +56,5 @@ print(json.dumps({'events': len(all_events), 'issues': issues, 'accounts': list(
 # Save
 import os
 os.makedirs('/home/kensei/.hermes/runbooks/calendar-brief/2026-05-12', exist_ok=True)
-with open('/home/kensei/.hermes/runbooks/calendar-brief/2026-05-12/outlook_events.json','w') as f:
+with open('/home/kensei/.hermes/runbooks/calendar-brief/2026-05-12/outlook_events.json','w', encoding='utf-8') as f:
     json.dump({'events': all_events, 'issues': issues}, f, indent=2)

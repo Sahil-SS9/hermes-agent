@@ -70,7 +70,7 @@ class MCPClient:
             self.proc.kill()
 
 import yaml
-with open("/home/kensei/.hermes/config.yaml") as f:
+with open("/home/kensei/.hermes/config.yaml", encoding="utf-8") as f:
     cfg = yaml.safe_load(f)
 servers = cfg.get("mcp_servers", {})
 
@@ -223,7 +223,7 @@ today = [e for e in unique if e["start"] and parse_dt(e["start"]).date() == now_
 week = [e for e in unique if e["start"] and parse_dt(e["start"]).date() in [now_local.date() + dt.timedelta(days=d+1) for d in range(7)]]
 
 os.makedirs("/home/kensei/.hermes/runbooks/calendar-brief/2026-05-12", exist_ok=True)
-with open("/home/kensei/.hermes/runbooks/calendar-brief/2026-05-12/events.json", "w") as f:
+with open("/home/kensei/.hermes/runbooks/calendar-brief/2026-05-12/events.json", "w", encoding="utf-8") as f:
     json.dump({"today": today, "week": week, "issues": issues, "today_count": len(today), "week_count": len(week)}, f, indent=2, default=str)
 
 print(json.dumps({"today": len(today), "week": len(week), "issues": issues}, indent=2))

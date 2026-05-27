@@ -59,7 +59,7 @@ def _read_ledger():
     if not LEDGER_PATH.exists():
         return []
     entries = []
-    with open(LEDGER_PATH) as f:
+    with open(LEDGER_PATH, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if line:
@@ -70,7 +70,7 @@ def _read_ledger():
 def _append_to_ledger(entry):
     """Append one entry to the ledger."""
     LEDGER_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with open(LEDGER_PATH, "a") as f:
+    with open(LEDGER_PATH, "a", encoding="utf-8") as f:
         f.write(json.dumps(entry, sort_keys=True) + "\n")
     return entry
 
@@ -133,7 +133,7 @@ def cmd_revoke(event_id, task_result="completed"):
     
     # Rewrite the entire ledger
     LEDGER_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with open(LEDGER_PATH, "w") as f:
+    with open(LEDGER_PATH, "w", encoding="utf-8") as f:
         for entry in new_entries:
             f.write(json.dumps(entry, sort_keys=True) + "\n")
     

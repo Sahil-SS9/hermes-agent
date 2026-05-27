@@ -63,7 +63,7 @@ class MCPSession:
 
 # --- config from ~/.hermes/config.yaml ---
 import yaml
-with open("/home/kensei/.hermes/config.yaml") as f:
+with open("/home/kensei/.hermes/config.yaml", encoding="utf-8") as f:
     cfg = yaml.safe_load(f)
 
 servers = cfg.get("mcp_servers", {})

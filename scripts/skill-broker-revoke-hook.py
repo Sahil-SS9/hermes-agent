@@ -27,7 +27,7 @@ def read_ledger():
     if not LEDGER_PATH.exists():
         return []
     entries = []
-    with open(LEDGER_PATH) as f:
+    with open(LEDGER_PATH, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if line:

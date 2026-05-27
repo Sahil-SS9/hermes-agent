@@ -133,7 +133,7 @@ def load_thresholds():
         save_thresholds(DEFAULT_THRESHOLDS)
         return dict(DEFAULT_THRESHOLDS)
     try:
-        with open(THRESHOLDS_FILE) as f:
+        with open(THRESHOLDS_FILE, encoding="utf-8") as f:
             data = json.load(f)
         merged = dict(DEFAULT_THRESHOLDS)
         merged.update(data)
@@ -145,7 +145,7 @@ def load_thresholds():
 def save_thresholds(thresholds):
     try:
         os.makedirs(DATA_DIR, exist_ok=True)
-        with open(THRESHOLDS_FILE, "w") as f:
+        with open(THRESHOLDS_FILE, "w", encoding="utf-8") as f:
             json.dump(thresholds, f, indent=2, default=str)
     except OSError as e:
         print(f"WARN: Failed to write thresholds: {e}", file=sys.stderr)
@@ -170,7 +170,7 @@ def load_metrics():
     if not os.path.exists(METRICS_FILE):
         return []
     try:
-        with open(METRICS_FILE) as f:
+        with open(METRICS_FILE, encoding="utf-8") as f:
             return json.load(f)
     except (json.JSONDecodeError, OSError):
         return []
@@ -183,7 +183,7 @@ def append_metrics_entry(entry):
         metrics = metrics[-365:]
     try:
         os.makedirs(DATA_DIR, exist_ok=True)
-        with open(METRICS_FILE, "w") as f:
+        with open(METRICS_FILE, "w", encoding="utf-8") as f:
             json.dump(metrics, f, indent=2)
     except OSError as e:
         print(f"WARN: Failed to write metrics: {e}", file=sys.stderr)
@@ -467,7 +467,7 @@ def load_cache():
     if not os.path.exists(CACHE_FILE):
         return set()
     try:
-        with open(CACHE_FILE) as f:
+        with open(CACHE_FILE, encoding="utf-8") as f:
             data = json.load(f)
             return set(data.get("seen", []))
     except (json.JSONDecodeError, KeyError):
@@ -477,7 +477,7 @@ def load_cache():
 def save_cache(seen):
     try:
         os.makedirs(DATA_DIR, exist_ok=True)
-        with open(CACHE_FILE, "w") as f:
+        with open(CACHE_FILE, "w", encoding="utf-8") as f:
             json.dump({"seen": list(seen)}, f)
     except Exception as e:
         print(f"WARN: Failed to write cache: {e}", file=sys.stderr)
@@ -730,18 +730,18 @@ def main():
         "repos": scored,
     }
     os.makedirs(DATA_DIR, exist_ok=True)
-    with open(OUTPUT_FILE, "w") as f:
+    with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
         json.dump(output, f, indent=2)
     
     # Write HTML report + structured repos text
     os.makedirs(RUNBOOKS_TODAY, exist_ok=True)
     
     html = build_html(scored, stats)
-    with open(HTML_FILE, "w") as f:
+    with open(HTML_FILE, "w", encoding="utf-8") as f:
         f.write(html)
     
     repos_txt = build_repos_text(scored, stats)
-    with open(REPOS_TXT_FILE, "w") as f:
+    with open(REPOS_TXT_FILE, "w", encoding="utf-8") as f:
         f.write(repos_txt)
     
     # Print Discord summary + MEDIA tag

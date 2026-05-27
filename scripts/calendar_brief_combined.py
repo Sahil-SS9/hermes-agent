@@ -87,7 +87,7 @@ if GOOGLE_DEPS:
 OUTLOOK_CACHE = Path("/home/kensei/.config/ms-365-mcp-server/token-cache.json")
 if OUTLOOK_CACHE.exists():
     try:
-        top = json.loads(OUTLOOK_CACHE.read_text())
+        top = json.loads(OUTLOOK_CACHE.read_text(encoding="utf-8"))
         inner = json.loads(top["data"])
     except Exception as e:
         issues.append(f"Outlook: cache parse failed: {e}")
@@ -212,7 +212,7 @@ week_events = [e for e in unique if e["start"] and _parse_dt(e["start"]).date() 
 # Save JSON
 out_dir = Path("/home/kensei/.hermes/runbooks/calendar-brief")
 out_dir.mkdir(parents=True, exist_ok=True)
-with open(out_dir / "events.json", "w") as f:
+with open(out_dir / "events.json", "w", encoding="utf-8") as f:
     json.dump({"today": today_events, "week": week_events, "issues": issues, "today_count": len(today_events), "week_count": len(week_events)}, f, indent=2, default=str)
 
 print(json.dumps({"today": len(today_events), "week": len(week_events), "issues": issues}, indent=2))

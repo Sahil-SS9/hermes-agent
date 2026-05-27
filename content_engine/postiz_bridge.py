@@ -151,7 +151,7 @@ def _manual_export(
         "# --- Copy the text above, paste into the platform below ---",
     ]
 
-    with open(filepath, "w") as f:
+    with open(filepath, "w", encoding="utf-8") as f:
         f.write("\n".join(content_lines))
 
     print(f"  Manual export saved: {filepath}")

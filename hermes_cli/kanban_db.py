@@ -5307,20 +5307,16 @@ def dispatch_once(
             continue
         ready_task = get_task(conn, row["id"])
         forced_skills = list(ready_task.skills or []) if ready_task else []
-        missing_forced_skills = _missing_forced_skills_for_profile(
+        missing_forced_skills = _missing_worker_forced_skills(
             row["assignee"], forced_skills,
         )
         if missing_forced_skills:
             result.dispatcher_rejected.append(row["id"])
             if not dry_run:
-                _reject_missing_forced_skills(
-                    conn,
-                    row["id"],
-                    assignee=row["assignee"],
-                    forced_skills=forced_skills,
-                    missing_skills=missing_forced_skills,
-                    board=board,
-                )
+                if _block_missing_forced_skills(
+                    conn, row["id"], row["assignee"], missing_forced_skills,
+                ):
+                    result.auto_blocked.append(row["id"])
             continue
         # Respawn guard: refuse to re-spawn when useful work is already
         # in-flight/recent, or when the last failure is a deterministic

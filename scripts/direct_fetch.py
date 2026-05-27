@@ -15,7 +15,7 @@ try:
     from google.oauth2.credentials import Credentials
     from googleapiclient.discovery import build
     cred_path = "/home/kensei/.google_workspace_mcp/credentials/saghir.sahil@gmail.com.json"
-    with open(cred_path) as f:
+    with open(cred_path, encoding="utf-8") as f:
         data = json.load(f)
     creds = Credentials(
         token=data["token"],
@@ -62,7 +62,7 @@ except Exception as e:
 # ---------- Outlook via Graph API ----------
 try:
     cache_path = "/home/kensei/.config/ms-365-mcp-server/token-cache.json"
-    with open(cache_path) as f:
+    with open(cache_path, encoding="utf-8") as f:
         data = json.load(f)
     inner = json.loads(data["data"])
     # Extract accounts
@@ -139,7 +139,7 @@ today_events = [e for e in unique if parse_dt(e["start"]).date() == now.date()]
 week_events = [e for e in unique if parse_dt(e["start"]).date() > now.date() and parse_dt(e["start"]).date() <= (now + dt.timedelta(days=7)).date()]
 
 os.makedirs("/home/kensei/.hermes/runbooks/calendar-brief/2026-05-12", exist_ok=True)
-with open("/home/kensei/.hermes/runbooks/calendar-brief/2026-05-12/events.json", "w") as f:
+with open("/home/kensei/.hermes/runbooks/calendar-brief/2026-05-12/events.json", "w", encoding="utf-8") as f:
     json.dump({"today": today_events, "week": week_events, "issues": issues, "today_count": len(today_events), "week_count": len(week_events)}, f, indent=2, default=str)
 
 print(json.dumps({"today": len(today_events), "week": len(week_events), "issues": issues}, indent=2))

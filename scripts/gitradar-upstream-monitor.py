@@ -36,7 +36,7 @@ def gh_auth_token():
 
 def parse_repo_page(path):
     """Parse a wiki repo page, return frontmatter as dict."""
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         content = f.read()
 
     # Extract YAML frontmatter
@@ -56,7 +56,7 @@ def parse_repo_page(path):
 
 def update_repo_page(path, updates):
     """Update specific frontmatter fields in a repo page."""
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         content = f.read()
 
     m = re.match(r'^---\s*\n(.*?)\n---', content, re.DOTALL)
@@ -74,7 +74,7 @@ def update_repo_page(path, updates):
             new_fm += f'\n{key}: {value}'
 
     new_content = content.replace(old_fm, new_fm)
-    with open(path, 'w') as f:
+    with open(path, 'w', encoding="utf-8") as f:
         f.write(new_content)
     return True
 
