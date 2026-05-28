@@ -630,6 +630,12 @@ class DiscordAdapter(BasePlatformAdapter):
         # without also gate-crashing Misa-Misa's 1:1 sessions.
         # When unset (None), the bot joins any VC the configured user enters.
         self._auto_join_channel_id: Optional[int] = self._coerce_int(extra.get("auto_join_channel_id"))
+        # auto_join_delay_seconds: how long to wait before joining/greeting.
+        # Stagger multi-agent bot introductions so they sequence rather than
+        # pile up simultaneously. 0 = join immediately (default).
+        self._auto_join_delay_seconds: float = float(
+            self._coerce_int(extra.get("auto_join_delay_seconds"), 0) or 0
+        )
         self._auto_join_greeting_text: str = str(
             extra.get("auto_join_greeting_text", "")
             or "Hey! Ready when you are."
@@ -2313,6 +2319,8 @@ class DiscordAdapter(BasePlatformAdapter):
             return
 
         if joined or switched:
+            if self._auto_join_delay_seconds > 0:
+                await asyncio.sleep(self._auto_join_delay_seconds)
             logger.info(
                 "Auto-join: configured user %s entered VC %s",
                 getattr(member, "display_name", member.id),
@@ -6648,6 +6656,7 @@ def _apply_yaml_config(yaml_cfg: dict, discord_cfg: dict) -> dict | None:
     _voice_keys_to_bridge = (
         "auto_join_user_id",
         "auto_join_channel_id",
+        "auto_join_delay_seconds",
         "auto_join_text_channel_id",
         "auto_join_greeting_text",
         "auto_leave_on_user_exit",
