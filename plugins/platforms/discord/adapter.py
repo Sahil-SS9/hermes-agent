@@ -625,9 +625,14 @@ class DiscordAdapter(BasePlatformAdapter):
         extra = getattr(config, "extra", None) or {}
         self._auto_join_user_id: Optional[int] = self._coerce_int(extra.get("auto_join_user_id"))
         self._auto_join_text_channel_id: Optional[int] = self._coerce_int(extra.get("auto_join_text_channel_id"))
+        # auto_join_channel_id: when set, only auto-join when the user enters
+        # THIS specific VC. Allows multi-agent bots to join one dedicated channel
+        # without also gate-crashing Misa-Misa's 1:1 sessions.
+        # When unset (None), the bot joins any VC the configured user enters.
+        self._auto_join_channel_id: Optional[int] = self._coerce_int(extra.get("auto_join_channel_id"))
         self._auto_join_greeting_text: str = str(
             extra.get("auto_join_greeting_text", "")
-            or "Hey, it's Misa-Misa. What's up? How can I help?"
+            or "Hey! Ready when you are."
         ).strip()
         self._auto_leave_on_user_exit: bool = self._coerce_bool(
             extra.get("auto_leave_on_user_exit"), True
@@ -2267,7 +2272,12 @@ class DiscordAdapter(BasePlatformAdapter):
     # ------------------------------------------------------------------
 
     async def _handle_auto_join_voice_state(self, member, before, after) -> None:
-        """Auto-join/leave voice when the configured user enters or exits VC."""
+        """Auto-join/leave voice when the configured user enters or exits VC.
+
+        If ``auto_join_channel_id`` is set this bot only joins that one specific
+        VC, so multi-agent participants don't crash Misa-Misa's 1:1 sessions.
+        When unset, the bot follows the user into any VC (Misa-Misa behaviour).
+        """
         if not self._auto_join_user_id:
             return
         if int(getattr(member, "id", 0) or 0) != self._auto_join_user_id:
@@ -2282,6 +2292,20 @@ class DiscordAdapter(BasePlatformAdapter):
             and after_channel is not None
             and before_channel != after_channel
         )
+
+        # Channel-specific filter: only react when the user entered/left
+        # the configured VC. Allows dedicated multi-agent VCs without
+        # these bots joining every VC Sahil opens.
+        if self._auto_join_channel_id is not None:
+            target = self._auto_join_channel_id
+            after_id = getattr(after_channel, "id", None)
+            before_id = getattr(before_channel, "id", None)
+            # Entered or switched to the target channel
+            if (joined or switched) and after_id != target:
+                return
+            # Left the target channel
+            if left and before_id != target:
+                return
 
         guild = getattr(member, "guild", None)
         guild_id = getattr(guild, "id", None)
@@ -6623,6 +6647,7 @@ def _apply_yaml_config(yaml_cfg: dict, discord_cfg: dict) -> dict | None:
     # in config.yaml.
     _voice_keys_to_bridge = (
         "auto_join_user_id",
+        "auto_join_channel_id",
         "auto_join_text_channel_id",
         "auto_join_greeting_text",
         "auto_leave_on_user_exit",
