@@ -13,7 +13,7 @@ from typing import List, Optional
 
 # Core imports
 from config import BRANDS
-from database import init_db, insert_draft, list_drafts, get_draft
+from database import init_db, insert_draft, list_drafts, get_draft, update_draft_visual_path, list_recent_drafts
 from database import approve_draft, reject_draft, mark_enriched
 from database import list_approved_pending_enrichment, truncate_drafts, purge_stale_drafts, count_drafts_older_than
 from llm_drafts import generate_drafts
@@ -168,9 +168,48 @@ def run_stage_2(dry_run: bool = False) -> List[dict]:
     return enriched
 
 
-def run_digest(dry_run: bool = False) -> bool:
-    """Deliver Telegram digest of pending drafts for review."""
-    drafts = list_drafts(status="draft")
+def attach_free_visual_previews(drafts: List[dict], dry_run: bool = False) -> List[dict]:
+    """Generate free Pillow preview cards for the current approval batch only.
+
+    Paid AI imagery remains behind explicit approval / Stage 2. This gives Sahil
+    visual context up front without burning FAL/Replicate/Together credit.
+    """
+    if not drafts:
+        return drafts
+
+    from visuals import make_card
+
+    for d in drafts:
+        draft_id = d.get("id")
+        if not draft_id:
+            continue
+        try:
+            visual_path = make_card(
+                d.get("brand", "sahil_twitter"),
+                d.get("body_text", ""),
+                title=d.get("title"),
+                platform=d.get("platform", "twitter"),
+                out_filename=f"{draft_id}.png",
+                content_type=d.get("content_type", "text"),
+                pillar=d.get("pillar", ""),
+            )
+            d["visual_path"] = visual_path
+            if not dry_run:
+                update_draft_visual_path(draft_id, visual_path)
+            print(f"    preview={visual_path}")
+        except Exception as e:
+            print(f"    preview failed for {draft_id}: {e}")
+
+    return drafts
+
+
+def run_digest(dry_run: bool = False, drafts: Optional[List[dict]] = None) -> bool:
+    """Deliver review digest.
+
+    If drafts is supplied, deliver only that current generated batch. This avoids
+    resurfacing every old pending draft each morning.
+    """
+    drafts = drafts if drafts is not None else list_drafts(status="draft")
     if not drafts:
         print("No pending drafts to deliver.")
         return False
@@ -179,22 +218,24 @@ def run_digest(dry_run: bool = False) -> bool:
         for d in drafts[:3]:
             print(f"  [DRY] {d['id']} [{d['brand']}/{d['platform']}]")
             print(f"    Type: {d.get('content_type', 'text')}")
+            print(f"    Visual: {d.get('visual_path') or 'not generated'}")
             print(f"    {d['body_text'][:80]}")
             print()
         return True
 
     # Deliver digest
-    print(f"Delivering {len(drafts)} draft(s) to Telegram...")
+    print(f"Delivering {len(drafts)} current draft(s) to Telegram...")
     deliver_digest(drafts)
     return True
 
 
-def run_generate_all(dry_run: bool = False) -> bool:
+def run_generate_all(dry_run: bool = False, brands: Optional[List[str]] = None) -> bool:
     """Run Stage 1 + deliver digest.
 
-    App brands use static templates; personal brands use LLM generation.
+    App brands use static templates; personal brands can be generated separately
+    by the CeeCee LLM cron, then included via digest --since-minutes.
     """
-    brands = list(BRANDS.keys())
+    brands = brands or list(BRANDS.keys())
     LLM_BRANDS = {"sahil_twitter", "sahil_linkedin"}
     
     print(f"Generating drafts for {len(brands)} brand(s)...")
@@ -205,9 +246,10 @@ def run_generate_all(dry_run: bool = False) -> bool:
         return False
     
     print(f"\nStage 1: {len(drafts)} draft(s)")
+    attach_free_visual_previews(drafts, dry_run=dry_run)
     
     if not dry_run:
-        run_digest(dry_run=False)
+        run_digest(dry_run=False, drafts=drafts)
     
     return True
 
@@ -235,11 +277,13 @@ def main() -> int:
 
     # Generate all
     gen = sub.add_parser("generate", help="Generate + deliver")
+    gen.add_argument("--brand", "-b", nargs="+", default=list(BRANDS.keys()))
     gen.add_argument("--dry-run", action="store_true")
 
     # Digest
     dig = sub.add_parser("digest", help="Deliver Telegram digest")
     dig.add_argument("--dry-run", action="store_true")
+    dig.add_argument("--since-minutes", type=int, default=None, help="Only include drafts created in the last N minutes")
 
     # Approve
     app = sub.add_parser("approve", help="Approve a draft")
@@ -316,11 +360,14 @@ def main() -> int:
         return 0
 
     elif args.cmd == "generate":
-        ok = run_generate_all(dry_run=args.dry_run)
+        ok = run_generate_all(dry_run=args.dry_run, brands=args.brand)
         return 0 if ok else 1
 
     elif args.cmd == "digest":
-        ok = run_digest(dry_run=args.dry_run)
+        digest_drafts = list_recent_drafts(args.since_minutes) if args.since_minutes else None
+        if digest_drafts is not None:
+            attach_free_visual_previews(digest_drafts, dry_run=args.dry_run)
+        ok = run_digest(dry_run=args.dry_run, drafts=digest_drafts)
         return 0 if ok else 1
 
     elif args.cmd == "approve":

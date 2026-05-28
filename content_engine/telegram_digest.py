@@ -161,10 +161,17 @@ code { background: #2a2826; padding: 1px 6px; border-radius: 3px; font-size: 12p
         pillar = d.get("pillar", "")
         body = d.get("body_text", "")
         visual = d.get("visual_description", "")
+        visual_path = d.get("visual_path", "")
         draft_id = d["id"]
 
         body_html = body.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-        visual_html = visual.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;") if visual else ""
+        visual_bits = []
+        if visual:
+            visual_bits.append(visual)
+        if visual_path:
+            visual_bits.append(f"Free preview: {visual_path}")
+        visual_text = " · ".join(visual_bits)
+        visual_html = visual_text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;") if visual_text else ""
 
         lines.append('<div class="draft">')
         lines.append('<div class="draft-header">')

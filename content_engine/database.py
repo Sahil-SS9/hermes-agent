@@ -173,6 +173,22 @@ def list_drafts(status: str = "draft", brand: Optional[str] = None) -> List[dict
     conn.close()
     return [dict(r) for r in rows]
 
+def list_recent_drafts(minutes: int = 60, status: str = "draft") -> List[dict]:
+    """Return recent drafts for the current approval packet."""
+    conn = sqlite3.connect(str(DB_PATH))
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        """
+        SELECT * FROM drafts
+        WHERE status = ?
+          AND created_at >= strftime('%Y-%m-%dT%H:%M:%S', 'now', ?)
+        ORDER BY created_at ASC
+        """,
+        (status, f"-{minutes} minutes"),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
 def approve_draft(draft_id: str) -> None:
     conn = sqlite3.connect(str(DB_PATH))
     conn.execute(
@@ -226,6 +242,16 @@ def get_draft(draft_id: str) -> Optional[dict]:
     row = conn.execute("SELECT * FROM drafts WHERE id = ?", (draft_id,)).fetchone()
     conn.close()
     return dict(row) if row else None
+
+def update_draft_visual_path(draft_id: str, visual_path: str) -> None:
+    """Attach a free/static visual preview path to a draft."""
+    conn = sqlite3.connect(str(DB_PATH))
+    conn.execute(
+        "UPDATE drafts SET visual_path = ? WHERE id = ?",
+        (visual_path, draft_id),
+    )
+    conn.commit()
+    conn.close()
 
 def truncate_drafts() -> None:
     conn = sqlite3.connect(str(DB_PATH))

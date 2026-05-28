@@ -59,8 +59,28 @@
     {
       "id": "arch:lead_sub_agent_architecture",
       "used_at": "2026-05-28T08:00:27.982182+00:00"
+    },
+    {
+      "id": "arch:lead_sub_agent_architecture",
+      "used_at": "2026-05-28T20:09:17.131945+00:00"
+    },
+    {
+      "id": "arch:lead_sub_agent_architecture",
+      "used_at": "2026-05-28T20:09:29.276828+00:00"
+    },
+    {
+      "id": "arch:lead_sub_agent_architecture",
+      "used_at": "2026-05-28T20:13:31.790071+00:00"
+    },
+    {
+      "id": "arch:lead_sub_agent_architecture",
+      "used_at": "2026-05-28T20:15:11.544250+00:00"
+    },
+    {
+      "id": "arch:lead_sub_agent_architecture",
+      "used_at": "2026-05-28T20:16:06.281659+00:00"
     }
   ],
-  "last_run": "2026-05-28T08:00:27.982113+00:00",
+  "last_run": "2026-05-28T20:16:06.281584+00:00",
   "cycle_signals": {}
 }
