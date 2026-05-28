@@ -11,7 +11,7 @@ Active selection
 ----------------
 The active provider is chosen by configuration with this precedence:
 
-1. ``web.search_backend`` / ``web.extract_backend`` / ``web.crawl_backend``
+1. ``web.search_backend`` / ``web.extract_backend``
    (per-capability override).
 2. ``web.backend`` (shared fallback).
 3. If exactly one capability-eligible provider is registered AND available,
@@ -24,10 +24,10 @@ The active provider is chosen by configuration with this precedence:
 5. Otherwise ``None`` — the tool surfaces a helpful error pointing at
    ``hermes tools``.
 
-The capability filter (``supports_search`` / ``supports_extract`` /
-``supports_crawl``) is applied at every step so a search-only provider
-(``brave-free``) configured as ``web.extract_backend`` correctly falls
-through to an extract-capable backend.
+The capability filter (``supports_search`` / ``supports_extract``) is
+applied at every step so a search-only provider (``brave-free``)
+configured as ``web.extract_backend`` correctly falls through to an
+extract-capable backend.
 """
 
 from __future__ import annotations
@@ -131,7 +131,7 @@ _LEGACY_PREFERENCE = (
 
 
 def _resolve(configured: Optional[str], *, capability: str) -> Optional[WebSearchProvider]:
-    """Resolve the active provider for a capability ("search" | "extract" | "crawl").
+    """Resolve the active provider for a capability ("search" | "extract").
 
     Resolution rules (in order):
 
@@ -168,8 +168,6 @@ def _resolve(configured: Optional[str], *, capability: str) -> Optional[WebSearc
             return bool(p.supports_search())
         if capability == "extract":
             return bool(p.supports_extract())
-        if capability == "crawl":
-            return bool(p.supports_crawl())
         return False
 
     def _is_available_safe(p: WebSearchProvider) -> bool:
@@ -231,74 +229,6 @@ def get_active_search_provider() -> Optional[WebSearchProvider]:
     return _resolve(explicit, capability="search")
 
 
-def _fallback_provider(
-    *,
-    capability: str,
-    exclude: Optional[str] = None,
-    configured: Optional[str] = None,
-) -> Optional[WebSearchProvider]:
-    """Resolve a secondary provider for runtime failover.
-
-    Fallback selection is separate from active-provider selection: explicit
-    ``web.<capability>_fallback_backend`` / ``web.fallback_backend`` wins when
-    configured, otherwise we walk the normal preference order while excluding
-    the failed primary. Availability is always required for fallback candidates.
-    """
-    with _lock:
-        snapshot = dict(_providers)
-
-    exclude_name = (exclude or "").strip()
-
-    def _capable(p: WebSearchProvider) -> bool:
-        if capability == "search":
-            return bool(p.supports_search())
-        if capability == "extract":
-            return bool(p.supports_extract())
-        if capability == "crawl":
-            return bool(p.supports_crawl())
-        return False
-
-    def _is_available_safe(p: WebSearchProvider) -> bool:
-        try:
-            return bool(p.is_available())
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("provider %s.is_available() raised %s", p.name, exc)
-            return False
-
-    def _eligible(p: Optional[WebSearchProvider]) -> Optional[WebSearchProvider]:
-        if p is None:
-            return None
-        if p.name == exclude_name:
-            return None
-        if not _capable(p):
-            return None
-        if not _is_available_safe(p):
-            return None
-        return p
-
-    if configured:
-        provider = _eligible(snapshot.get(configured))
-        if provider is not None:
-            return provider
-        logger.debug(
-            "web fallback backend '%s' unavailable for '%s'; walking candidates",
-            configured,
-            capability,
-        )
-
-    for legacy in _LEGACY_PREFERENCE:
-        provider = _eligible(snapshot.get(legacy))
-        if provider is not None:
-            return provider
-    return None
-
-
-def get_fallback_search_provider(exclude: Optional[str] = None) -> Optional[WebSearchProvider]:
-    """Resolve a secondary web search provider for runtime failover."""
-    explicit = _read_config_key("web", "search_fallback_backend") or _read_config_key("web", "fallback_backend")
-    return _fallback_provider(capability="search", exclude=exclude, configured=explicit)
-
-
 def get_active_extract_provider() -> Optional[WebSearchProvider]:
     """Resolve the currently-active web extract provider.
 
@@ -307,27 +237,6 @@ def get_active_extract_provider() -> Optional[WebSearchProvider]:
     """
     explicit = _read_config_key("web", "extract_backend") or _read_config_key("web", "backend")
     return _resolve(explicit, capability="extract")
-
-
-def get_fallback_extract_provider(exclude: Optional[str] = None) -> Optional[WebSearchProvider]:
-    """Resolve a secondary web extract provider for runtime failover."""
-    explicit = _read_config_key("web", "extract_fallback_backend") or _read_config_key("web", "fallback_backend")
-    return _fallback_provider(capability="extract", exclude=exclude, configured=explicit)
-
-
-def get_active_crawl_provider() -> Optional[WebSearchProvider]:
-    """Resolve the currently-active web crawl provider.
-
-    Reads ``web.crawl_backend`` (preferred) or ``web.backend`` (shared
-    fallback) from config.yaml; falls back per the module docstring.
-
-    Crawl is a niche capability — among built-in providers only Tavily and
-    Firecrawl implement it. Callers should expect ``None`` and fall back to
-    a different strategy (e.g. summarize-via-LLM) when neither is
-    configured.
-    """
-    explicit = _read_config_key("web", "crawl_backend") or _read_config_key("web", "backend")
-    return _resolve(explicit, capability="crawl")
 
 
 def _reset_for_tests() -> None:
