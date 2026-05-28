@@ -789,7 +789,16 @@ def generate_drafts(brand, topics, platform=None, count_per_topic=1):
     Temporal gates: future fixtures only, stale tech auto-rejected.
     """
     drafts = []
-    platforms = [platform] if platform else ["twitter"]
+    # Use real brand platform when none specified — fixes default-twitter bug
+    from config import BRANDS
+    brand_config = BRANDS.get(brand, {})
+    brand_platforms = brand_config.get("platforms", [])
+    if platform:
+        platforms = [platform]
+    elif brand_platforms:
+        platforms = [brand_platforms[0]]
+    else:
+        platforms = ["twitter"]
 
     for topic in topics:
         for plat in platforms:

@@ -14,7 +14,7 @@ try:
 except ImportError:
     psycopg2 = None
 
-POSTGRES_HOST = os.getenv("POSTIZ_DB_HOST", "postiz-postgres")
+POSTGRES_HOST = os.getenv("POSTIZ_DB_HOST", "127.0.0.1")
 POSTGRES_PORT = int(os.getenv("POSTIZ_DB_PORT", "5432"))
 POSTGRES_USER = os.getenv("POSTIZ_DB_USER", "postiz-user")
 POSTGRES_PASS = os.getenv("POSTIZ_DB_PASS", "postiz-password")
@@ -34,11 +34,18 @@ INTEGRATION_MAP: dict[str, Optional[str]] = {
     "plenishd_twitter": None,
     "plenishd_instagram": None,
     "plenishd_linkedin": None,
-    "sahil_twitter_twitter": None,
-    "sahil_linkedin_linkedin": None,
+    "sahil_twitter_twitter": None,  # real ID from Postiz DB: cmp8jnrcs0003oa6vxtjfs4et
+    "sahil_linkedin_linkedin": None,  # real ID from Postiz DB: cmp8v51dh0001nz6y5nmydws4
     "coachos_twitter": None,
     "coachos_instagram": None,
     "coachos_linkedin": None,
+    # Hardcoded personal IDs — Postiz DB has these; refresh_integration_map()
+    # can't find them due to underscore-split bug (sahil_* brand keys).
+    # Bug: key.split("_",1) on e.g. "sahil_twitter_twitter" yields
+    # brand='sahil', provider='twitter_twitter' which won't match 'x'.
+    # Hardcode until refresh_integration_map is fixed for multi-word brands.
+    "sahil_twitter_twitter": "cmp8jnrcs0003oa6vxtjfs4et",
+    "sahil_linkedin_linkedin": "cmp8v51dh0001nz6y5nmydws4",
     # Telegram is wired — can be used for test posts
     "matchdaymaestro_telegram": "72a8d345-6951-4707-b503-03070d7643e3",
     "plenishd_telegram": "72a8d345-6951-4707-b503-03070d7643e3",
@@ -117,7 +124,21 @@ def refresh_integration_map() -> dict[str, Optional[str]]:
 
 def _get_integration_id(brand: str, platform: str) -> Optional[str]:
     key = f"{brand}_{platform}"
-    return INTEGRATION_MAP.get(key)
+    integration_id = INTEGRATION_MAP.get(key)
+    if integration_id:
+        return integration_id
+
+    # Lazy refresh: if the key exists but is None, try querying the live DB
+    # This catches cases where integrations were added after the map was built.
+    # Only refresh-once per call — no recursion.
+    if key in INTEGRATION_MAP:
+        try:
+            refresh_integration_map()
+            return INTEGRATION_MAP.get(key)
+        except Exception:
+            pass
+
+    return None
 
 
 def _manual_export(
@@ -195,6 +216,7 @@ def queue_post(
     title: Optional[str] = None,
     publish_at: Optional[datetime] = None,
     group: str = "kensei-generated",
+    state: str = "DRAFT",
 ) -> Optional[str]:
     """Insert a post into Postiz DB, or export manually if no integration.
 
@@ -218,12 +240,12 @@ def queue_post(
                 content, title, "group", delay, "approvedSubmitForOrder",
                 "createdAt", "updatedAt"
             ) VALUES (
-                %s, 'QUEUE', %s, %s, %s,
+                %s, %s, %s, %s, %s,
                 %s, %s, %s, 0, 'NO',
                 NOW(), NOW()
             )
             """,
-            (post_id, scheduled, ORG_ID, integration_id, body_text, title or "", group),
+            (post_id, state, scheduled, ORG_ID, integration_id, body_text, title or "", group),
         )
         conn.commit()
         cur.close()

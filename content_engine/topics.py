@@ -328,14 +328,15 @@ def get_topics(brand: str, count: int = 6, skip_used: bool = True) -> List[Dict]
                 recent_ids = get_recently_used_topics(brand, days=30)
             else:
                 recent_ids = []
-            available = [t for t in bank if t["id"] not in recent_ids]
+            available = [t for t in bank if t.get("id") not in recent_ids]
             if not available:
                 available = bank  # Fallback if all used
             needed = count - len(topics)
             for t in random.sample(available, min(needed, len(available))):
-                topics.append({"id": str(uuid.uuid4())[:8], **t})
+                tid = str(uuid.uuid4())[:8]
+                topics.append({"id": tid, **t})
                 # Mark as used in DB
-                log_topic_usage(t["id"], brand, t["topic"], platform)
+                log_topic_usage(tid, brand, t["topic"], platform)
 
         return topics
 

@@ -25,6 +25,7 @@ def run_stage_1(
     brand_topics: Optional[dict] = None,
     dry_run: bool = False,
     platform: Optional[str] = None,
+    use_llm: bool = False,
 ) -> List[dict]:
     """Generate drafts using LLM with brand voice. Zero cost if fallback templates.
 
@@ -33,10 +34,14 @@ def run_stage_1(
         brand_topics: Override topics: {brand: [{pillar, topic}, ...]}
         dry_run: If True, don't save to DB
         platform: Override platform (e.g., "twitter", "linkedin")
+        use_llm: If True, use LLM generation for personal brands instead of static templates
 
     Returns:
         List of draft dicts
     """
+    # Personal brands that get LLM generation
+    LLM_BRANDS = {"sahil_twitter", "sahil_linkedin"}
+
     all_drafts = []
 
     for brand in brands:
@@ -60,8 +65,17 @@ def run_stage_1(
 
         print(f"[{brand}] {len(topics)} topics, generating drafts...")
 
-        # Generate via LLM
-        drafts = generate_drafts(brand, topics, platform=platform)
+        # Determine platform from brand config (fixes default-twitter bug)
+        brand_config = BRANDS.get(brand, {})
+        brand_platforms = brand_config.get("platforms", [])
+        effective_platform = platform or (brand_platforms[0] if brand_platforms else "twitter")
+
+        # Generate — branch personal brands to LLM path
+        if use_llm and brand in LLM_BRANDS:
+            from llm_generate import generate_drafts_llm
+            drafts = generate_drafts_llm(brand, topics, platform=effective_platform)
+        else:
+            drafts = generate_drafts(brand, topics, platform=effective_platform)
 
         print(f"[{brand}] Generated {len(drafts)} draft(s)")
 
@@ -176,11 +190,15 @@ def run_digest(dry_run: bool = False) -> bool:
 
 
 def run_generate_all(dry_run: bool = False) -> bool:
-    """Run Stage 1 + deliver digest."""
+    """Run Stage 1 + deliver digest.
+
+    App brands use static templates; personal brands use LLM generation.
+    """
     brands = list(BRANDS.keys())
+    LLM_BRANDS = {"sahil_twitter", "sahil_linkedin"}
     
     print(f"Generating drafts for {len(brands)} brand(s)...")
-    drafts = run_stage_1(brands, dry_run=dry_run)
+    drafts = run_stage_1(brands, dry_run=dry_run, use_llm=True)
     
     if not drafts:
         print("No drafts generated.")
@@ -198,11 +216,18 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="KENSEI Content Engine v2")
     sub = parser.add_subparsers(dest="cmd")
 
-    # Stage 1
-    s1 = sub.add_parser("stage1", help="Stage 1: LLM draft generation")
+    # Stage 1 (static templates)
+    s1 = sub.add_parser("stage1", help="Stage 1: draft generation (static templates)")
     s1.add_argument("--brand", "-b", nargs="+", default=list(BRANDS.keys()))
     s1.add_argument("--platform", "-p", default=None)
     s1.add_argument("--dry-run", action="store_true")
+
+    # Stage 1 LLM (personal brands only)
+    s1llm = sub.add_parser("stage1-llm", help="Stage 1 LLM: personal brand generation via LLM")
+    s1llm.add_argument("--brand", "-b", nargs="+", default=["sahil_twitter", "sahil_linkedin"])
+    s1llm.add_argument("--platform", "-p", default=None)
+    s1llm.add_argument("--dry-run", action="store_true")
+    s1llm.add_argument("--self-call", action="store_true", help="Use local model call instead of subprocess")
 
     # Stage 2
     s2 = sub.add_parser("stage2", help="Stage 2: AI media generation")
@@ -246,6 +271,43 @@ def main() -> int:
     if args.cmd == "stage1":
         drafts = run_stage_1(args.brand, dry_run=args.dry_run, platform=args.platform)
         print(f"\nStage 1 complete: {len(drafts)} draft(s)")
+        return 0
+
+    elif args.cmd == "stage1-llm":
+        if args.self_call:
+            # Self-call mode: print the prompt for each brand's first topic
+            # so the calling agent can generate text directly
+            for brand in args.brand:
+                if brand not in BRANDS:
+                    print(f"Unknown brand: {brand}. Skipping.")
+                    continue
+                from topics import get_topics
+                topics = get_topics(brand, count=6)
+                if not topics:
+                    print(f"[{brand}] No topics found.")
+                    continue
+                brand_config = BRANDS.get(brand, {})
+                brand_platforms = brand_config.get("platforms", [])
+                effective_platform = args.platform or (brand_platforms[0] if brand_platforms else "twitter")
+
+                for i, topic in enumerate(topics):
+                    from llm_generate import build_generation_prompt
+                    prompts = build_generation_prompt(brand, topic, effective_platform)
+                    print(f"\n{'='*70}")
+                    print(f"BRAND={brand} PLATFORM={effective_platform} TOPIC={i+1}/{len(topics)}")
+                    print(f"PILLAR={topic.get('pillar','')} SUBJECT={topic.get('topic','')}")
+                    print(f"{'='*70}")
+                    print(f"\nSYSTEM PROMPT:\n{prompts['system']}")
+                    print(f"\nUSER PROMPT:\n{prompts['user']}")
+                    print(f"\n{'='*70}")
+            print("\n--self-call: generate text for each TOPIC above, then call:")
+            print("  content_engine.py stage1-llm --brand <brand> --persist")
+            print("  passing body_text via pipe or --body-text-file")
+            return 0
+
+        # Normal mode: generate drafts using the LLM path
+        drafts = run_stage_1(args.brand, dry_run=args.dry_run, platform=args.platform, use_llm=True)
+        print(f"\nStage 1 LLM complete: {len(drafts)} draft(s)")
         return 0
 
     elif args.cmd == "stage2":
