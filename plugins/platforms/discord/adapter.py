@@ -637,6 +637,18 @@ class DiscordAdapter(BasePlatformAdapter):
             or self.VOICE_TIMEOUT
         )
 
+        # ── Multi-agent voice floor (cross-process, filesystem-lock) ──
+        # When multiple bots share one VC, only the bot holding the floor
+        # may play TTS. Others pause their receiver while the floor is held.
+        self._multi_agent_voice_channel_id: Optional[int] = self._coerce_int(
+            extra.get("multi_agent_voice_channel_id")
+        )
+        _floor_ttl_raw = extra.get("voice_floor_ttl_seconds")
+        self._voice_floor_ttl: float = float(
+            self._coerce_int(_floor_ttl_raw, 60) or 60
+        )
+        self._voice_floor_dir: Optional[str] = None  # set lazily
+
         # Voice channel state (per-guild)
         self._voice_clients: Dict[int, Any] = {}  # guild_id -> VoiceClient
         self._voice_locks: Dict[int, asyncio.Lock] = {}  # guild_id -> serialize join/leave
@@ -2076,11 +2088,140 @@ class DiscordAdapter(BasePlatformAdapter):
     # Maximum seconds to wait for voice playback before giving up
     PLAYBACK_TIMEOUT = 120
 
+    # ------------------------------------------------------------------
+    # Multi-agent voice floor (filesystem-lock, cross-process)
+    # ------------------------------------------------------------------
+
+    def _floor_dir(self) -> Optional[Any]:
+        """Return the floor-lock directory Path, creating it if needed."""
+        if self._voice_floor_dir is None:
+            import pathlib
+            d = pathlib.Path.home() / ".hermes" / "voice-floor"
+            try:
+                d.mkdir(parents=True, exist_ok=True)
+                self._voice_floor_dir = str(d)
+            except Exception as exc:
+                logger.warning("voice-floor dir unavailable: %s", exc)
+                return None
+        import pathlib
+        return pathlib.Path(self._voice_floor_dir)
+
+    def _floor_lock_path(self, vc_channel_id: int) -> Optional[Any]:
+        d = self._floor_dir()
+        if d is None:
+            return None
+        return d / f"{vc_channel_id}.lock"
+
+    def _acquire_voice_floor(self, vc_channel_id: int) -> bool:
+        """Atomically acquire the voice floor for this bot (O_EXCL create).
+
+        Returns True on success. If another bot holds the lock and it is not
+        stale (mtime < TTL seconds ago), returns False. Stale locks are
+        forcibly removed so a crashed bot never deadlocks the channel.
+        """
+        lock_path = self._floor_lock_path(vc_channel_id)
+        if lock_path is None:
+            return True  # floor dir unavailable — allow play (fail-open)
+        import os as _os, json as _json
+        payload = _json.dumps({"bot_id": str(self._client.user.id)}).encode()
+        try:
+            fd = _os.open(str(lock_path), _os.O_WRONLY | _os.O_CREAT | _os.O_EXCL, 0o600)
+            _os.write(fd, payload)
+            _os.close(fd)
+            return True
+        except FileExistsError:
+            pass
+        # Check for stale lock (compare wall-clock mtime against TTL)
+        try:
+            age_seconds = time.time() - lock_path.stat().st_mtime
+            if age_seconds > self._voice_floor_ttl:
+                lock_path.unlink(missing_ok=True)
+                return self._acquire_voice_floor(vc_channel_id)
+        except Exception:
+            pass
+        return False
+
+    def _release_voice_floor(self, vc_channel_id: int) -> None:
+        """Release the voice floor by removing the lock file."""
+        lock_path = self._floor_lock_path(vc_channel_id)
+        if lock_path is None:
+            return
+        try:
+            lock_path.unlink(missing_ok=True)
+        except Exception as exc:
+            logger.debug("voice floor release error: %s", exc)
+
+    def _voice_floor_held_by_other(self, vc_channel_id: int) -> bool:
+        """True when the floor lock file exists and belongs to another bot."""
+        lock_path = self._floor_lock_path(vc_channel_id)
+        if lock_path is None:
+            return False
+        try:
+            if not lock_path.exists():
+                return False
+            import json as _json
+            payload = _json.loads(lock_path.read_bytes())
+            holder = str(payload.get("bot_id", ""))
+            my_id = str(getattr(getattr(self._client, "user", None), "id", ""))
+            if holder == my_id:
+                return False
+            # Stale check
+            if time.time() - lock_path.stat().st_mtime > self._voice_floor_ttl:
+                lock_path.unlink(missing_ok=True)
+                return False
+            return True
+        except Exception:
+            return False
+
+    async def _pause_while_floor_held(self, vc_channel_id: int, guild_id: int) -> None:
+        """Pause the voice receiver while another bot holds the floor.
+
+        Polls at 200 ms intervals (same cadence as the silence detector).
+        Called from the voice-listen loop when floor state changes.
+        """
+        receiver = self._voice_receivers.get(guild_id)
+        if receiver:
+            receiver.pause()
+        try:
+            while self._voice_floor_held_by_other(vc_channel_id):
+                await asyncio.sleep(0.2)
+        finally:
+            if receiver:
+                receiver.resume()
+
     async def play_in_voice_channel(self, guild_id: int, audio_path: str) -> bool:
-        """Play an audio file in the connected voice channel."""
+        """Play an audio file in the connected voice channel.
+
+        In a multi-agent VC (``multi_agent_voice_channel_id`` configured), the
+        bot acquires the cross-process voice floor before playing so two bots
+        never speak simultaneously. Other bots watching the same channel pause
+        their receivers while the floor is held, preventing cross-bot STT echo.
+        """
         vc = self._voice_clients.get(guild_id)
         if not vc or not vc.is_connected():
             return False
+
+        # Determine if this is a multi-agent channel that needs floor control.
+        vc_channel_id = getattr(getattr(vc, "channel", None), "id", None)
+        is_multi_agent = (
+            self._multi_agent_voice_channel_id is not None
+            and vc_channel_id == self._multi_agent_voice_channel_id
+        )
+
+        floor_acquired = False
+        if is_multi_agent:
+            # Poll until we get the floor (or fall back after timeout).
+            wait_start = time.monotonic()
+            while not self._acquire_voice_floor(int(vc_channel_id)):
+                if time.monotonic() - wait_start > self.PLAYBACK_TIMEOUT:
+                    logger.warning(
+                        "[%s] voice floor wait timeout in channel %s; playing anyway",
+                        self.name, vc_channel_id,
+                    )
+                    break
+                await asyncio.sleep(0.2)
+            else:
+                floor_acquired = True
 
         # Pause voice receiver while playing (echo prevention)
         receiver = self._voice_receivers.get(guild_id)
@@ -2118,6 +2259,8 @@ class DiscordAdapter(BasePlatformAdapter):
         finally:
             if receiver:
                 receiver.resume()
+            if is_multi_agent and floor_acquired and vc_channel_id:
+                self._release_voice_floor(int(vc_channel_id))
 
     # ------------------------------------------------------------------
     # Auto-join / greeting methods
@@ -2382,6 +2525,22 @@ class DiscordAdapter(BasePlatformAdapter):
                             vc._connection.send_packet(b'\xf8\xff\xfe')
                     except Exception:
                         pass
+
+                # Multi-agent floor check: if another bot holds the playback
+                # floor in the shared multi-agent VC, pause our receiver until
+                # it's released to avoid transcribing the other bot's TTS.
+                vc_ref = self._voice_clients.get(guild_id)
+                vc_channel_ref = getattr(getattr(vc_ref, "channel", None), "id", None)
+                if (
+                    self._multi_agent_voice_channel_id
+                    and vc_channel_ref == self._multi_agent_voice_channel_id
+                    and self._voice_floor_held_by_other(int(vc_channel_ref))
+                ):
+                    await self._pause_while_floor_held(int(vc_channel_ref), guild_id)
+                    # Receiver may have been paused; re-fetch in case it changed
+                    receiver = self._voice_receivers.get(guild_id)
+                    if not receiver or not receiver._running:
+                        break
 
                 completed = receiver.check_silence()
                 # Voice inputs always originate from a specific guild
@@ -6468,6 +6627,8 @@ def _apply_yaml_config(yaml_cfg: dict, discord_cfg: dict) -> dict | None:
         "auto_join_greeting_text",
         "auto_leave_on_user_exit",
         "voice_timeout_seconds",
+        "multi_agent_voice_channel_id",
+        "voice_floor_ttl_seconds",
     )
     _extra = discord_cfg.get("extra", {}) if isinstance(discord_cfg.get("extra"), dict) else {}
     return {
