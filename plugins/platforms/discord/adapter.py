@@ -577,6 +577,39 @@ class DiscordAdapter(BasePlatformAdapter):
     # Auto-disconnect from voice channel after this many seconds of inactivity
     VOICE_TIMEOUT = 300
 
+    # ------------------------------------------------------------------
+    # Config coercion helpers (must come before __init__)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _coerce_bool(value, default=False):
+        """Coerce a config-ish value to bool."""
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        lowered = str(value).strip().lower()
+        if lowered in {"1", "true", "yes", "on"}:
+            return True
+        if lowered in {"0", "false", "no", "off"}:
+            return False
+        return default
+
+    @staticmethod
+    def _coerce_int(value, default=None):
+        """Coerce a config-ish value to a positive int, or None/invalid to default."""
+        if value is None or value == "":
+            return default
+        try:
+            result = int(str(value).strip())
+        except (ValueError, TypeError):
+            return default
+        return result if result > 0 else default
+
+    # ------------------------------------------------------------------
+
     def __init__(self, config: PlatformConfig):
         super().__init__(config, Platform.DISCORD)
         self._client: Optional[commands.Bot] = None
@@ -587,6 +620,23 @@ class DiscordAdapter(BasePlatformAdapter):
         # Per-channel rolling log of author kind (bot vs human) for the
         # bot-to-bot loop-guard. channel_id -> deque[bool].
         self._channel_author_log: Dict[int, deque] = {}
+
+        # ── Auto-join / greeting config (driven by config.yaml discord.extra) ──
+        extra = getattr(config, "extra", None) or {}
+        self._auto_join_user_id: Optional[int] = self._coerce_int(extra.get("auto_join_user_id"))
+        self._auto_join_text_channel_id: Optional[int] = self._coerce_int(extra.get("auto_join_text_channel_id"))
+        self._auto_join_greeting_text: str = str(
+            extra.get("auto_join_greeting_text", "")
+            or "Hey, it's Misa-Misa. What's up? How can I help?"
+        ).strip()
+        self._auto_leave_on_user_exit: bool = self._coerce_bool(
+            extra.get("auto_leave_on_user_exit"), True
+        )
+        self._voice_timeout_seconds: float = float(
+            self._coerce_int(extra.get("voice_timeout_seconds"), self.VOICE_TIMEOUT)
+            or self.VOICE_TIMEOUT
+        )
+
         # Voice channel state (per-guild)
         self._voice_clients: Dict[int, Any] = {}  # guild_id -> VoiceClient
         self._voice_locks: Dict[int, asyncio.Lock] = {}  # guild_id -> serialize join/leave
@@ -640,9 +690,23 @@ class DiscordAdapter(BasePlatformAdapter):
             opus_path = ctypes.util.find_library("opus")
             if opus_path:
                 opus_candidates.append(opus_path)
+            # ctypes.util.find_library can fail in systemd / restricted envs
+            # even when the shared object exists on disk. Fall back to known
+            # Linux paths before trying macOS.
+            _linux_paths = (
+                "/usr/lib/x86_64-linux-gnu/libopus.so.0",
+                "/lib/x86_64-linux-gnu/libopus.so.0",
+                "/usr/lib64/libopus.so.0",
+            )
+            if not opus_path:
+                if sys.platform.startswith("linux"):
+                    for _lp in _linux_paths:
+                        if os.path.isfile(_lp):
+                            opus_candidates.append(_lp)
+                            break
             # ctypes.util.find_library fails on macOS with Homebrew-installed libs,
             # so fall back to known Homebrew paths if needed.
-            if not opus_path:
+            if not opus_path and not any(os.path.isfile(p) for p in _linux_paths):
                 _homebrew_paths = (
                     "/opt/homebrew/lib/libopus.dylib",  # Apple Silicon
                     "/usr/local/lib/libopus.dylib",     # Intel Mac
@@ -701,6 +765,14 @@ class DiscordAdapter(BasePlatformAdapter):
             intents.members = (
                 any(not entry.isdigit() for entry in self._allowed_user_ids)
                 or bool(self._allowed_role_ids)  # Need members intent for role lookup
+                or bool(self._auto_join_user_id)  # Need members intent for voice-state auto-join tracking
+            )
+            logger.debug(
+                "[%s] Intents configured: members=%s voice_states=%s auto_join_user_id=%s",
+                self.name,
+                intents.members,
+                intents.voice_states,
+                self._auto_join_user_id,
             )
             intents.voice_states = True
 
@@ -868,6 +940,10 @@ class DiscordAdapter(BasePlatformAdapter):
             @self._client.event
             async def on_voice_state_update(member, before, after):
                 """Track voice channel join/leave events."""
+                # ── Auto-join / leave for configured user (applied before tracking) ──
+                if member != adapter_self._client.user:
+                    await adapter_self._handle_auto_join_voice_state(member, before, after)
+
                 # Only track channels where the bot is connected
                 bot_guild_ids = set(adapter_self._voice_clients.keys())
                 if not bot_guild_ids:
@@ -2043,6 +2119,124 @@ class DiscordAdapter(BasePlatformAdapter):
             if receiver:
                 receiver.resume()
 
+    # ------------------------------------------------------------------
+    # Auto-join / greeting methods
+    # ------------------------------------------------------------------
+
+    async def _handle_auto_join_voice_state(self, member, before, after) -> None:
+        """Auto-join/leave voice when the configured user enters or exits VC."""
+        if not self._auto_join_user_id:
+            return
+        if int(getattr(member, "id", 0) or 0) != self._auto_join_user_id:
+            return
+
+        before_channel = getattr(before, "channel", None)
+        after_channel = getattr(after, "channel", None)
+        joined = before_channel is None and after_channel is not None
+        left = before_channel is not None and after_channel is None
+        switched = (
+            before_channel is not None
+            and after_channel is not None
+            and before_channel != after_channel
+        )
+
+        guild = getattr(member, "guild", None)
+        guild_id = getattr(guild, "id", None)
+        if guild_id is None:
+            return
+
+        if joined or switched:
+            logger.info(
+                "Auto-join: configured user %s entered VC %s",
+                getattr(member, "display_name", member.id),
+                getattr(after_channel, "name", after_channel),
+            )
+            joined_ok = await self.join_voice_channel(after_channel)
+            if not joined_ok:
+                return
+            # Wire the linked text channel so voice transcripts have a destination
+            guild_obj = getattr(member, "guild", None)
+            if guild_obj and self._auto_join_text_channel_id:
+                self._voice_text_channels[int(guild_id)] = self._auto_join_text_channel_id
+                self._voice_sources[int(guild_id)] = {
+                    "platform": "discord",
+                    "chat_id": str(self._auto_join_text_channel_id),
+                    "user_id": str(int(member.id)),
+                    "user_name": getattr(member, "display_name", str(member.id)),
+                    "chat_type": "channel",
+                }
+            await self._send_auto_join_text_greeting(member)
+            await self._play_auto_join_greeting(int(guild_id))
+        elif left and self._auto_leave_on_user_exit:
+            logger.info(
+                "Auto-leave: configured user %s left VC",
+                getattr(member, "display_name", member.id),
+            )
+            await self.leave_voice_channel(int(guild_id))
+
+    async def _send_auto_join_text_greeting(self, member) -> None:
+        """Send the configured greeting to the configured text channel."""
+        if not self._auto_join_greeting_text or not self._auto_join_text_channel_id:
+            return
+        guild = getattr(member, "guild", None)
+        get_channel = getattr(guild, "get_channel", None)
+        if not callable(get_channel):
+            return
+        text_channel = get_channel(self._auto_join_text_channel_id)
+        if text_channel is None:
+            logger.debug(
+                "Configured Discord auto-join text channel %s not found",
+                self._auto_join_text_channel_id,
+            )
+            return
+        send = getattr(text_channel, "send", None)
+        if not callable(send):
+            return
+        try:
+            await send(self._auto_join_greeting_text)
+        except Exception as exc:
+            logger.warning("Discord auto-join text greeting failed: %s", exc)
+
+    async def _play_auto_join_greeting(self, guild_id: int) -> None:
+        """Generate the configured greeting via Hermes TTS and play it in VC."""
+        if not self._auto_join_greeting_text:
+            return
+
+        tmp = tempfile.NamedTemporaryFile(prefix="discord_auto_join_", suffix=".mp3", delete=False)
+        output_path = tmp.name
+        tmp.close()
+        generated_path = output_path
+        try:
+            from tools.tts_tool import text_to_speech_tool
+
+            raw = await asyncio.to_thread(
+                text_to_speech_tool,
+                text=self._auto_join_greeting_text,
+                output_path=output_path,
+            )
+            import json as _json
+            result = _json.loads(raw)
+            if not result.get("success"):
+                logger.warning(
+                    "Discord auto-join TTS greeting failed: %s",
+                    result.get("error", "unknown error"),
+                )
+                return
+            generated_path = str(result.get("file_path") or output_path)
+            if not os.path.exists(generated_path) or os.path.getsize(generated_path) <= 0:
+                logger.warning("Discord auto-join TTS greeting produced no audio")
+                return
+            await self.play_in_voice_channel(guild_id, generated_path)
+        except Exception as exc:
+            logger.warning("Discord auto-join spoken greeting failed: %s", exc)
+        finally:
+            for p in {output_path, generated_path}:
+                try:
+                    if p and os.path.exists(p):
+                        os.unlink(p)
+                except Exception:
+                    pass
+
     async def get_user_voice_channel(self, guild_id: int, user_id: str):
         """Return the voice channel the user is currently in, or None."""
         if not self._client:
@@ -2067,7 +2261,7 @@ class DiscordAdapter(BasePlatformAdapter):
     async def _voice_timeout_handler(self, guild_id: int) -> None:
         """Auto-disconnect after VOICE_TIMEOUT seconds of inactivity."""
         try:
-            await asyncio.sleep(self.VOICE_TIMEOUT)
+            await asyncio.sleep(self._voice_timeout_seconds)
         except asyncio.CancelledError:
             return
         text_ch_id = self._voice_text_channels.get(guild_id)
@@ -6262,7 +6456,25 @@ def _apply_yaml_config(yaml_cfg: dict, discord_cfg: dict) -> dict | None:
     )
     if _discord_max_hops is not None and not os.getenv("DISCORD_MAX_BOT_HOPS"):
         os.environ["DISCORD_MAX_BOT_HOPS"] = str(_discord_max_hops).strip()
-    return None  # all settings flow through env; nothing to merge into extras
+
+    # Bridge voice/auto-join keys into PlatformConfig.extra so the adapter can
+    # consume them via ``config.extra.get("auto_join_user_id")`` rather than
+    # requiring env-only configuration. Check both top-level and inside
+    # ``extra`` so the profile works regardless of where the keys are placed
+    # in config.yaml.
+    _voice_keys_to_bridge = (
+        "auto_join_user_id",
+        "auto_join_text_channel_id",
+        "auto_join_greeting_text",
+        "auto_leave_on_user_exit",
+        "voice_timeout_seconds",
+    )
+    _extra = discord_cfg.get("extra", {}) if isinstance(discord_cfg.get("extra"), dict) else {}
+    return {
+        key: discord_cfg.get(key, _extra.get(key))
+        for key in _voice_keys_to_bridge
+        if key in discord_cfg or key in _extra
+    }
 
 
 def _is_connected(config) -> bool:

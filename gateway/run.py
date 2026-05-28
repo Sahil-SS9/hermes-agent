@@ -4097,6 +4097,7 @@ class GatewayRunner:
                 if success:
                     self.adapters[platform] = adapter
                     self._sync_voice_mode_state_to_adapter(adapter)
+                    self._wire_auto_join_voice_callbacks(adapter)
                     connected_count += 1
                     self._update_platform_runtime_status(
                         platform.value,
@@ -5701,6 +5702,7 @@ class GatewayRunner:
                     if success:
                         self.adapters[platform] = adapter
                         self._sync_voice_mode_state_to_adapter(adapter)
+                        self._wire_auto_join_voice_callbacks(adapter)
                         self.delivery_router.adapters = self.adapters
                         del self._failed_platforms[platform]
                         self._update_platform_runtime_status(
@@ -11152,15 +11154,123 @@ class GatewayRunner:
             adapter._voice_input_callback = None
         return "Left voice channel."
 
+    def _wire_auto_join_voice_callbacks(self, adapter) -> None:
+        """Pre-wire voice callbacks so auto-join actually hears transcripts.
+
+        ``_handle_auto_join_voice_state`` calls ``join_voice_channel`` directly
+        without going through ``_handle_voice_channel_join``, so the callback
+        and voice-mode state would otherwise never be set. Call this once after
+        each successful adapter connect so the adapter is ready to route audio
+        as soon as the configured user enters a VC.
+        """
+        if not getattr(adapter, "_auto_join_user_id", None):
+            return
+        text_ch_id = getattr(adapter, "_auto_join_text_channel_id", None)
+        if not text_ch_id:
+            return
+        platform = getattr(adapter, "platform", None)
+        if not isinstance(platform, Platform) or platform != Platform.DISCORD:
+            return
+        if hasattr(adapter, "_voice_input_callback"):
+            adapter._voice_input_callback = self._handle_voice_channel_input
+        if hasattr(adapter, "_on_voice_disconnect"):
+            adapter._on_voice_disconnect = self._handle_voice_timeout_cleanup
+        voice_key = self._voice_key(Platform.DISCORD, str(text_ch_id))
+        self._voice_mode[voice_key] = "all"
+        self._save_voice_modes()
+        self._set_adapter_auto_tts_enabled(adapter, str(text_ch_id), enabled=True)
+        logger.info(
+            "Auto-join voice callbacks wired for text channel %s", text_ch_id,
+        )
+
     def _handle_voice_timeout_cleanup(self, chat_id: str) -> None:
         """Called by the adapter when a voice channel times out.
 
-        Cleans up runner-side voice_mode state that the adapter cannot reach.
+        Cleans up runner-side voice_mode state and triggers the session
+        summary/handoff so the conversation is documented and handed to KENSEI.
         """
         self._voice_mode[self._voice_key(Platform.DISCORD, chat_id)] = "off"
         self._save_voice_modes()
         adapter = self.adapters.get(Platform.DISCORD)
         self._set_adapter_auto_tts_disabled(adapter, chat_id, disabled=True)
+        # Fire-and-forget summary in background task so timeout handler returns quickly.
+        import asyncio as _asyncio
+        try:
+            loop = _asyncio.get_event_loop()
+            if loop.is_running():
+                loop.create_task(self._trigger_voice_session_summary(chat_id))
+        except Exception as exc:
+            logger.debug("Could not schedule voice session summary: %s", exc)
+
+    async def _trigger_voice_session_summary(self, chat_id: str) -> None:
+        """Generate an end-of-session summary and hand off to KENSEI.
+
+        Called when a Misa-Misa voice session ends (timeout or user leave).
+        Reads the session's accumulated intake log, asks the agent to produce a
+        structured summary, posts it to the linked text channel, and pings
+        KENSEI so it can review and create a kanban task or ask clarifying
+        questions. KENSEI is the only gateway that writes to the kanban DB.
+        """
+        from pathlib import Path as _Path
+
+        adapter = self.adapters.get(Platform.DISCORD)
+        text_ch_id = chat_id
+        if adapter is None:
+            return
+
+        # Locate the session intake log (per-session, keyed by chat_id).
+        intake_dir = _Path("/home/kensei/.hermes/governance/logboard/intake")
+        session_log = intake_dir / f"session-{chat_id}.md"
+        if not session_log.exists():
+            logger.debug("No intake log found for session %s; skipping summary", chat_id)
+            return
+
+        raw_notes = session_log.read_text(encoding="utf-8")
+        if not raw_notes.strip():
+            return
+
+        # Build a synthetic prompt requesting a structured summary from the agent.
+        summary_prompt = (
+            "The voice session has ended. Based on the transcript below, produce a "
+            "concise structured summary with these sections: **Overview** (1-2 sentences), "
+            "**Key ideas** (bullet list), **Open questions** (bullet list), "
+            "**Proposed actions** (bullet list). After the summary, mention that "
+            "@KENSEI should review and create tasks or ask any clarifying questions.\n\n"
+            f"---\n{raw_notes[:6000]}"
+        )
+
+        try:
+            channel = adapter._client.get_channel(int(text_ch_id))
+        except Exception:
+            channel = None
+
+        if channel is None:
+            logger.warning("_trigger_voice_session_summary: text channel %s not found", text_ch_id)
+            return
+
+        try:
+            # Use the standard pipeline: build a MessageEvent and let the agent
+            # produce the summary naturally, then post its response to the channel.
+            from types import SimpleNamespace
+            source = SessionSource(
+                platform=Platform.DISCORD,
+                chat_id=str(text_ch_id),
+                user_id="system",
+                user_name="session-end",
+                chat_type="channel",
+            )
+            event = MessageEvent(
+                source=source,
+                text=summary_prompt,
+                message_type=MessageType.TEXT,
+                raw_message=SimpleNamespace(guild_id=None, guild=None),
+            )
+            await adapter.handle_message(event)
+            # Mark session log processed so a restart doesn't re-trigger.
+            processed = session_log.with_suffix(".md.done")
+            session_log.rename(processed)
+        except Exception as exc:
+            logger.warning("_trigger_voice_session_summary: failed: %s", exc)
 
     def _is_duplicate_voice_transcript(self, guild_id: int, user_id: int, transcript: str) -> bool:
         """Suppress repeated STT outputs for the same recent utterance.
@@ -11257,6 +11367,26 @@ class GatewayRunner:
                 await channel.send(f"**[Voice]** <@{user_id}>: {safe_text}")
         except Exception:
             pass
+
+        # ── Misa-Misa session intake log (per-session append) ──
+        # One log file per linked text channel (chat_id), appending each turn
+        # so the full session is available for end-of-session summarisation.
+        # Key is the text channel ID rather than wall time so multiple turns
+        # within the same minute are never lost.
+        import datetime as _dt
+        from pathlib import Path as _Path
+        now = _dt.datetime.now()
+        intake_dir = _Path("/home/kensei/.hermes/governance/logboard/intake")
+        intake_dir.mkdir(parents=True, exist_ok=True)
+        session_log = intake_dir / f"session-{text_ch_id}.md"
+        try:
+            with session_log.open("a", encoding="utf-8") as _f:
+                _f.write(
+                    f"\n[{now.strftime('%Y-%m-%d %H:%M:%S')}] <@{user_id}>: {transcript}\n"
+                )
+            logger.debug("Misa-Misa intake: appended turn to %s", session_log)
+        except Exception as exc:
+            logger.warning("Misa-Misa intake: failed to write intake log: %s", exc)
 
         # Build a synthetic MessageEvent and feed through the normal pipeline
         # Use SimpleNamespace as raw_message so _get_guild_id() can extract
