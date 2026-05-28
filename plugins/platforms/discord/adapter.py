@@ -640,6 +640,9 @@ class DiscordAdapter(BasePlatformAdapter):
             extra.get("auto_join_greeting_text", "")
             or "Hey! Ready when you are."
         ).strip()
+        self._auto_join_send_text_greeting: bool = self._coerce_bool(
+            extra.get("auto_join_send_text_greeting"), True
+        )
         self._auto_leave_on_user_exit: bool = self._coerce_bool(
             extra.get("auto_leave_on_user_exit"), True
         )
@@ -2340,7 +2343,8 @@ class DiscordAdapter(BasePlatformAdapter):
                     "user_name": getattr(member, "display_name", str(member.id)),
                     "chat_type": "channel",
                 }
-            await self._send_auto_join_text_greeting(member)
+            if self._auto_join_send_text_greeting:
+                await self._send_auto_join_text_greeting(member)
             await self._play_auto_join_greeting(int(guild_id))
         elif left and self._auto_leave_on_user_exit:
             logger.info(
@@ -6657,6 +6661,7 @@ def _apply_yaml_config(yaml_cfg: dict, discord_cfg: dict) -> dict | None:
         "auto_join_user_id",
         "auto_join_channel_id",
         "auto_join_delay_seconds",
+        "auto_join_send_text_greeting",
         "auto_join_text_channel_id",
         "auto_join_greeting_text",
         "auto_leave_on_user_exit",
