@@ -1142,3 +1142,187 @@ class TestModelToolsIntegration:
         assert "discord" not in names
         assert "discord_admin" not in names
         assert "discord_server" not in names
+
+
+# ---------------------------------------------------------------------------
+# Actions: channel self-management (create / edit / move / delete / perms)
+# ---------------------------------------------------------------------------
+
+class TestChannelManagement:
+    @patch("tools.discord_tool._discord_request")
+    def test_create_text_channel(self, mock_req, monkeypatch):
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "tok")
+        mock_req.return_value = {"id": "900", "name": "new-chan", "type": 0, "parent_id": "500"}
+        result = json.loads(discord_admin_handler(
+            action="create_channel", guild_id="111", name="new-chan",
+            channel_type=0, parent_id="500", topic="hello",
+        ))
+        assert result["success"] is True
+        assert result["channel_id"] == "900"
+        mock_req.assert_called_once_with(
+            "POST", "/guilds/111/channels", "tok",
+            body={"name": "new-chan", "type": 0, "parent_id": "500", "topic": "hello"},
+        )
+
+    @patch("tools.discord_tool._discord_request")
+    def test_create_voice_channel_omits_topic(self, mock_req, monkeypatch):
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "tok")
+        mock_req.return_value = {"id": "901", "name": "Voice", "type": 2}
+        json.loads(discord_admin_handler(
+            action="create_channel", guild_id="111", name="Voice",
+            channel_type=2, topic="should-be-dropped",
+        ))
+        _, _, _ = mock_req.call_args[0]
+        body = mock_req.call_args[1]["body"]
+        assert body == {"name": "Voice", "type": 2}
+        assert "topic" not in body
+
+    @patch("tools.discord_tool._discord_request")
+    def test_create_category(self, mock_req, monkeypatch):
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "tok")
+        mock_req.return_value = {"id": "902", "name": "Ops", "type": 4}
+        result = json.loads(discord_admin_handler(
+            action="create_category", guild_id="111", name="Ops",
+        ))
+        assert result["type"] == "category"
+        mock_req.assert_called_once_with(
+            "POST", "/guilds/111/channels", "tok", body={"name": "Ops", "type": 4},
+        )
+
+    @patch("tools.discord_tool._discord_request")
+    def test_edit_channel(self, mock_req, monkeypatch):
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "tok")
+        mock_req.return_value = {"id": "11", "name": "renamed", "topic": "t"}
+        result = json.loads(discord_admin_handler(
+            action="edit_channel", channel_id="11", name="renamed", topic="t",
+        ))
+        assert result["success"] is True
+        mock_req.assert_called_once_with(
+            "PATCH", "/channels/11", "tok", body={"name": "renamed", "topic": "t"},
+        )
+
+    def test_edit_channel_requires_a_field(self, monkeypatch):
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "tok")
+        result = json.loads(discord_admin_handler(action="edit_channel", channel_id="11"))
+        assert "error" in result
+
+    @patch("tools.discord_tool._discord_request")
+    def test_move_channel(self, mock_req, monkeypatch):
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "tok")
+        mock_req.return_value = {"id": "11", "parent_id": "500", "position": 3}
+        result = json.loads(discord_admin_handler(
+            action="move_channel", channel_id="11", parent_id="500", position="3",
+        ))
+        assert result["success"] is True
+        mock_req.assert_called_once_with(
+            "PATCH", "/channels/11", "tok", body={"parent_id": "500", "position": 3},
+        )
+
+    @patch("tools.discord_tool._discord_request")
+    @patch("tools.discord_tool._discord_request")
+    def test_delete_channel_requires_confirm(self, mock_req, monkeypatch):
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "tok")
+        result = json.loads(discord_admin_handler(action="delete_channel", channel_id="11"))
+        assert "error" in result
+        mock_req.assert_not_called()
+
+    @patch("tools.discord_tool._discord_request")
+    def test_delete_channel_with_confirm(self, mock_req, monkeypatch):
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "tok")
+        mock_req.return_value = None
+        result = json.loads(discord_admin_handler(
+            action="delete_channel", channel_id="11", confirm="true",
+        ))
+        assert result["success"] is True
+        mock_req.assert_called_once_with("DELETE", "/channels/11", "tok")
+
+    @patch("tools.discord_tool._discord_request")
+    def test_set_channel_permissions(self, mock_req, monkeypatch):
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "tok")
+        mock_req.return_value = None
+        result = json.loads(discord_admin_handler(
+            action="set_channel_permissions", channel_id="11", overwrite_id="77",
+            overwrite_type=0, allow="1024", deny="0",
+        ))
+        assert result["success"] is True
+        # 1024 = VIEW_CHANNEL which is in the safe set — should pass through unchanged
+        assert result["allow_applied"] == "1024"
+        mock_req.assert_called_once_with(
+            "PUT", "/channels/11/permissions/77", "tok",
+            body={"type": 0, "allow": "1024", "deny": "0"},
+        )
+
+    def test_set_channel_permissions_masks_dangerous_bits(self, monkeypatch):
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "tok")
+        with patch("tools.discord_tool._discord_request") as mock_req:
+            mock_req.return_value = None
+            # 8 = ADMINISTRATOR — must be masked to 0
+            result = json.loads(discord_admin_handler(
+                action="set_channel_permissions", channel_id="11", overwrite_id="77",
+                allow="8",
+            ))
+        assert result["success"] is True
+        assert result["allow_applied"] == "0"
+
+    def test_set_channel_permissions_requires_overwrite_id(self, monkeypatch):
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "tok")
+        result = json.loads(discord_admin_handler(
+            action="set_channel_permissions", channel_id="11",
+        ))
+        assert "error" in result
+        assert "overwrite_id" in result["error"]
+
+
+# ---------------------------------------------------------------------------
+# Gating: channel-management actions are admin-only
+# ---------------------------------------------------------------------------
+
+class TestChannelActionGating:
+    def test_channel_actions_are_admin_not_core(self):
+        for name in (
+            "create_channel", "create_category", "edit_channel",
+            "move_channel", "delete_channel", "set_channel_permissions",
+        ):
+            assert name in _ADMIN_ACTIONS
+            assert name not in _CORE_ACTIONS
+
+    def test_core_handler_rejects_channel_actions(self, monkeypatch):
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "tok")
+        result = json.loads(discord_core(action="delete_channel", channel_id="11"))
+        assert "error" in result
+
+
+# ---------------------------------------------------------------------------
+# _discord_request 429 retry
+# ---------------------------------------------------------------------------
+
+class TestRateLimitRetry:
+    def test_429_retries_then_succeeds(self, monkeypatch):
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "tok")
+        sleeps = []
+        monkeypatch.setattr("tools.discord_tool.time.sleep", lambda s: sleeps.append(s))
+
+        err = urllib.error.HTTPError(
+            "https://x", 429, "rate limited",
+            {"Retry-After": "0.2"}, BytesIO(b'{"message":"rate limited"}'),
+        )
+        ok = _mock_urlopen({"id": "1", "name": "ok"})
+        with patch("tools.discord_tool.urllib.request.urlopen", side_effect=[err, ok]):
+            result = _discord_request("POST", "/guilds/1/channels", "tok", body={"name": "x"})
+        assert result == {"id": "1", "name": "ok"}
+        assert sleeps == [0.2]
+
+    def test_429_exhausts_retries_raises(self, monkeypatch):
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "tok")
+        monkeypatch.setattr("tools.discord_tool.time.sleep", lambda s: None)
+
+        def _make_429(*a, **k):
+            return urllib.error.HTTPError(
+                "https://x", 429, "rate limited",
+                {"Retry-After": "0.1"}, BytesIO(b'{"message":"rate limited"}'),
+            )
+
+        with patch("tools.discord_tool.urllib.request.urlopen", side_effect=_make_429()):
+            with pytest.raises(DiscordAPIError) as exc:
+                _discord_request("POST", "/x", "tok", max_retries=1)
+        assert exc.value.status == 429

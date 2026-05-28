@@ -28,6 +28,7 @@ actionable guidance the model can relay to the user.
 import json
 import logging
 import os
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -62,8 +63,13 @@ def _discord_request(
     params: Optional[Dict[str, str]] = None,
     body: Optional[Dict[str, Any]] = None,
     timeout: int = 15,
+    max_retries: int = 2,
 ) -> Any:
-    """Make a request to the Discord REST API."""
+    """Make a request to the Discord REST API.
+
+    On HTTP 429 (rate limited) the call honours the ``Retry-After`` header and
+    retries up to ``max_retries`` times — useful for bulk channel operations.
+    """
     url = f"{DISCORD_API_BASE}{path}"
     if params:
         url += "?" + urllib.parse.urlencode(params)
@@ -83,18 +89,30 @@ def _discord_request(
         },
     )
 
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            if resp.status == 204:
-                return None
-            return json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        error_body = ""
+    attempt = 0
+    while True:
         try:
-            error_body = e.read().decode("utf-8", errors="replace")
-        except Exception:
-            pass
-        raise DiscordAPIError(e.code, error_body) from e
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                if resp.status == 204:
+                    return None
+                return json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            error_body = ""
+            try:
+                error_body = e.read().decode("utf-8", errors="replace")
+            except Exception:
+                pass
+            if e.code == 429 and attempt < max_retries:
+                retry_after = e.headers.get("Retry-After") if e.headers else None
+                try:
+                    delay = min(float(retry_after), 10.0) if retry_after else 1.0
+                except (TypeError, ValueError):
+                    delay = 1.0
+                logger.warning("Discord 429 on %s %s; retrying in %.1fs", method, path, delay)
+                time.sleep(delay)
+                attempt += 1
+                continue
+            raise DiscordAPIError(e.code, error_body) from e
 
 
 class DiscordAPIError(Exception):
@@ -466,6 +484,160 @@ def _remove_role(token: str, guild_id: str, user_id: str, role_id: str, **_kwarg
     return json.dumps({"success": True, "message": f"Role {role_id} removed from user {user_id}."})
 
 
+def _create_channel(
+    token: str, guild_id: str, name: str,
+    channel_type: int = 0,
+    parent_id: str = "",
+    topic: str = "",
+    **_kwargs: Any,
+) -> str:
+    """Create a channel (text/voice/forum) in a guild.
+
+    Voice channels (type 2) reject a ``topic`` field, so it is omitted there.
+    """
+    body: Dict[str, Any] = {"name": name, "type": int(channel_type)}
+    if parent_id:
+        body["parent_id"] = parent_id
+    # Voice channels (type 2) do not accept a topic — Discord returns 50035.
+    if topic and int(channel_type) != 2:
+        body["topic"] = topic
+    ch = _discord_request("POST", f"/guilds/{guild_id}/channels", token, body=body)
+    return json.dumps({
+        "success": True,
+        "channel_id": ch["id"],
+        "name": ch.get("name"),
+        "type": _channel_type_name(ch.get("type", channel_type)),
+        "parent_id": ch.get("parent_id"),
+    })
+
+
+def _create_category(token: str, guild_id: str, name: str, **_kwargs: Any) -> str:
+    """Create a category (type 4) to group channels under."""
+    ch = _discord_request("POST", f"/guilds/{guild_id}/channels", token, body={"name": name, "type": 4})
+    return json.dumps({"success": True, "channel_id": ch["id"], "name": ch.get("name"), "type": "category"})
+
+
+def _edit_channel(
+    token: str, channel_id: str, name: str = "", topic: str = "", **_kwargs: Any,
+) -> str:
+    """Rename and/or re-topic an existing channel."""
+    body: Dict[str, Any] = {}
+    if name:
+        body["name"] = name
+    if topic:
+        body["topic"] = topic
+    if not body:
+        return json.dumps({"error": "edit_channel needs at least one of: name, topic."})
+    ch = _discord_request("PATCH", f"/channels/{channel_id}", token, body=body)
+    return json.dumps({
+        "success": True,
+        "channel_id": ch["id"],
+        "name": ch.get("name"),
+        "topic": ch.get("topic"),
+    })
+
+
+def _move_channel(
+    token: str, channel_id: str, parent_id: str = "", position: str = "", **_kwargs: Any,
+) -> str:
+    """Move a channel to a category and/or set its position."""
+    body: Dict[str, Any] = {}
+    if parent_id:
+        body["parent_id"] = parent_id
+    if position != "":
+        try:
+            body["position"] = int(position)
+        except (TypeError, ValueError):
+            return json.dumps({"error": f"Invalid position {position!r}; must be an integer."})
+    if not body:
+        return json.dumps({"error": "move_channel needs at least one of: parent_id, position."})
+    ch = _discord_request("PATCH", f"/channels/{channel_id}", token, body=body)
+    return json.dumps({
+        "success": True,
+        "channel_id": ch["id"],
+        "parent_id": ch.get("parent_id"),
+        "position": ch.get("position"),
+    })
+
+
+def _delete_channel(token: str, channel_id: str, confirm: str = "", **_kwargs: Any) -> str:
+    """Delete a channel or category. Destructive and irreversible.
+
+    Must be called with ``confirm="true"`` to prevent accidental deletion by
+    a misguided or prompt-injected agent.
+    """
+    if str(confirm).strip().lower() != "true":
+        return json.dumps({
+            "error": (
+                "delete_channel requires confirm=\"true\" to proceed. "
+                "Verify the channel_id and re-call with confirm=\"true\"."
+            ),
+        })
+    _discord_request("DELETE", f"/channels/{channel_id}", token)
+    return json.dumps({"success": True, "message": f"Channel {channel_id} deleted."})
+
+
+def _set_channel_permissions(
+    token: str, channel_id: str, overwrite_id: str,
+    overwrite_type: int = 0,
+    allow: str = "0",
+    deny: str = "0",
+    **_kwargs: Any,
+) -> str:
+    """Set a single permission overwrite on a channel (append-style, PUT).
+
+    ``overwrite_type`` 0 = role, 1 = member. ``allow``/``deny`` are Discord
+    permission bitfield strings. Only the safe channel-scoped bits below are
+    permitted; dangerous bits (ADMINISTRATOR, MANAGE_GUILD, etc.) are masked
+    out to prevent accidental or injected privilege escalation.
+    Requires the bot to have MANAGE_ROLES in the channel.
+    """
+    # Safe bits: VIEW_CHANNEL, SEND_MESSAGES, READ_MESSAGE_HISTORY,
+    # EMBED_LINKS, ATTACH_FILES, ADD_REACTIONS, SEND_TTS_MESSAGES,
+    # MENTION_EVERYONE (controlled), USE_EXTERNAL_EMOJIS,
+    # CONNECT, SPEAK, USE_VAD, DEAFEN_MEMBERS, MUTE_MEMBERS, MOVE_MEMBERS,
+    # CREATE_PUBLIC_THREADS, CREATE_PRIVATE_THREADS, SEND_MESSAGES_IN_THREADS,
+    # MANAGE_MESSAGES, MANAGE_THREADS.
+    _SAFE_PERMISSION_BITS = (
+        0x0000000000000400   # VIEW_CHANNEL
+        | 0x0000000000000800  # SEND_MESSAGES
+        | 0x0000000000010000  # READ_MESSAGE_HISTORY
+        | 0x0000000000004000  # EMBED_LINKS
+        | 0x0000000000008000  # ATTACH_FILES
+        | 0x0000000000000040  # ADD_REACTIONS
+        | 0x0000000000001000  # SEND_TTS_MESSAGES
+        | 0x0000000000020000  # USE_EXTERNAL_EMOJIS
+        | 0x0000000000100000  # CONNECT
+        | 0x0000000000200000  # SPEAK
+        | 0x0000000000400000  # MUTE_MEMBERS
+        | 0x0000000000800000  # DEAFEN_MEMBERS
+        | 0x0000000001000000  # MOVE_MEMBERS
+        | 0x0000000002000000  # USE_VAD
+        | 0x0000000800000000  # MANAGE_MESSAGES
+        | 0x0000001000000000  # CREATE_PUBLIC_THREADS
+        | 0x0000002000000000  # CREATE_PRIVATE_THREADS
+        | 0x0000004000000000  # SEND_MESSAGES_IN_THREADS
+        | 0x0000010000000000  # MANAGE_THREADS
+    )
+    try:
+        allow_bits = int(allow or "0") & _SAFE_PERMISSION_BITS
+        deny_bits = int(deny or "0") & _SAFE_PERMISSION_BITS
+    except (ValueError, TypeError):
+        return json.dumps({"error": "allow/deny must be integer bitfield strings."})
+    body = {
+        "type": int(overwrite_type),
+        "allow": str(allow_bits),
+        "deny": str(deny_bits),
+    }
+    _discord_request("PUT", f"/channels/{channel_id}/permissions/{overwrite_id}", token, body=body)
+    return json.dumps({
+        "success": True,
+        "message": f"Permission overwrite set for {overwrite_id} on channel {channel_id}.",
+        "allow_applied": str(allow_bits),
+        "deny_applied": str(deny_bits),
+    })
+
+
 # ---------------------------------------------------------------------------
 # Action dispatch + metadata
 # ---------------------------------------------------------------------------
@@ -486,6 +658,12 @@ _ACTIONS = {
     "create_thread": _create_thread,
     "add_role": _add_role,
     "remove_role": _remove_role,
+    "create_channel": _create_channel,
+    "create_category": _create_category,
+    "edit_channel": _edit_channel,
+    "move_channel": _move_channel,
+    "delete_channel": _delete_channel,
+    "set_channel_permissions": _set_channel_permissions,
 }
 
 _CORE_ACTION_NAMES = frozenset({"fetch_messages", "search_members", "create_thread"})
@@ -513,6 +691,12 @@ _ACTION_MANIFEST: List[Tuple[str, str, str]] = [
     ("create_thread", "(channel_id, name)", "create a public thread; optional message_id anchor"),
     ("add_role", "(guild_id, user_id, role_id)", "assign a role"),
     ("remove_role", "(guild_id, user_id, role_id)", "remove a role"),
+    ("create_channel", "(guild_id, name, [channel_type], [parent_id], [topic])", "create a text/voice/forum channel; channel_type 0=text 2=voice 15=forum; topic ignored for voice"),
+    ("create_category", "(guild_id, name)", "create a category to group channels"),
+    ("edit_channel", "(channel_id, [name], [topic])", "rename and/or re-topic a channel"),
+    ("move_channel", "(channel_id, [parent_id], [position])", "move a channel to a category / set position"),
+    ("delete_channel", "(channel_id)", "delete a channel or category (destructive)"),
+    ("set_channel_permissions", "(channel_id, overwrite_id, [overwrite_type], [allow], [deny])", "set one permission overwrite (role/member); needs MANAGE_ROLES"),
 ]
 
 # Actions that require the GUILD_MEMBERS privileged intent.
@@ -534,6 +718,12 @@ _REQUIRED_PARAMS: Dict[str, List[str]] = {
     "create_thread": ["channel_id", "name"],
     "add_role": ["guild_id", "user_id", "role_id"],
     "remove_role": ["guild_id", "user_id", "role_id"],
+    "create_channel": ["guild_id", "name"],
+    "create_category": ["guild_id", "name"],
+    "edit_channel": ["channel_id"],
+    "move_channel": ["channel_id"],
+    "delete_channel": ["channel_id"],
+    "set_channel_permissions": ["channel_id", "overwrite_id"],
 }
 
 
@@ -712,6 +902,44 @@ def _build_schema(
             "enum": [60, 1440, 4320, 10080],
             "description": "Thread archive duration in minutes (create_thread, default 1440).",
         },
+        "channel_type": {
+            "type": "integer",
+            "enum": [0, 2, 4, 15],
+            "description": "Channel type for create_channel: 0=text, 2=voice, 4=category, 15=forum (default 0).",
+        },
+        "parent_id": {
+            "type": "string",
+            "description": "Category channel ID to nest under (create_channel, move_channel).",
+        },
+        "topic": {
+            "type": "string",
+            "description": "Channel topic/description (create_channel, edit_channel). Ignored for voice channels.",
+        },
+        "position": {
+            "type": "string",
+            "description": "Channel position as an integer string (move_channel).",
+        },
+        "overwrite_id": {
+            "type": "string",
+            "description": "Role ID or member ID the permission overwrite applies to (set_channel_permissions).",
+        },
+        "overwrite_type": {
+            "type": "integer",
+            "enum": [0, 1],
+            "description": "Overwrite target type: 0=role, 1=member (set_channel_permissions, default 0).",
+        },
+        "allow": {
+            "type": "string",
+            "description": "Permission bitfield string to allow (set_channel_permissions). Dangerous bits (ADMINISTRATOR etc.) are masked out.",
+        },
+        "deny": {
+            "type": "string",
+            "description": "Permission bitfield string to deny (set_channel_permissions).",
+        },
+        "confirm": {
+            "type": "string",
+            "description": "Must be \"true\" to execute delete_channel (prevents accidental deletion).",
+        },
     }
 
     return {
@@ -799,6 +1027,26 @@ _ACTION_403_HINT = {
         "Bot cannot see this guild member (missing Server Members intent or "
         "insufficient permissions)."
     ),
+    "create_channel": (
+        "Bot lacks MANAGE_CHANNELS in this guild, or cannot see the target category."
+    ),
+    "create_category": (
+        "Bot lacks MANAGE_CHANNELS in this guild."
+    ),
+    "edit_channel": (
+        "Bot lacks MANAGE_CHANNELS, or cannot view the channel."
+    ),
+    "move_channel": (
+        "Bot lacks MANAGE_CHANNELS, or cannot view the channel/target category."
+    ),
+    "delete_channel": (
+        "Bot lacks MANAGE_CHANNELS in this channel, or cannot view it."
+    ),
+    "set_channel_permissions": (
+        "Bot needs MANAGE_ROLES (not just MANAGE_CHANNELS) to edit permission "
+        "overwrites, and its own role must sit above the overwrite target. "
+        "Combined invite permission value 268553232 grants both."
+    ),
 }
 
 
@@ -839,6 +1087,15 @@ def _run_discord_action(
     before: str = "",
     after: str = "",
     auto_archive_duration: int = 1440,
+    channel_type: int = 0,
+    parent_id: str = "",
+    topic: str = "",
+    position: str = "",
+    overwrite_id: str = "",
+    overwrite_type: int = 0,
+    allow: str = "0",
+    deny: str = "0",
+    confirm: str = "",
 ) -> str:
     """Shared handler logic for both discord tools."""
     token = _get_bot_token()
@@ -872,6 +1129,7 @@ def _run_discord_action(
         "message_id": message_id,
         "query": query,
         "name": name,
+        "overwrite_id": overwrite_id,
     }
 
     missing = [p for p in _REQUIRED_PARAMS.get(action, []) if not local_vars.get(p)]
@@ -894,6 +1152,15 @@ def _run_discord_action(
             before=before,
             after=after,
             auto_archive_duration=auto_archive_duration,
+            channel_type=channel_type,
+            parent_id=parent_id,
+            topic=topic,
+            position=position,
+            overwrite_id=overwrite_id,
+            overwrite_type=overwrite_type,
+            allow=allow,
+            deny=deny,
+            confirm=confirm,
         )
     except DiscordAPIError as e:
         logger.warning("Discord API error in %s action '%s': %s", tool_label, action, e)
@@ -923,6 +1190,9 @@ _HANDLER_DEFAULTS = {
     "action": "", "guild_id": "", "channel_id": "", "user_id": "",
     "role_id": "", "message_id": "", "query": "", "name": "",
     "limit": 50, "before": "", "after": "", "auto_archive_duration": 1440,
+    "channel_type": 0, "parent_id": "", "topic": "", "position": "",
+    "overwrite_id": "", "overwrite_type": 0, "allow": "0", "deny": "0",
+    "confirm": "",
 }
 
 
