@@ -152,16 +152,34 @@ def _check_via_rev(local_rev: str) -> Optional[int]:
 
 
 def _check_via_local_git(repo_dir: Path) -> Optional[int]:
-    """Count commits behind origin/main in a local checkout."""
+    """Count commits behind upstream (or origin) in a local checkout.
+
+    In Sahil's fork-as-trunk topology ``origin`` is the personal fork and
+    ``upstream`` is NousResearch/hermes-agent.  Prefer the latter when it
+    exists so the banner shows real upstream drift, not just fork lag.
+    """
+    for remote in ("upstream", "origin"):
+        try:
+            subprocess.run(
+                ["git", "fetch", remote, "--quiet"],
+                capture_output=True, timeout=10,
+                cwd=str(repo_dir),
+            )
+        except Exception:
+            continue
+
     try:
-        subprocess.run(
-            ["git", "fetch", "origin", "--quiet"],
-            capture_output=True, timeout=10,
+        result = subprocess.run(
+            ["git", "rev-list", "--count", "HEAD..upstream/main"],
+            capture_output=True, text=True, timeout=5,
             cwd=str(repo_dir),
         )
+        if result.returncode == 0:
+            return int(result.stdout.strip())
     except Exception:
-        pass  # Offline or timeout — use stale refs, that's fine
+        pass
 
+    # Fall back to origin/main when upstream remote doesn't exist (vanilla checkout)
     try:
         result = subprocess.run(
             ["git", "rev-list", "--count", "HEAD..origin/main"],
