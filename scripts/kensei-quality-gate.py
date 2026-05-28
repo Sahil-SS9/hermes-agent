@@ -6,26 +6,44 @@ Runs as no_agent: true cron at 09:00, 13:00, 17:00, 21:00.
 import sqlite3, json, datetime as dt, sys, os
 from pathlib import Path
 
-DB = Path("/home/kensei/.hermes/kanban.db")
-OUT_DIR = Path("/home/kensei/.hermes/governance/logboard")
+HERMES_HOME = Path("/home/kensei/.hermes")
+OUT_DIR = HERMES_HOME / "governance" / "logboard"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
+
+BOARDS = {
+    "default": HERMES_HOME / "kanban.db",
+    "apps": HERMES_HOME / "kanban" / "boards" / "apps" / "kanban.db",
+    "content-lead": HERMES_HOME / "kanban" / "boards" / "content-lead" / "kanban.db",
+    "ops": HERMES_HOME / "kanban" / "boards" / "ops" / "kanban.db",
+    "research": HERMES_HOME / "kanban" / "boards" / "research" / "kanban.db",
+}
 
 TZ = dt.timezone(dt.timedelta(hours=1))
 now = dt.datetime.now(TZ)
 
-conn = sqlite3.connect(str(DB))
-conn.row_factory = sqlite3.Row
+# --- 1. Find tasks in 'review' status across all boards ---
+tasks_in_review = []
+board_tasks = {}  # slug -> [task dicts]
 
-# --- 1. Find tasks in 'review' status ---
-rows = conn.execute("""
-    SELECT id, title, body, assignee, reviewer, status, created_at,
-           updated_at, status_reason, current_step_key
-    FROM tasks
-    WHERE status = 'review'
-    ORDER BY updated_at ASC
-""").fetchall()
-
-tasks_in_review = [dict(r) for r in rows]
+for slug, db_path in BOARDS.items():
+    if not db_path.is_file():
+        continue
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute("""
+        SELECT id, title, body, assignee, reviewer, status, created_at,
+               updated_at, status_reason, current_step_key
+        FROM tasks
+        WHERE status = 'review'
+        ORDER BY updated_at ASC
+    """).fetchall()
+    board_rows = [dict(r) for r in rows]
+    for r in board_rows:
+        r["_board_slug"] = slug
+        r["_board_db"] = db_path
+    board_tasks[slug] = board_rows
+    tasks_in_review.extend(board_rows)
+    conn.close()
 
 # --- 2. Determine gate requirements ---
 def get_required_gates(title, body):
@@ -84,39 +102,53 @@ def get_required_gates(title, body):
     return gates
 
 # --- 3. Process each task ---
+# Cache open board connections to avoid reconnecting per task
+board_conns = {}
 results = []
-for task in tasks_in_review:
-    tid = task["id"]
-    title = task["title"] or ""
-    body = task["body"] or ""
 
-    gates = get_required_gates(title, body)
+try:
+    for task in tasks_in_review:
+        tid = task["id"]
+        title = task["title"] or ""
+        body = task["body"] or ""
+        board_slug = task["_board_slug"]
+        board_db = task["_board_db"]
 
-    if not gates:
-        # No gates needed — complete directly
-        conn.execute("UPDATE tasks SET status='done', result='No gates required (content/config/other)', completed_at=? WHERE id=?", 
-                     (int(now.timestamp()), tid))
+        # Get or create connection for this board
+        if board_slug not in board_conns:
+            c = sqlite3.connect(str(board_db))
+            c.row_factory = sqlite3.Row
+            board_conns[board_slug] = c
+        conn = board_conns[board_slug]
+
+        gates = get_required_gates(title, body)
+
+        if not gates:
+            # No gates needed — complete directly
+            conn.execute("UPDATE tasks SET status='done', result='No gates required (content/config/other)', completed_at=? WHERE id=?", 
+                         (int(now.timestamp()), tid))
+            conn.commit()
+            results.append({"task": tid[:12], "board": board_slug, "gates": [], "outcome": "skip"})
+            continue
+
+        # Update task to note gates
+        gate_names = ", ".join(g["gate"] for g in gates)
+        conn.execute("UPDATE tasks SET status_reason=? WHERE id=?",
+                     (f"QA: {gate_names}", tid))
         conn.commit()
-        results.append({"task": tid[:12], "gates": [], "outcome": "skip"})
-        continue
 
-    # Update task to note gates
-    gate_names = ", ".join(g["gate"] for g in gates)
-    conn.execute("UPDATE tasks SET status_reason=? WHERE id=?",
-                 (f"QA: {gate_names}", tid))
-    conn.commit()
+        # Create gate sub-tasks
+        parent_id = tid
+        created_gates = []
+        for gate in gates:
+            worker = gate["worker"]
+            gate_name = gate["gate"]
+            advisory = gate["advisory"]
 
-    # Create gate sub-tasks
-    parent_id = tid
-    created_gates = []
-    for i, gate in enumerate(gates):
-        worker = gate["worker"]
-        gate_name = gate["gate"]
-        advisory = gate["advisory"]
-
-        gate_title = f"[QA:{gate_name}] {title[:40]}"
-        gate_body = f"""## Gate: {gate_name}
+            gate_title = f"[QA:{gate_name}] {title[:40]}"
+            gate_body = f"""## Gate: {gate_name}
 **Original task:** {tid}
+**Board:** {board_slug}
 **Advisory:** {"Yes — human can override" if advisory else "No — mandatory pass"}
 **Worker:** {worker}
 
@@ -128,24 +160,23 @@ Review the output of task {tid}. Apply the gate criteria from `/home/kensei/.her
 - If advisory pass, complete without blocking even if minor issues found
 """
 
-        # Create via direct SQL (kanban_create isn't available in no_agent mode)
-        import uuid
-        gate_id = "t_" + uuid.uuid4().hex[:12]
-        now_ts = int(now.timestamp())
+            import uuid
+            gate_id = "t_" + uuid.uuid4().hex[:12]
+            now_ts = int(now.timestamp())
 
-        conn.execute("""INSERT INTO tasks (id, title, body, assignee, status, created_by, created_at, updated_at, status_reason)
-                        VALUES (?, ?, ?, ?, 'ready', 'kensei-quality-gate', ?, ?, ?)""",
-                     (gate_id, gate_title, gate_body, worker, now_ts, now_ts, f"Gate: {gate_name} for {tid}"))
+            conn.execute("""INSERT INTO tasks (id, title, body, assignee, status, created_by, created_at, updated_at, status_reason)
+                            VALUES (?, ?, ?, ?, 'ready', 'kensei-quality-gate', ?, ?, ?)""",
+                         (gate_id, gate_title, gate_body, worker, now_ts, now_ts, f"Gate: {gate_name} for {tid}"))
 
-        # Link as child of parent
-        conn.execute("INSERT OR IGNORE INTO task_links (parent_id, child_id) VALUES (?, ?)", (parent_id, gate_id))
+            conn.execute("INSERT OR IGNORE INTO task_links (parent_id, child_id) VALUES (?, ?)", (parent_id, gate_id))
 
-        created_gates.append({"gate_id": gate_id[:12], "gate": gate_name, "worker": worker})
+            created_gates.append({"gate_id": gate_id[:12], "gate": gate_name, "worker": worker})
 
-    conn.commit()
-    results.append({"task": tid[:12], "gates": created_gates, "outcome": "dispatched"})
-
-conn.close()
+        conn.commit()
+        results.append({"task": tid[:12], "board": board_slug, "gates": created_gates, "outcome": "dispatched"})
+finally:
+    for c in board_conns.values():
+        c.close()
 
 # --- 4. Output ---
 count = len(tasks_in_review)

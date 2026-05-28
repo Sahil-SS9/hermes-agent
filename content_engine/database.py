@@ -1,6 +1,9 @@
-"""SQLite database for draft lifecycle — Content Engine v2 schema."""
+"""SQLite database for draft lifecycle -- Content Engine v2.1 schema.
+
+Adds topic_usage_log for recency tracking.
+"""
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List, Optional
 
@@ -27,19 +30,33 @@ CREATE TABLE IF NOT EXISTS drafts (
     published_at       TEXT,
     postiz_id          TEXT,
     ai_enriched_at     TEXT,
-    regenerate_count   INTEGER DEFAULT 0
+    regenerate_count   INTEGER DEFAULT 0,
+    slop_score         INTEGER DEFAULT 0,
+    slop_issues        TEXT DEFAULT ''
 );
 
 CREATE INDEX IF NOT EXISTS idx_brand ON drafts(brand);
 CREATE INDEX IF NOT EXISTS idx_status ON drafts(status);
 CREATE INDEX IF NOT EXISTS idx_created ON drafts(created_at);
 CREATE INDEX IF NOT EXISTS idx_content_type ON drafts(content_type);
+
+CREATE TABLE IF NOT EXISTS topic_usage_log (
+    topic_id   TEXT PRIMARY KEY,
+    brand      TEXT NOT NULL,
+    topic_text TEXT NOT NULL,
+    used_at    TEXT NOT NULL,
+    platform   TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_usage_brand ON topic_usage_log(brand);
+CREATE INDEX IF NOT EXISTS idx_usage_used_at ON topic_usage_log(used_at);
 """
 
 def init_db() -> None:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(DB_PATH))
     conn.executescript(SCHEMA)
+    # Migrate existing DB: add missing columns
     cols = {row[1] for row in conn.execute("PRAGMA table_info(drafts)").fetchall()}
     for col_name, col_type in [
         ("ai_enriched_at", "TEXT"),
@@ -48,6 +65,8 @@ def init_db() -> None:
         ("ai_image_path", "TEXT"),
         ("ai_video_path", "TEXT"),
         ("rejected_at", "TEXT"),
+        ("slop_score", "INTEGER"),
+        ("slop_issues", "TEXT"),
     ]:
         if col_name not in cols:
             try:
@@ -88,6 +107,55 @@ def insert_draft(
     )
     conn.commit()
     conn.close()
+
+# ── Topic usage tracking ──
+
+def log_topic_usage(topic_id: str, brand: str, topic_text: str, platform: str = "") -> None:
+    """Record that a topic was used for draft generation."""
+    conn = sqlite3.connect(str(DB_PATH))
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO topic_usage_log (topic_id, brand, topic_text, used_at, platform)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (topic_id, brand, topic_text, datetime.utcnow().isoformat(), platform),
+    )
+    conn.commit()
+    conn.close()
+
+def get_recently_used_topics(brand: str, days: int = 30) -> List[str]:
+    """Return topic_ids used within the last N days."""
+    conn = sqlite3.connect(str(DB_PATH))
+    cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
+    rows = conn.execute(
+        "SELECT topic_id FROM topic_usage_log WHERE brand = ? AND used_at > ?",
+        (brand, cutoff),
+    ).fetchall()
+    conn.close()
+    return [r[0] for r in rows]
+
+def is_topic_recently_used(topic_id: str, days: int = 30) -> bool:
+    """Check if a specific topic_id was used within the last N days."""
+    conn = sqlite3.connect(str(DB_PATH))
+    cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
+    row = conn.execute(
+        "SELECT 1 FROM topic_usage_log WHERE topic_id = ? AND used_at > ?",
+        (topic_id, cutoff),
+    ).fetchone()
+    conn.close()
+    return row is not None
+
+def prune_topic_usage_log(retention_days: int = 90) -> int:
+    """Delete old topic usage records. Returns count deleted."""
+    conn = sqlite3.connect(str(DB_PATH))
+    cutoff = (datetime.utcnow() - timedelta(days=retention_days)).isoformat()
+    cur = conn.execute("DELETE FROM topic_usage_log WHERE used_at < ?", (cutoff,))
+    deleted = cur.rowcount
+    conn.commit()
+    conn.close()
+    return deleted
+
+# ── Existing draft helpers (unchanged) ──
 
 def list_drafts(status: str = "draft", brand: Optional[str] = None) -> List[dict]:
     conn = sqlite3.connect(str(DB_PATH))
@@ -133,7 +201,6 @@ def mark_published(draft_id: str, postiz_id: Optional[str] = None) -> None:
     conn.close()
 
 def mark_enriched(draft_id: str) -> None:
-    """Mark Stage 2 completed so re-running is idempotent."""
     conn = sqlite3.connect(str(DB_PATH))
     conn.execute(
         "UPDATE drafts SET ai_enriched_at = ? WHERE id = ?",
@@ -143,7 +210,6 @@ def mark_enriched(draft_id: str) -> None:
     conn.close()
 
 def list_approved_pending_enrichment() -> List[dict]:
-    """Approved drafts not yet enriched (Stage 2)."""
     conn = sqlite3.connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row
     rows = conn.execute(
@@ -155,7 +221,6 @@ def list_approved_pending_enrichment() -> List[dict]:
     return [dict(r) for r in rows]
 
 def get_draft(draft_id: str) -> Optional[dict]:
-    """Fetch one draft by id (any status)."""
     conn = sqlite3.connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row
     row = conn.execute("SELECT * FROM drafts WHERE id = ?", (draft_id,)).fetchone()
@@ -163,18 +228,12 @@ def get_draft(draft_id: str) -> Optional[dict]:
     return dict(row) if row else None
 
 def truncate_drafts() -> None:
-    """Delete all drafts. Dangerous — use for reset only."""
     conn = sqlite3.connect(str(DB_PATH))
     conn.execute("DELETE FROM drafts")
     conn.commit()
     conn.close()
 
-
 def purge_stale_drafts(retention_hours: int = 48, brand: Optional[str] = None) -> int:
-    """Delete drafts older than retention_hours. Respects brand filter if given.
-
-    Returns count of deleted rows.
-    """
     conn = sqlite3.connect(str(DB_PATH))
     if brand:
         cur = conn.execute(
@@ -191,9 +250,7 @@ def purge_stale_drafts(retention_hours: int = 48, brand: Optional[str] = None) -
     conn.close()
     return deleted
 
-
 def count_drafts_older_than(retention_hours: int = 48, brand: Optional[str] = None) -> int:
-    """Preview how many drafts would be purged (dry-run)."""
     conn = sqlite3.connect(str(DB_PATH))
     if brand:
         row = conn.execute(
@@ -209,7 +266,6 @@ def count_drafts_older_than(retention_hours: int = 48, brand: Optional[str] = No
     return row[0] if row else 0
 
 def list_drafts_by_content_type(content_type: str) -> List[dict]:
-    """List drafts by content type."""
     conn = sqlite3.connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row
     rows = conn.execute(

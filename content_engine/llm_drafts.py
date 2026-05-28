@@ -14,6 +14,7 @@ import uuid
 import json
 import random
 import os
+import re
 from datetime import datetime
 from typing import List, Dict, Optional
 
@@ -58,21 +59,21 @@ def _choose_content_type(brand: str, pillar: str, platform: str) -> str:
 # ──────────────────────────────────────────────────────────────────────
 
 MM_LIVE_PREDICTIONS = [
-    "30 seconds. Spurs corner coming up.\n\nGoal? Card? Cleared to safety?\n\n47 ways to predict it. 1 of them earns you the speed bonus.\n\nYour move.",
+    "30 seconds. {home} corner coming up.\n\nGoal? Card? Cleared to safety?\n\n47 ways to predict it. 1 of them earns you the speed bonus.\n\nYour move.",
 
-    "Last 10 minutes. Liverpool 1, City 1.\n\nGoal next? Card next?\n\nYou've got a 30-second window to call it.\n\nSpeed bonus active. Make the call.",
+    "Last 10 minutes. {home} 1, {away} 1.\n\nGoal next? Card next?\n\nYou've got a 30-second window to call it.\n\nSpeed bonus active. Make the call.",
 
     "Brace? Hat-trick? Off the bench heroics?\n\nYou've got 47 ways to predict what happens next. Not pre-match guesses. In-match calls. While it's actually happening.\n\nGet in the app.",
 
     "Corner coming. 30 seconds to decide.\n\nWill it be goal, card, or cleared?\n\nThe window opens before the kick. Closes before the ball drops.\n\nGet in. Get out. Earn your bonus.",
 
-    "Arsenal vs City. 2-2. 78th minute.\n\nNext event?\n\nMost players sat on their hands and watched. The ones who called it earned double.\n\nDon't watch. Predict.",
+    "{home} vs {away}. 2-2. 78th minute.\n\nNext event?\n\nMost players sat on their hands and watched. The ones who called it earned double.\n\nDon't watch. Predict.",
 
     "Your prediction window opens in 5 minutes.\n\nNot before kickoff. Not at half-time. Right when the ball's moving and the momentum is shifting.\n\n47 prediction types. Pick yours. Get in before the window slams.",
 
-    "Penalty to Chelsea. 83rd minute. 1-1.\n\nScored? Saved? Hit the post?\n\nYou've got 30 seconds to call it. The speed bonus is live.\n\nMake the call.",
+    "Penalty to {home}. 83rd minute. 1-1.\n\nScored? Saved? Hit the post?\n\nYou've got 30 seconds to call it. The speed bonus is live.\n\nMake the call.",
 
-    "Half-time. 0-0. Boring?\n\nSecond half kicks off in 15 minutes. Second half is when the real predictions live.\n\nGoals. Cards. Corners. Substitutions.\n\n47 ways to call it.",
+    "Half-time. {home} 0, {away} 0. Boring?\n\nSecond half kicks off in 15 minutes. Second half is when the real predictions live.\n\nGoals. Cards. Corners. Substitutions.\n\n47 ways to call it.",
 ]
 
 MM_GAME_MODES = [
@@ -446,17 +447,63 @@ ACTIVITY_TEMPLATES = {
 
 
 def _fill_variables(template: str, variables: dict) -> Optional[str]:
-    """Safely fill template variables from activity data.
-
-    Uses format() with automatic escaping of missing keys.
-    Returns None if a required variable is missing.
-    """
+    """Safely fill template variables. Returns None if required var missing."""
     try:
-        return template.format(**variables)
-    except KeyError:
+        result = template
+        for key, val in variables.items():
+            result = result.replace("{" + key + "}", str(val))
+        # Check for unfilled placeholders
+        unfilled = re.findall(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}", result)
+        if unfilled:
+            return None
+        return result
+    except (KeyError, ValueError, TypeError):
         return None
+
+
+def _build_topic_variables(brand: str, topic: dict) -> dict:
+    """Build a variable dict from topic data for template injection."""
+    variables = {
+        "topic": topic.get("topic", ""),
+        "pillar": topic.get("pillar", ""),
+        "brand": brand,
+    }
+    # MatchdayMaestro fixture injection
+    fixture = topic.get("fixture")
+    if fixture:
+        variables["home"] = fixture.get("home", "Home")
+        variables["away"] = fixture.get("away", "Away")
+        variables["date"] = fixture.get("date", "")
+        variables["time"] = fixture.get("time", "")
+    # Activity-driven injection
+    activity = topic.get("activity_data")
+    if activity:
+        variables.update(activity.get("variables", {}))
+        variables["signal_type"] = activity.get("signal_type", "")
+        variables["signal_id"] = activity.get("signal_id", "")
+    return variables
+
+
+def _is_future_fixture(topic: dict) -> bool:
+    """Check if a topic references a fixture that is today or in the future."""
+    fixture = topic.get("fixture")
+    if not fixture:
+        return True
+    date_str = fixture.get("date", "")
+    if not date_str:
+        return True
+    try:
+        match_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+        return match_date >= datetime.utcnow().date()
     except ValueError:
-        return None
+        return True
+
+
+def _reject_stale_tech(body: str) -> tuple[bool, str]:
+    """Auto-reject drafts containing outdated AI tech references."""
+    from topics import has_stale_tech_reference
+    has_stale, match = has_stale_tech_reference(body)
+    return not has_stale, match
 
 
 ACTIVITY_SLOP_PATTERNS = [
@@ -582,60 +629,22 @@ BRAND_TEMPLATES = {
 }
 
 
-def _parse_llm_response(response, brand, topic, platform, content_type):
-    """Parse LLM response and fallback to templates if parsing fails."""
-    if not response:
-        return _fallback_drafts(brand, topic, platform, content_type)
-
-    try:
-        cleaned = response.strip()
-        if cleaned.startswith("```"):
-            lines = cleaned.split("\n")
-            if lines[0].startswith("```json"):
-                lines = lines[1:]
-            if lines[-1].startswith("```"):
-                lines = lines[:-1]
-            cleaned = "\n".join(lines)
-
-        data = json.loads(cleaned)
-        items = data.get("drafts", data if isinstance(data, list) else [data])
-
-        drafts = []
-        for item in items:
-            body_text = item.get("body_text", "")
-            visual_desc = item.get("visual_description", "")
-            title = item.get("title", topic.get("topic", ""))
-            if body_text:
-                drafts.append({
-                    "body_text": body_text,
-                    "title": title,
-                    "visual_description": visual_desc,
-                    "pillar": topic.get("pillar", ""),
-                    "topic": topic.get("topic", ""),
-                    "platform": item.get("platform", platform),
-                })
-        if drafts:
-            return drafts
-    except (json.JSONDecodeError, TypeError, AttributeError, KeyError):
-        pass
-
-    return _fallback_drafts(brand, topic, platform, content_type)
-
+# _parse_llm_response removed -- template-only engine. LLM path was dead code.
 
 def _audit_slop(body_text: str) -> dict:
     """Evaluate a draft body for AI-detectable patterns (slop_score).
-    
+
     Returns dict with:
       - slop_score (0-10, higher = more detectable as AI-generated)
       - issues (list of specific problems found)
       - passed (bool: True if slop_score < 6)
-    
+
     Pattern types detected:
     - Boilerplate mantras recurring verbatim across templates
     - Template-itis (identical sentence structure with one noun swapped)
     - Generic filler (non-specific, abstract language)
     - Repetitive hashtag patterns
-    - Over-polished structure (setup → tension → resolution that's too clean)
+    - Over-polished structure (setup -> tension -> resolution that's too clean)
     """
     issues = []
     slop_score = 0
@@ -691,112 +700,95 @@ def _audit_slop(body_text: str) -> dict:
     }
 
 
-def _fallback_drafts(brand, topic, platform, content_type):
-    """Generate rich fallback drafts when LLM generation fails.
+def _select_and_fill_template(brand: str, pillar: str, variables: dict) -> tuple[str, dict]:
+    """Pick a template, inject variables, audit slop. Returns (body, audit)."""
+    templates = BRAND_TEMPLATES.get(brand, {}).get(pillar, [])
+    if not templates:
+        templates = [t for tlist in BRAND_TEMPLATES.get(brand, {}).values() for t in tlist]
+    if not templates:
+        templates = ["Draft coming soon."]
 
-    Handles activity-driven topics (from activity_collector) with variable
-    substitution, falling back to static templates for other content.
-    """
-    pillar = topic.get("pillar", "")
-    topic_text = topic.get("topic", "")
+    max_attempts = min(len(templates), 5)
+    body = None
+    audit_result: dict = {"slop_score": 0, "issues": [], "passed": True}
+    for _ in range(max_attempts):
+        candidate = random.choice(templates)
+        filled = _fill_variables(candidate, variables)
+        if filled is None:
+            continue
+        audit_result = _audit_slop(filled)
+        if audit_result["passed"]:
+            body = filled
+            break
 
-    # ── Activity-driven content (sahil_twitter / sahil_linkedin) ──
+    if body is None:
+        candidate = random.choice(templates)
+        body = _fill_variables(candidate, variables) or candidate
+        audit_result = _audit_slop(body)
+
+    return body, audit_result
+
+
+def _generate_activity_draft(brand: str, topic: dict, platform: str, content_type: str) -> Optional[dict]:
+    """Generate draft from activity signal with variable injection."""
     activity_data = topic.get("activity_data")
-    if activity_data and brand in ("sahil_twitter", "sahil_linkedin"):
-        signal_type = activity_data.get("signal_type")
-        variables = activity_data.get("variables", {})
-        templates_tuple = ACTIVITY_TEMPLATES.get(signal_type)
-        if templates_tuple:
-            is_linkedin = platform == "linkedin"
-            idx = 1 if is_linkedin else 0
-            templates = templates_tuple[idx]
-            if templates:
-                for _ in range(min(len(templates), 5)):
-                    candidate = random.choice(templates)
-                    filled = _fill_variables(candidate, variables)
-                    if filled is None:
-                        continue
-                    # Skip if unfilled placeholders remain
-                    if _has_unfilled_placeholders(filled):
-                        continue
-                    body = filled
-                    audit_result = _audit_slop(body)
-                    if audit_result["passed"]:
-                        break
-                # Fallback: use the filled version even if sloppy
-                if body is None:
-                    candidate = random.choice(templates)
-                    body = _fill_variables(candidate, variables) or candidate
-                    audit_result = _audit_slop(body)
+    if not activity_data:
+        return None
 
-                visual_descs = {
-                    "sahil_twitter": "Dark terminal aesthetic. Code overlay, monospace font, build-in-public style.",
-                    "sahil_linkedin": "Professional graphic with clean typography. Quote-style layout, grey tones with red accent.",
-                }
-                return [{
-                    "body_text": body,
-                    "title": topic_text,
-                    "visual_description": visual_descs.get(brand, ""),
-                    "pillar": pillar,
-                    "topic": topic_text,
-                    "platform": platform,
-                    "content_type": content_type,
-                    "slop_audit": audit_result,
-                }]
+    signal_type = activity_data.get("signal_type")
+    variables = activity_data.get("variables", {})
+    templates_tuple = ACTIVITY_TEMPLATES.get(signal_type)
+    if not templates_tuple:
+        return None
 
-    # ── Static templates (all brands) ──
-    templates = BRAND_TEMPLATES.get(brand, {})
-    pillar_templates = templates.get(pillar, [])
+    is_linkedin = platform == "linkedin"
+    idx = 1 if is_linkedin else 0
+    templates = templates_tuple[idx]
+    if not templates:
+        return None
 
-    if not pillar_templates:
-        pillar_templates = [t for tlist in templates.values() for t in tlist]
-
-    if not pillar_templates:
-        pillar_templates = ["Draft coming soon."]
-
-    # Pick a template, audit for slop, fall through if it fails
-    max_attempts = min(len(pillar_templates), 5)
     body = None
     audit_result = None
-    for _ in range(max_attempts):
-        candidate = random.choice(pillar_templates)
-        audit_result = _audit_slop(candidate)
+    for _ in range(min(len(templates), 5)):
+        candidate = random.choice(templates)
+        filled = _fill_variables(candidate, variables)
+        if filled is None or _has_unfilled_placeholders(filled):
+            continue
+        audit_result = _audit_slop(filled)
         if audit_result["passed"]:
-            body = candidate
+            body = filled
             break
-    
-    # If all attempts failed, use the best one anyway
+
     if body is None:
-        body = random.choice(pillar_templates)
+        candidate = random.choice(templates)
+        body = _fill_variables(candidate, variables) or candidate
         audit_result = _audit_slop(body)
 
     visual_descs = {
-        "matchdaymaestro": "Dark background with neon red accents. Bold typography, game-style UI, MatchdayMaestro branding.",
-        "plenishd": "Warm kitchen scene, natural lighting. Plenishd Yellow on dark background. Split-screen lifestyle aesthetic.",
         "sahil_twitter": "Dark terminal aesthetic. Code overlay, monospace font, build-in-public style.",
         "sahil_linkedin": "Professional graphic with clean typography. Quote-style layout, grey tones with red accent.",
-        "coachos": "Coach on sidelines, clipboard overlay. Natural grass tones, green accent on dark.",
     }
 
-    return [{
+    return {
         "body_text": body,
-        "title": topic_text,
+        "title": topic.get("topic", ""),
         "visual_description": visual_descs.get(brand, ""),
-        "pillar": pillar,
-        "topic": topic_text,
+        "pillar": topic.get("pillar", ""),
+        "topic": topic.get("topic", ""),
         "platform": platform,
         "content_type": content_type,
         "slop_audit": audit_result,
-    }]
+    }
 
 
-def generate_drafts(brand, topics, platform=None, count_per_topic=2):
-    """Generate drafts using brand voice templates.
+def generate_drafts(brand, topics, platform=None, count_per_topic=1):
+    """Generate drafts using brand voice templates with live variable injection.
 
-    Falls back to rich narrative templates when LLM is unavailable.
+    Template-only engine. LLM path removed (was dead code -- hermes -z timeouts).
+    Every draft injects real topic data before template selection.
+    Temporal gates: future fixtures only, stale tech auto-rejected.
     """
     drafts = []
-
     platforms = [platform] if platform else ["twitter"]
 
     for topic in topics:
@@ -805,18 +797,60 @@ def generate_drafts(brand, topics, platform=None, count_per_topic=2):
             topic_text = topic.get("topic", "")
             content_type = _choose_content_type(brand, pillar, plat)
 
-            response = ""
+            # -- Temporal gate: skip past fixtures --
+            if not _is_future_fixture(topic):
+                continue
 
-            fallback_drafts = _parse_llm_response(response, brand, topic, plat, content_type)
+            # -- Build variable dict from topic data --
+            variables = _build_topic_variables(brand, topic)
 
-            for d in fallback_drafts:
-                draft_id = f"{brand[:4]}_{str(uuid.uuid4())[:8]}"
-                d["id"] = draft_id
-                d["brand"] = brand
-                d["platform"] = plat
-                d["pillar"] = pillar
-                d["topic"] = topic_text
-                d["content_type"] = content_type
-                drafts.append(d)
+            # -- Activity-driven path (personal brands) --
+            draft = None
+            if brand in ("sahil_twitter", "sahil_linkedin") and topic.get("activity_data"):
+                draft = _generate_activity_draft(brand, topic, plat, content_type)
+
+            # -- Static template path (all brands) --
+            if draft is None:
+                body, audit_result = _select_and_fill_template(brand, pillar, variables)
+
+                # -- Stale tech gate --
+                passed_gate, stale_match = _reject_stale_tech(body)
+                if not passed_gate:
+                    audit_result["issues"].append(f"Stale tech reference auto-rejected: {stale_match}")
+                    audit_result["slop_score"] = min(audit_result["slop_score"] + 3, 10)
+                    audit_result["passed"] = False
+                    body2, audit2 = _select_and_fill_template(brand, pillar, variables)
+                    passed2, _ = _reject_stale_tech(body2)
+                    if passed2:
+                        body = body2
+                        audit_result = audit2
+
+                visual_descs = {
+                    "matchdaymaestro": "Dark background with neon red accents. Bold typography, game-style UI, MatchdayMaestro branding.",
+                    "plenishd": "Warm kitchen scene, natural lighting. Plenishd Yellow on dark background. Split-screen lifestyle aesthetic.",
+                    "sahil_twitter": "Dark terminal aesthetic. Code overlay, monospace font, build-in-public style.",
+                    "sahil_linkedin": "Professional graphic with clean typography. Quote-style layout, grey tones with red accent.",
+                    "coachos": "Coach on sidelines, clipboard overlay. Natural grass tones, green accent on dark.",
+                }
+
+                draft = {
+                    "body_text": body,
+                    "title": topic_text,
+                    "visual_description": visual_descs.get(brand, ""),
+                    "pillar": pillar,
+                    "topic": topic_text,
+                    "platform": plat,
+                    "content_type": content_type,
+                    "slop_audit": audit_result,
+                }
+
+            draft_id = f"{brand[:4]}_{str(uuid.uuid4())[:8]}"
+            draft["id"] = draft_id
+            draft["brand"] = brand
+            draft["pillar"] = pillar
+            draft["topic"] = topic_text
+            draft["platform"] = plat
+            draft["content_type"] = content_type
+            drafts.append(draft)
 
     return drafts
