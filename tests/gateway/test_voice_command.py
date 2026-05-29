@@ -1868,6 +1868,12 @@ class TestVoiceTimeoutCleansRunnerState:
         adapter._client = None
         adapter._broadcast = AsyncMock()
         adapter._allowed_user_ids = set()
+        adapter._voice_timeout_seconds = DiscordAdapter.VOICE_TIMEOUT
+        # Multi-agent voice floor attrs (normally set in __init__, bypassed by
+        # object.__new__ here). None channel id keeps floor control inactive.
+        adapter._multi_agent_voice_channel_id = None
+        adapter._voice_floor_ttl = 60.0
+        adapter._voice_floor_dir = None
         return adapter
 
     @pytest.fixture
@@ -1959,6 +1965,12 @@ class TestPlaybackTimeout:
         adapter._client = None
         adapter._broadcast = AsyncMock()
         adapter._allowed_user_ids = set()
+        adapter._voice_timeout_seconds = DiscordAdapter.VOICE_TIMEOUT
+        # Multi-agent voice floor attrs (normally set in __init__, bypassed by
+        # object.__new__ here). None channel id keeps floor control inactive.
+        adapter._multi_agent_voice_channel_id = None
+        adapter._voice_floor_ttl = 60.0
+        adapter._voice_floor_dir = None
         return adapter
 
     def test_source_has_wait_for_timeout(self):

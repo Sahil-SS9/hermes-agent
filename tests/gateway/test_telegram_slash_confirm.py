@@ -71,7 +71,7 @@ class TestSendSlashConfirm:
         )
 
         assert result.success is True
-        assert "MARKDOWN_V2" in repr(sent["parse_mode"])
+        assert "markdownv2" in repr(sent["parse_mode"]).lower().replace("_", "")  # robust to enum, str, or MagicMock parse_mode
         # Underscores and dots must be escaped by format_message
         assert "script\\_name" in sent["text"]
         assert "\\." in sent["text"]
