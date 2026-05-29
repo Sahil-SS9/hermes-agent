@@ -219,6 +219,25 @@ def _resolve(configured: Optional[str], *, capability: str) -> Optional[WebSearc
     return None
 
 
+def get_fallback_search_provider(exclude: str = "") -> Optional[WebSearchProvider]:
+    """Resolve a fallback search provider, optionally excluding *exclude*.
+
+    Walks ``_LEGACY_PREFERENCE`` order looking for a provider that supports
+    search, is available, and (when *exclude* is set) whose name doesn't
+    match *exclude*. Returns the first match, or None.
+    """
+    with _lock:
+        snapshot = dict(_providers)
+    excluded = exclude.strip().lower() if isinstance(exclude, str) else ""
+    for name in _LEGACY_PREFERENCE:
+        if excluded and name == excluded:
+            continue
+        p = snapshot.get(name)
+        if p is not None and bool(p.supports_search()) and bool(p.is_available()):
+            return p
+    return None
+
+
 def get_active_search_provider() -> Optional[WebSearchProvider]:
     """Resolve the currently-active web search provider.
 
@@ -237,6 +256,25 @@ def get_active_extract_provider() -> Optional[WebSearchProvider]:
     """
     explicit = _read_config_key("web", "extract_backend") or _read_config_key("web", "backend")
     return _resolve(explicit, capability="extract")
+
+
+def get_fallback_extract_provider(exclude: str = "") -> Optional[WebSearchProvider]:
+    """Resolve a fallback extract provider, optionally excluding *exclude*.
+
+    Walks ``_LEGACY_PREFERENCE`` order looking for a provider that supports
+    extract, is available, and (when *exclude* is set) whose name doesn't
+    match *exclude*. Returns the first match, or None.
+    """
+    with _lock:
+        snapshot = dict(_providers)
+    excluded = exclude.strip().lower() if isinstance(exclude, str) else ""
+    for name in _LEGACY_PREFERENCE:
+        if excluded and name == excluded:
+            continue
+        p = snapshot.get(name)
+        if p is not None and bool(p.supports_extract()) and bool(p.is_available()):
+            return p
+    return None
 
 
 def _reset_for_tests() -> None:
