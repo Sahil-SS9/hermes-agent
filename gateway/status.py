@@ -785,6 +785,23 @@ def _marker_is_stale(written_at: str, ttl_s: int) -> bool:
         return True
 
 
+def _discard_marker(path: Path) -> None:
+    """Best-effort removal of a stop/takeover marker. Safe to call repeatedly.
+
+    Any marker we cannot consume MUST be removed. The planned-stop watcher
+    (gateway/run.py) fires a shutdown whenever the marker merely *exists*, so a
+    marker left on disk re-triggers shutdown on every restart, an infinite
+    crash loop. This bit us on 2026-05-29 with a root-owned 0600 marker the
+    non-root gateway could not read. Unlink only needs write+execute on the
+    containing dir (HERMES_HOME), which the gateway owns, so it succeeds even
+    when the file itself is unreadable.
+    """
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 def _consume_pid_marker_for_self(
     path: Path,
     *,
@@ -792,8 +809,17 @@ def _consume_pid_marker_for_self(
     start_time_field: str,
     ttl_s: int,
 ) -> bool:
+    # No marker at all is the common case (an ordinary SIGTERM); leave the
+    # filesystem untouched and report "not a planned stop".
+    if not path.exists():
+        return False
+
     record = _read_json_file(path)
     if not record:
+        # Present but unreadable (permissions), empty, corrupt, or non-dict.
+        # It cannot be a valid stop for us, and leaving it would loop the
+        # watcher forever, so clear it.
+        _discard_marker(path)
         return False
 
     try:
@@ -801,17 +827,11 @@ def _consume_pid_marker_for_self(
         target_start_time = record.get(start_time_field)
         written_at = record.get("written_at") or ""
     except (KeyError, TypeError, ValueError):
-        try:
-            path.unlink(missing_ok=True)
-        except OSError:
-            pass
+        _discard_marker(path)
         return False
 
     if _marker_is_stale(written_at, ttl_s):
-        try:
-            path.unlink(missing_ok=True)
-        except OSError:
-            pass
+        _discard_marker(path)
         return False
 
     our_pid = os.getpid()
@@ -823,11 +843,7 @@ def _consume_pid_marker_for_self(
         and target_start_time == our_start_time
     )
 
-    try:
-        path.unlink(missing_ok=True)
-    except OSError:
-        pass
-
+    _discard_marker(path)
     return matches
 
 
@@ -877,10 +893,7 @@ def consume_takeover_marker_for_self() -> bool:
 
 def clear_takeover_marker() -> None:
     """Remove the takeover marker unconditionally. Safe to call repeatedly."""
-    try:
-        _get_takeover_marker_path().unlink(missing_ok=True)
-    except OSError:
-        pass
+    _discard_marker(_get_takeover_marker_path())
 
 
 def write_planned_stop_marker(target_pid: int) -> bool:
@@ -916,10 +929,7 @@ def consume_planned_stop_marker_for_self() -> bool:
 
 def clear_planned_stop_marker() -> None:
     """Remove the planned-stop marker unconditionally."""
-    try:
-        _get_planned_stop_marker_path().unlink(missing_ok=True)
-    except OSError:
-        pass
+    _discard_marker(_get_planned_stop_marker_path())
 
 
 def get_running_pid(

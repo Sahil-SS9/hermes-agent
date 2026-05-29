@@ -757,6 +757,19 @@ class TestTakeoverMarker:
         # Malformed marker should be cleaned up
         assert not marker_path.exists()
 
+    def test_consume_removes_unreadable_marker(self, tmp_path, monkeypatch):
+        """Same loop-prevention contract as the planned-stop marker: an
+        unreadable takeover marker must be removed, not left to re-trigger."""
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        marker_path = tmp_path / ".gateway-takeover.json"
+        marker_path.write_text(json.dumps({"target_pid": os.getpid()}))
+        monkeypatch.setattr(status, "_read_json_file", lambda path: None)
+
+        result = status.consume_takeover_marker_for_self()
+
+        assert result is False
+        assert not marker_path.exists()
+
     def test_clear_takeover_marker_is_idempotent(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
 
@@ -868,6 +881,54 @@ class TestPlannedStopMarker:
             "written_at": stale_time,
         }))
         monkeypatch.setattr(status, "_get_process_start_time", lambda pid: 123)
+
+        result = status.consume_planned_stop_marker_for_self()
+
+        assert result is False
+        assert not marker_path.exists()
+
+    def test_consume_removes_unreadable_marker_to_break_restart_loop(
+        self, tmp_path, monkeypatch
+    ):
+        """Regression (incident 2026-05-29): a marker that exists but cannot be
+        read (e.g. a root-owned 0600 file the non-root gateway can't open)
+        returned False *without* removing the file. The planned-stop watcher
+        fires a shutdown whenever the marker merely exists, so the un-removed
+        marker re-triggered shutdown on every restart, an infinite crash loop.
+
+        consume_* must delete any marker it cannot consume.
+        """
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        marker_path = tmp_path / ".gateway-planned-stop.json"
+        marker_path.write_text(json.dumps({"target_pid": os.getpid()}))
+        # Simulate the unreadable case: file present but reads yield nothing,
+        # matching _read_json_file swallowing PermissionError into None.
+        monkeypatch.setattr(status, "_read_json_file", lambda path: None)
+
+        result = status.consume_planned_stop_marker_for_self()
+
+        assert result is False
+        assert not marker_path.exists(), (
+            "Unreadable marker must be removed so the watcher cannot loop"
+        )
+
+    def test_consume_removes_empty_marker(self, tmp_path, monkeypatch):
+        """A zero-byte marker is unusable and must be cleared, not left to
+        re-trigger the watcher on the next boot."""
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        marker_path = tmp_path / ".gateway-planned-stop.json"
+        marker_path.write_text("")
+
+        result = status.consume_planned_stop_marker_for_self()
+
+        assert result is False
+        assert not marker_path.exists()
+
+    def test_consume_removes_corrupt_marker(self, tmp_path, monkeypatch):
+        """Corrupt JSON marker is unusable and must be cleared."""
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        marker_path = tmp_path / ".gateway-planned-stop.json"
+        marker_path.write_text("not valid json{")
 
         result = status.consume_planned_stop_marker_for_self()
 
