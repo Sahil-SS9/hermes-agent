@@ -15,11 +15,11 @@ import { computePrecisionWheelStep, initPrecisionWheel } from '../lib/precisionW
 import { computeWheelStep, initWheelAccelForHost } from '../lib/wheelAccel.js'
 
 import { getInputSelection } from './inputSelectionStore.js'
-import type { InputHandlerContext, InputHandlerResult } from './interfaces.js'
+import { type AgentMode, AGENT_MODES, type InputHandlerContext, type InputHandlerResult } from './interfaces.js'
 import { $isBlocked, $overlayState, patchOverlayState } from './overlayStore.js'
 import { turnController } from './turnController.js'
 import { patchTurnState } from './turnStore.js'
-import { getUiState } from './uiStore.js'
+import { getUiState, patchUiState } from './uiStore.js'
 
 const isCtrl = (key: { ctrl: boolean }, ch: string, target: string) => key.ctrl && ch.toLowerCase() === target
 
@@ -524,27 +524,21 @@ export function useInputHandlers(ctx: InputHandlerContext): InputHandlerResult {
       })
     }
 
-    // shift-tab flips yolo without spending a turn (claude-code parity)
+    // ── KENSEI CUSTOM: shift-tab cycles agent mode (plan → gods_plan → recon → auto) ──
+    // Replaces the stock shift-tab=yolo behaviour.
+    // See skill `agent-modes` for full spec.  Must survive upstream merges.
     if (key.shift && key.tab && !cState.completions.length) {
       if (!live.sid) {
-        return void actions.sys('yolo needs an active session')
+        return void actions.sys('mode cycling needs an active session')
       }
+      const current = getUiState().agentMode
+      const idx = AGENT_MODES.indexOf(current)
+      const next = AGENT_MODES[(idx + 1) % AGENT_MODES.length] as AgentMode
+      patchUiState({ agentMode: next })
 
-      // gateway.rpc swallows errors with its own sys() message and resolves to null,
-      // so we only speak when it came back with a real shape. null = rpc already spoke.
-      return void gateway.rpc<ConfigSetResponse>('config.set', { key: 'yolo', session_id: live.sid }).then(r => {
-        if (r?.value === '1') {
-          return actions.sys('yolo on')
-        }
-
-        if (r?.value === '0') {
-          return actions.sys('yolo off')
-        }
-
-        if (r) {
-          actions.sys('failed to toggle yolo')
-        }
-      })
+      // Push to gateway so the agent.ephemeral_system_prompt is updated
+      return void gateway.rpc('config.set', { key: 'mode', session_id: live.sid, value: next })
+        .then(() => actions.sys(`mode → ${next}`))
     }
 
     if (key.tab && cState.completions.length) {

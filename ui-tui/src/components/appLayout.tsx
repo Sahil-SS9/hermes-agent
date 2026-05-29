@@ -170,8 +170,19 @@ const ComposerPane = memo(function ComposerPane({
   const isBlocked = useStore($isBlocked)
   const sh = (composer.inputBuf[0] ?? composer.input).startsWith('!')
   const promptText = composerPromptText(ui.theme.brand.prompt, ui.info?.profile_name, sh, TERMUX_TUI_MODE, composer.cols)
-  const promptWidth = composerPromptWidth(promptText)
+
+  // ── KENSEI CUSTOM: mode badge in prompt prefix ──
+  // See skill `agent-modes` for full spec.  Must survive upstream merges.
+  const MODE_BADGE: Record<string, string> = {
+    plan:       '📋 ',
+    gods_plan:  '👑 ',
+    recon:      '🔍 ',
+  }
+  const modeBadge = MODE_BADGE[ui.agentMode] || ''
+  const displayPrompt = modeBadge + promptText
+  const promptWidth = composerPromptWidth(promptText) + (modeBadge ? 2 : 0)  // badge emoji ≈ 2 chars
   const promptBlank = ' '.repeat(promptWidth)
+  // ── END KENSEI CUSTOM ──
   const inputColumns = stableComposerColumns(composer.cols, promptWidth, TERMUX_TUI_MODE)
   const inputHeight = inputVisualHeight(composer.input, inputColumns)
   const inputMouseRef = useRef<null | TextInputMouseApi>(null)
@@ -269,7 +280,7 @@ const ComposerPane = memo(function ComposerPane({
               <Box key={i}>
                 <Box width={promptWidth}>
                   {i === 0 ? (
-                    <PromptPrefix color={ui.theme.color.muted} promptText={promptText} width={promptWidth} />
+                    <PromptPrefix color={ui.theme.color.muted} promptText={displayPrompt} width={promptWidth} />
                   ) : (
                     <Text color={ui.theme.color.muted}>{promptBlank}</Text>
                   )}
@@ -288,11 +299,11 @@ const ComposerPane = memo(function ComposerPane({
             >
               <Box width={promptWidth}>
                 {sh ? (
-                  <PromptPrefix color={ui.theme.color.shellDollar} promptText={promptText} width={promptWidth} />
+                  <PromptPrefix color={ui.theme.color.shellDollar} promptText={displayPrompt} width={promptWidth} />
                 ) : composer.inputBuf.length ? (
                   <Text color={ui.theme.color.prompt}>{promptBlank}</Text>
                 ) : (
-                  <PromptPrefix bold color={ui.theme.color.prompt} promptText={promptText} width={promptWidth} />
+                  <PromptPrefix bold color={ui.theme.color.prompt} promptText={displayPrompt} width={promptWidth} />
                 )}
               </Box>
 

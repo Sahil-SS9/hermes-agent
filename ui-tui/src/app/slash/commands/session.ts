@@ -13,9 +13,9 @@ import type {
 import { formatVoiceRecordKey, parseVoiceRecordKey } from '../../../lib/platform.js'
 import { fmtK } from '../../../lib/text.js'
 import type { PanelSection } from '../../../types.js'
-import { DEFAULT_INDICATOR_STYLE, INDICATOR_STYLES, type IndicatorStyle } from '../../interfaces.js'
+import { DEFAULT_INDICATOR_STYLE, INDICATOR_STYLES, AGENT_MODES, type AgentMode, type IndicatorStyle } from '../../interfaces.js'
 import { patchOverlayState } from '../../overlayStore.js'
-import { patchUiState } from '../../uiStore.js'
+import { getUiState, patchUiState } from '../../uiStore.js'
 import type { SlashCommand } from '../types.js'
 
 const TUI_SESSION_MODEL_RE = new RegExp(`(?:^|\\s)${TUI_SESSION_MODEL_FLAG}(?:\\s|$)`)
@@ -498,6 +498,36 @@ export const sessionCommands: SlashCommand[] = [
       ctx.gateway
         .rpc<ConfigSetResponse>('config.set', { key: 'verbose', session_id: ctx.sid, value: arg || 'cycle' })
         .then(ctx.guarded<ConfigSetResponse>(r => r.value && ctx.transcript.sys(`verbose: ${r.value}`)))
+    }
+  },
+
+  // ── KENSEI CUSTOM: agent mode slash command ──
+  // See skill `agent-modes` for full spec.  Must survive upstream merges.
+  {
+    help: 'agent mode: plan, gods_plan, recon, auto [status]',
+    name: 'mode',
+    usage: `/mode [${AGENT_MODES.join('|')}]`,
+    run: (arg, ctx) => {
+      const value = arg.trim().toLowerCase()
+
+      if (!value || value === 'status') {
+        const current = getUiState().agentMode
+        return ctx.transcript.sys(`mode: ${current}`)
+      }
+
+      if (!(AGENT_MODES as readonly string[]).includes(value)) {
+        return ctx.transcript.sys(`usage: /mode [${AGENT_MODES.join('|')}]`)
+      }
+
+      patchUiState({ agentMode: value as AgentMode })
+
+      return ctx.gateway
+        .rpc<ConfigSetResponse>('config.set', { key: 'mode', session_id: ctx.sid, value })
+        .then(
+          ctx.guarded<ConfigSetResponse>(r =>
+            ctx.transcript.sys(`mode → ${r.value || value}`)
+          )
+        )
     }
   },
 

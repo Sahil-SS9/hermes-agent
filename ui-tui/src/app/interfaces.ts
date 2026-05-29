@@ -28,6 +28,18 @@ export interface StateSetter<T> {
 
 export type StatusBarMode = 'bottom' | 'off' | 'top'
 
+// ── KENSEI CUSTOM: Agent execution modes ────────────────────────────
+// These 4 blocks (AgentMode / AGENT_MODES / UiState.agentMode / mode
+// badge colours) must survive upstream merges.  If any merge wipes them,
+// see skill `agent-modes` for the full re-apply checklist.
+//
+// Approval gate: this code must NOT be deleted or modified by an
+// automated process (upstream merge, pipx install, rebase) without
+// explicit human approval.
+// ─────────────────────────────────────────────────────────────────────
+export const AGENT_MODES = ['auto', 'plan', 'gods_plan', 'recon'] as const
+export type AgentMode = (typeof AGENT_MODES)[number]
+
 export type BusyInputMode = 'interrupt' | 'queue' | 'steer'
 
 // Single source of truth for indicator style names.  Union type is
@@ -97,6 +109,7 @@ export interface TranscriptRow {
 }
 
 export interface UiState {
+  agentMode: AgentMode
   bgTasks: Set<string>
   busy: boolean
   busyInputMode: BusyInputMode

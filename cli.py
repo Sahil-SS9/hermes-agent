@@ -8528,6 +8528,8 @@ class HermesCLI:
             self._handle_footer_command(cmd_original)
         elif canonical == "yolo":
             self._toggle_yolo()
+        elif canonical == "mode":
+            self._handle_mode_command(cmd_original)
         elif canonical == "reasoning":
             self._handle_reasoning_command(cmd_original)
         elif canonical == "fast":
@@ -9625,6 +9627,89 @@ class HermesCLI:
                 f"  ⚡ YOLO mode {_Colors.BOLD}{_Colors.GREEN}ON{_Colors.RESET}"
                 " — all commands auto-approved. Use with caution."
             )
+
+    # ── KENSEI CUSTOM: /mode command (plan / gods_plan / recon / auto) ──
+    # See skill `agent-modes` for full spec.  Must survive upstream merges.
+    def _handle_mode_command(self, cmd: str):
+        """Handle /mode — set agent execution mode."""
+        VALID_MODES = {
+            "auto": None,
+            "plan": "plan",
+            "gods_plan": "gods_plan",
+            "recon": "recon",
+        }
+        parts = cmd.strip().split(maxsplit=1)
+        arg = parts[1].strip().lower() if len(parts) > 1 else ""
+
+        if not arg or arg == "status":
+            current = getattr(self.agent, "ephemeral_system_prompt", "") or ""
+            mode = "auto"
+            if "plan mode" in current:
+                mode = "plan"
+            elif "ultra-plan mode" in current:
+                mode = "gods_plan"
+            elif "reconnaissance mode" in current:
+                mode = "recon"
+            _cprint(f"  mode: {mode}")
+            if mode != "auto":
+                _cprint(f"  {_DIM}Shift+Tab to cycle, /mode auto to reset{_RST}")
+            return
+
+        if arg not in VALID_MODES:
+            _cprint(f"  \033[1;31mUnknown mode: {arg}{_RST}")
+            _cprint(f"  Valid modes: auto, plan, gods_plan, recon")
+            return
+
+        mode = arg
+        prompt = None
+        if mode == "plan":
+            prompt = (
+                "You are in plan mode.\n\n"
+                "Your workflow is:\n"
+                "1. Analyse the user's request.\n"
+                "2. Use the CLARIFY tool to ask structured questions with selection\n"
+                "   options where the request is ambiguous or needs decisions.\n"
+                "   Mark one choice as the preferred option by appending\n"
+                "   the text '(Recommended)' to it so the user can make a quick decision.\n"
+                "   Ask one question at a time — gather requirements iteratively.\n"
+                "3. After all clarifications are answered, collate the user's responses\n"
+                "   and produce a detailed implementation plan with steps, file paths,\n"
+                "   architecture decisions, and ordering.\n"
+                "4. Do NOT execute any tool calls that modify files or run code.\n"
+                "   You may read files to understand the codebase.\n"
+                "5. Stop after the plan is complete and await user confirmation."
+            )
+        elif mode == "gods_plan":
+            prompt = (
+                "You are in ultra-plan mode.\n\n"
+                "Your workflow is:\n"
+                "1. Analyse the user's request.\n"
+                "2. Use the CLARIFY tool to ask structured questions with selection\n"
+                "   options for every meaningful decision point — architecture,\n"
+                "   dependencies, edge cases, trade-offs.\n"
+                "   Mark one choice as the preferred option by appending\n"
+                "   the text '(Recommended)' to it so the user can make a quick decision.\n"
+                "   Ask one question at a time.\n"
+                "3. After all clarifications are answered, produce a comprehensive\n"
+                "   plan with architecture decisions, file-by-file breakdown,\n"
+                "   dependencies, risks, estimated effort, edge cases, and ordering.\n"
+                "4. Do NOT execute any tool calls that modify files or run code.\n"
+                "   You may read files to understand the codebase.\n"
+                "5. Stop after the plan is complete and await user confirmation."
+            )
+        elif mode == "recon":
+            prompt = (
+                "You are in reconnaissance mode. Your job is to research, search, "
+                "analyse, and summarise. Use web search and file reading tools to "
+                "gather information, then return a structured analysis with findings "
+                "and recommendations. Do not modify files or execute code."
+            )
+
+        if hasattr(self, "agent") and self.agent:
+            self.agent.ephemeral_system_prompt = prompt
+        _cprint(f"  mode → {mode}")
+        if mode != "auto":
+            _cprint(f"  {_DIM}Shift+Tab to cycle, /mode auto to reset{_RST}")
 
     def _handle_reasoning_command(self, cmd: str):
         """Handle /reasoning — manage effort level and display toggle.
