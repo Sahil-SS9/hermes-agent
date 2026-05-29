@@ -16,6 +16,7 @@ stdout → Discord message (summary + MEDIA tag)
 """
 
 import json
+import math
 import os
 import re
 import subprocess
@@ -63,15 +64,30 @@ QUERY_TEMPLATES = [
     {"q": "topic:hermes-plugin stars:>{stars}", "sort": "stars", "order": "desc", "star_base": 5},
 ]
 
-# Relevance keywords for Sahil's stack (weight 0.3)
-RELEVANCE_KEYWORDS = [
-    "react native", "expo", "convex", "supabase", "claude", "deepgram",
-    "python", "hermes", "agent", "mcp", "football", "soccer", "kitchen",
-    "grocery", "pantry", "inventory", "e-ink", "terminal", "tui", "voice",
-    "tts", "stt", "mcp server", "plugin", "skill", "orchestration",
-    "sports", "grassroots", "matchday", "prediction", "cv builder",
-    "portfolio", "flutter", "react", "typescript", "rust",
+# Relevance keywords for Sahil's stack (weight 0.3), tiered so on-mission
+# terms outrank incidental keyword hits. HIGH = core agent/AI stack; GENERIC =
+# adjacent or domain terms that only matter alongside a high-signal hit.
+RELEVANCE_HIGH = [
+    "mcp server", "mcp", "agent", "agentic", "claude", "anthropic", "llm",
+    "react native", "expo", "convex", "supabase", "hermes", "deepgram",
+    "orchestration", "rag", "memory", "skill", "plugin",
 ]
+RELEVANCE_GENERIC = [
+    "python", "typescript", "rust", "react", "flutter", "cli", "tui",
+    "terminal", "voice", "tts", "stt", "proxy", "filter",
+    "kitchen", "grocery", "pantry", "inventory", "e-ink",
+    "football", "soccer", "sports", "grassroots", "matchday",
+    "prediction", "cv builder", "portfolio",
+]
+RELEVANCE_HIGH_WEIGHT = 20
+RELEVANCE_GENERIC_WEIGHT = 6
+RELEVANCE_SIGNAL_FLOOR = 20  # min relevance for a repo to count as on-mission
+
+# Classification score cutoffs, calibrated to the corrected star curve (scores
+# now centre ~60, top ~75, vs the old curve which inflated most repos into the
+# 80s). HIGH = strong / act-now tier; EXTRACT = on-mission mid tier.
+CLASSIFY_HIGH = 68
+CLASSIFY_EXTRACT = 56
 
 # ── Default thresholds ──────────────────────────────────────────────
 
@@ -81,6 +97,12 @@ DEFAULT_THRESHOLDS = {
     "max_star_threshold": 500,
     "noise_keywords": ["awesome", "curated list", "awesome list", "learn", "tutorial", "list", "resource", "cheatsheet"],
     "language_filters": ["HTML", "CSS", "Markdown"],
+    # High-precision spam patterns for star-farmed repos (date-suffixed names,
+    # cracked-software bait). Conservative: must not catch llama-3 / gpt-4.
+    "spam_name_patterns": [
+        r"-(19|20)\d\d(-|$)",
+        r"(?i)(crack|keygen|nulled|allprompts|free-?download|activation-?key|license-?key|-latest-|version-\d)",
+    ],
     "dead_repo_forks_ratio": 3.0,
     "dead_repo_min_stars": 10,
     "consecutive_noise_high_days": 3,
@@ -349,6 +371,7 @@ def build_noise_patterns(thresholds):
     lang_filters = thresholds.get("language_filters", DEFAULT_THRESHOLDS["language_filters"])
     fork_ratio = thresholds.get("dead_repo_forks_ratio", 3.0)
     dead_min = thresholds.get("dead_repo_min_stars", 10)
+    spam_patterns = thresholds.get("spam_name_patterns", DEFAULT_THRESHOLDS["spam_name_patterns"])
     return {
         "awesome_list": lambda r: any(
             kw in (r.get("description", "") + " " + " ".join(r.get("topics", []))).lower()
@@ -367,10 +390,14 @@ def build_noise_patterns(thresholds):
             kw in r["full_name"].lower().split("/")[1]
             for kw in keywords
         ),
+        "spam_name": lambda r: any(
+            re.search(p, r["full_name"].split("/")[-1])
+            for p in spam_patterns
+        ),
     }
 
 
-NOISE_ORDER = ["awesome_list", "non_code", "name_noise", "tutorial_content", "dead_repo"]
+NOISE_ORDER = ["awesome_list", "non_code", "name_noise", "spam_name", "tutorial_content", "dead_repo"]
 
 
 def classify_noise(repo, thresholds):
@@ -396,15 +423,19 @@ def deduplicate(repos):
 def score_repo(repo):
     """Deterministic scoring: returns (score, classification, why)."""
     stars = parse_star_count(repo)
-    
-    # Stars score (0-100, weight 0.4) — logarithmic to avoid giant-star bias
-    star_score = min(100, max(0, 50 + 14 * (stars ** 0.5 - 5)))
-    
-    # Relevance score (0-100, weight 0.3)
+
+    # Stars score (0-100, weight 0.4): log curve with real spread across the
+    # realistic 0-2000 star range. The old sqrt curve saturated by ~50 stars and
+    # went negative for 0-star trending finds, making the 40% weight inert.
+    star_score = min(100.0, 20 + 80 * math.log10(stars + 1) / math.log10(2000))
+
+    # Relevance score (0-100, weight 0.3), tiered: high-signal terms are worth
+    # more than incidental ones, so on-mission repos rank above keyword noise.
     text_blob = f"{repo.get('description', '')} {' '.join(repo.get('topics', []))} {repo.get('language', '')}".lower()
-    matches = sum(1 for kw in RELEVANCE_KEYWORDS if kw in text_blob)
-    relevance_score = min(100, matches * 20)  # 5 keyword hits = 100
-    
+    high_hits = sum(1 for kw in RELEVANCE_HIGH if kw in text_blob)
+    generic_hits = sum(1 for kw in RELEVANCE_GENERIC if kw in text_blob)
+    relevance_score = min(100, high_hits * RELEVANCE_HIGH_WEIGHT + generic_hits * RELEVANCE_GENERIC_WEIGHT)
+
     # Freshness (0-100, weight 0.2)
     try:
         pushed = datetime.fromisoformat(repo.get("pushed_at", "").replace("Z", "+00:00"))
@@ -423,24 +454,28 @@ def score_repo(repo):
     
     score = round(star_score * 0.4 + relevance_score * 0.3 + freshness_score * 0.2 + active_score * 0.1, 1)
     
-    # Classification
-    classification, why = "INSPIRATION", "Moderate signal — worth noting for future reference."
-    
-    if score >= 80:
-        if any(kw in text_blob for kw in ["mcp server", "plugin", "skill"]):
-            classification, why = "PLUGIN/SKILL", "Agent tooling — aligns with Hermes/KENSEI ecosystem."
+    # Classification. EXTRACT now requires a real on-mission signal (a
+    # description plus a relevance hit) rather than being the catch-all at
+    # score>=65; otherwise the repo drops to INSPIRATION. This stops EXTRACT
+    # swallowing two-thirds of every batch.
+    on_mission = bool(repo.get("description", "").strip()) and relevance_score >= RELEVANCE_SIGNAL_FLOOR
+    classification, why = "INSPIRATION", "Moderate signal: worth noting for future reference."
+
+    if score >= CLASSIFY_HIGH:
+        if any(kw in text_blob for kw in ["mcp server", "mcp", "plugin", "skill"]):
+            classification, why = "PLUGIN/SKILL", "Agent tooling: aligns with Hermes/KENSEI ecosystem."
         elif any(kw in text_blob for kw in ["product", "saas", "platform", "app", "react native", "expo"]):
-            classification, why = "FORK/PRODUCT", "Could become a standalone product — evaluate for Plenishd/CoachOS or new spinoff."
+            classification, why = "FORK/PRODUCT", "Could become a standalone product: evaluate for Plenishd/CoachOS or new spinoff."
         elif any(kw in text_blob for kw in ["proxy", "filter", "terminal", "cli", "tui", "voice"]):
-            classification, why = "ADOPT", "Direct internal tool — install or integrate into KENSEI workflows."
-        else:
+            classification, why = "ADOPT", "Direct internal tool: install or integrate into KENSEI workflows."
+        elif on_mission:
             classification, why = "EXTRACT", "Contains a pattern worth extracting for our own tools."
-    elif score >= 65:
-        if any(kw in text_blob for kw in ["mcp server", "plugin", "skill"]):
-            classification, why = "PLUGIN/SKILL", "Agent tooling — worth monitoring."
-        else:
-            classification, why = "EXTRACT", "Interesting architecture or utility — extract if time permits."
-    
+    elif score >= CLASSIFY_EXTRACT:
+        if any(kw in text_blob for kw in ["mcp server", "mcp", "plugin", "skill"]):
+            classification, why = "PLUGIN/SKILL", "Agent tooling: worth monitoring."
+        elif on_mission:
+            classification, why = "EXTRACT", "Interesting architecture or utility: extract if time permits."
+
     return score, classification, why
 
 
@@ -458,6 +493,73 @@ def classify_all(repos):
     # Sort by score descending
     scored.sort(key=lambda x: x["score"], reverse=True)
     return scored
+
+
+# ── LLM enrichment (opt-in, top picks only) ──────────────────────────
+
+# Opt-in via env. Default ON locally; the public edition ships it OFF.
+ENRICH_ENABLED = os.getenv("GITRADAR_ENRICH", "1") not in ("0", "false", "no", "")
+ENRICH_TOP_N = int(os.getenv("GITRADAR_ENRICH_TOP_N", "8"))
+ENRICH_BASE_URL = os.getenv("GITRADAR_ENRICH_BASE_URL", "https://ollama.com/v1")
+ENRICH_MODEL = os.getenv("GITRADAR_ENRICH_MODEL", "deepseek-v4-flash")
+ENRICH_API_KEY_ENV = os.getenv("GITRADAR_ENRICH_API_KEY_ENV", "OLLAMA_API_KEY")
+
+
+def enrich_why(repos):
+    """Replace the boilerplate `why` on the top-N non-noise repos with a genuine
+    one-line rationale from a cheap model. Best-effort: any failure leaves the
+    deterministic text untouched. One batched call, no per-repo requests."""
+    if not ENRICH_ENABLED:
+        return
+    api_key = os.getenv(ENRICH_API_KEY_ENV, "")
+    if not api_key:
+        print(f"ENRICH: skipped (no {ENRICH_API_KEY_ENV})", file=sys.stderr)
+        return
+
+    picks = [r for r in repos if r.get("classification") != "NOISE"][:ENRICH_TOP_N]
+    if not picks:
+        return
+
+    listing = "\n".join(
+        f'{i+1}. {r["full_name"]} [{r["classification"]}] ({r.get("language") or "?"}, ★{r["stars"]}): '
+        f'{(r.get("description") or "no description")[:200]}'
+        for i, r in enumerate(picks)
+    )
+    prompt = (
+        "You triage new GitHub repos for an AI-agent builder. For each repo below, "
+        "write ONE concrete sentence (max 22 words) on why it matters or what is worth "
+        "taking from it. Be specific to the repo, not generic. No marketing fluff.\n\n"
+        f"{listing}\n\n"
+        'Reply with ONLY a JSON object mapping each repo full_name to its sentence, '
+        'e.g. {"owner/repo": "..."}.'
+    )
+    payload = json.dumps({
+        "model": ENRICH_MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.3,
+        "stream": False,
+    }).encode()
+    req = urllib.request.Request(f"{ENRICH_BASE_URL}/chat/completions", data=payload)
+    req.add_header("Authorization", f"Bearer {api_key}")
+    req.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=90) as resp:
+            data = json.loads(resp.read().decode())
+        content = data["choices"][0]["message"]["content"]
+        match = re.search(r"\{.*\}", content, re.DOTALL)
+        mapping = json.loads(match.group(0) if match else content)
+    except Exception as e:
+        print(f"ENRICH: failed, keeping deterministic text ({e})", file=sys.stderr)
+        return
+
+    enriched = 0
+    for r in picks:
+        line = mapping.get(r["full_name"])
+        if isinstance(line, str) and line.strip():
+            r["why"] = line.strip()
+            r["why_enriched"] = True
+            enriched += 1
+    print(f"ENRICH: {enriched}/{len(picks)} top picks enriched", file=sys.stderr)
 
 
 # ── Cache ───────────────────────────────────────────────────────────
@@ -691,7 +793,10 @@ def main():
     
     # Score + classify
     scored = classify_all(final)
-    
+
+    # Enrich the top picks' rationale with a cheap model (opt-in, best-effort)
+    enrich_why(scored)
+
     # Stats
     total = len(all_repos)
     noise_count = total - len(filtered)

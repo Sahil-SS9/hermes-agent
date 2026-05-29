@@ -459,16 +459,26 @@ def main() -> int:
                 'key': f"audit-legacy-kanban-cron-enabled-{name}",
             })
 
-    # Recently failed enabled cron jobs.
+    # Recently failed enabled cron jobs. A failed heartbeat means the audit
+    # itself went dark, so flag that as P1 so the priority sort below keeps it
+    # above housekeeping findings and the 3-task cap can never drop it. The body
+    # points at the common provider/key-limit cause that breaks many LLM crons
+    # at once.
     for j in jobs:
         if not j.get('enabled'):
             continue
         if j.get('last_status') == 'error':
+            is_self = j.get('name') == 'kensei-heartbeat-audit'
             findings.append({
                 'title': f"Cron {j.get('name')} failed last run",
-                'body': f"Cron `{j.get('name')}` last_status is `error`. Check `/home/kensei/.hermes/cron/output/{j.get('id')}` and logs.",
+                'body': (
+                    f"Cron `{j.get('name')}` last_status is `error`. "
+                    f"Check `/home/kensei/.hermes/cron/output/{j.get('id')}` and logs. "
+                    "If it is a provider/key limit (e.g. OpenRouter 403 monthly limit), the "
+                    "model route needs attention since many LLM crons share it."
+                ),
                 'assignee': 'wesker',
-                'priority': 'P2',
+                'priority': 'P1' if is_self else 'P2',
                 'key': f"audit-cron-error-{j.get('id')}-{now.date()}",
             })
 
@@ -508,6 +518,11 @@ def main() -> int:
     dup_gw_finding = duplicate_gateway_finding(now)
     if dup_gw_finding:
         findings.append(dup_gw_finding)
+
+    # Cap at 3 tasks per run to avoid notification spam, but file by severity so
+    # outages (P1) always win over routine housekeeping (P2).
+    priority_rank = {'P1': 0, 'P2': 1, 'P3': 2}
+    findings.sort(key=lambda f: priority_rank.get(f.get('priority', 'P2'), 1))
 
     filed = []
     for f in findings[:3]:
