@@ -1,19 +1,30 @@
-"""Cost-first image generation for content drafts.
+"""Quality-first, budget-capped image generation for content drafts.
 
-Order, cheapest-first:
-  1. FAL flux_klein  (~£0.0048/img, tested working) via fal_client
-  2. Pollinations    (free, no key) via image_generator
+Degrading FAL chain, then a free fallback:
+  1. krea_medium  (~£0.02/img, aesthetic detail)   ── primary
+  2. z_image      (~£0.008/img, fast + detailed)
+  3. flux_klein   (~£0.0048/img, fast)
+  4. Pollinations (free, no key) via image_generator
 
-Both save a local PNG so the asset can be attached to Discord for review and,
-later, published through Postiz. Gemini/nano-banana were dropped: the available
-Google keys have no working quota (verified 2026-05-30).
+Each tier is tried until one returns an image, so a rate-limit or outage on the
+primary degrades quality rather than failing. Budget target: image + video
+under £5-10/month (video defaults to free local ffmpeg). Set CONTENT_IMAGE_MODEL
+to override the primary without a code change.
+
+Gemini/nano-banana were dropped: the available Google keys have no working
+quota (verified 2026-05-30). Output is a local PNG so the asset can be attached
+to Discord for review and later published through Postiz.
 """
 import os
 import uuid
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 OUTPUT_ROOT = Path(__file__).resolve().parent / "output"
+
+# Degrading quality/cost chain. The primary is overridable via env for tuning.
+_PRIMARY = os.getenv("CONTENT_IMAGE_MODEL", "krea_medium").strip()
+FAL_CHAIN: List[str] = [_PRIMARY] + [m for m in ("z_image", "flux_klein") if m != _PRIMARY]
 
 # On-brand art direction so even an un-enriched prompt looks intentional.
 # Brand palettes are the canonical ones from the project brief.
@@ -41,21 +52,26 @@ def generate_draft_image(
     brand: str = "",
     platform: str = "",
     draft_id: str = "",
-    model: str = "flux_klein",
+    model: Optional[str] = None,
 ) -> Optional[str]:
-    """Generate an image cheapest-first. Returns a local PNG path, or None.
+    """Generate an image down the degrading chain. Returns a local PNG path or None.
 
     The caller passes a finished prompt (use ``build_prompt`` if none supplied).
+    ``model`` overrides the primary for a single call (e.g. a one-off hero post).
     """
-    # 1. Cheap FAL (flux_klein) — tested working, ~£0.0048/img.
-    try:
-        import fal_client
+    chain = ([model] + [m for m in FAL_CHAIN if m != model]) if model else FAL_CHAIN
 
-        path = fal_client.generate_image(prompt, model=model, aspect="square")
-        if path and os.path.exists(path):
-            return path
-    except Exception as exc:  # noqa: BLE001 — provider failures must fall through
-        print(f"[draft_media] FAL failed: {exc}")
+    # 1. FAL tiers, quality-first, degrading on failure/rate-limit.
+    for tier in chain:
+        try:
+            import fal_client
+
+            path = fal_client.generate_image(prompt, model=tier, aspect="square")
+            if path and os.path.exists(path):
+                print(f"[draft_media] generated via {tier}: {path}")
+                return path
+        except Exception as exc:  # noqa: BLE001 — provider failures must fall through
+            print(f"[draft_media] FAL {tier} failed: {exc}")
 
     # 2. Free fallback: Pollinations.
     try:
@@ -66,7 +82,7 @@ def generate_draft_image(
         out_dir.mkdir(parents=True, exist_ok=True)
         fpath = out_dir / f"{draft_id or uuid.uuid4().hex[:8]}.png"
         fpath.write_bytes(img_bytes)
-        print(f"[draft_media] pollinations saved: {fpath} ({len(img_bytes)} bytes)")
+        print(f"[draft_media] pollinations (free) saved: {fpath} ({len(img_bytes)} bytes)")
         return str(fpath)
     except Exception as exc:  # noqa: BLE001
         print(f"[draft_media] pollinations failed: {exc}")

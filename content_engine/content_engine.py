@@ -298,7 +298,7 @@ def main() -> int:
     gi = sub.add_parser("gen-image", help="Generate + persist an image for a draft (FAL flux_klein → pollinations)")
     gi.add_argument("draft_id")
     gi.add_argument("--prompt", default=None, help="Art-directed prompt; falls back to an on-brand prompt from body_text")
-    gi.add_argument("--model", default="flux_klein")
+    gi.add_argument("--model", default=None, help="Override the primary model (else the degrading chain)")
     gi.add_argument("--force", action="store_true", help="Regenerate even if ai_image_path is already set")
 
     # deliver-discord: grouped-by-brand review to Discord

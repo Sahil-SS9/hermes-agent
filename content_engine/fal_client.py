@@ -19,7 +19,10 @@ FAL_KEY = os.getenv("FAL_KEY", "")
 
 # Model endpoints on fal.ai
 IMAGE_MODELS = {
+    "z_image": "fal-ai/z-image/turbo",           # ~£0.008/img, fast + detailed
     "flux_klein": "fal-ai/flux-2/klein/9b",      # £0.0048/img, fast
+    "krea_medium": "fal-ai/krea/v2/medium/text-to-image",  # ~£0.02/img, aesthetic detail
+    "krea_large": "fal-ai/krea/v2/large/text-to-image",    # ~£0.03/img, max detail
     "flux_pro": "fal-ai/flux-2-pro",             # £0.024/img, quality
     "ideogram": "fal-ai/ideogram/v3",            # £0.024/img, typography
     "nano_banana": "fal-ai/nano-banana-pro",     # £0.12/img, text+reasoning
