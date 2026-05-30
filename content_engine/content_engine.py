@@ -306,6 +306,19 @@ def main() -> int:
     rd.add_argument("--since-minutes", type=int, default=75)
     rd.add_argument("--max", type=int, default=None, help="Cap drafts delivered (flood guard / testing)")
 
+    # inbox-fetch: poll the repurpose inbox; print new items as JSON lines
+    inb = sub.add_parser("inbox-fetch", help="Poll the Discord repurpose inbox for new reference items")
+
+    # add-draft: insert an inspired-by draft (used by the repurpose agent)
+    ad = sub.add_parser("add-draft", help="Insert a draft (inspired-by repurpose output)")
+    ad.add_argument("--brand", required=True)
+    ad.add_argument("--platform", required=True)
+    ad.add_argument("--body", required=True)
+    ad.add_argument("--content-type", default="text")
+    ad.add_argument("--title", default=None)
+    ad.add_argument("--pillar", default="repurpose")
+    ad.add_argument("--image", default=None, help="Optional local image path to attach")
+
     # Approve
     app = sub.add_parser("approve", help="Approve a draft")
     app.add_argument("draft_id")
@@ -432,6 +445,33 @@ def main() -> int:
         drafts = list_recent_drafts(args.since_minutes)
         ok = deliver_discord_digest(drafts)
         return 0 if ok else 1
+
+    elif args.cmd == "inbox-fetch":
+        from repurpose import fetch_inbox
+        items = fetch_inbox()
+        for it in items:
+            print(json.dumps(it))
+        if not items:
+            print("# no new inbox items")
+        return 0
+
+    elif args.cmd == "add-draft":
+        import uuid as _uuid
+        draft_id = f"{args.brand[:4]}_{_uuid.uuid4().hex[:8]}"
+        insert_draft(
+            draft_id=draft_id,
+            brand=args.brand,
+            platform=args.platform,
+            pillar=args.pillar,
+            topic="repurpose",
+            title=args.title,
+            body_text=args.body,
+            content_type=args.content_type,
+        )
+        if args.image and os.path.exists(args.image):
+            update_draft_ai_image_path(draft_id, args.image)
+        print(draft_id)
+        return 0
 
     elif args.cmd == "review-digest":
         # One deterministic pass: generate a cheap on-brand image for each recent
