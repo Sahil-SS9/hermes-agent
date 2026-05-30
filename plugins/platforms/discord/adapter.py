@@ -1781,25 +1781,36 @@ class DiscordAdapter(BasePlatformAdapter):
         file_path: str,
         caption: Optional[str] = None,
         file_name: Optional[str] = None,
+        thread_id: Optional[str] = None,
     ) -> SendResult:
         """Send a local file as a Discord attachment.
 
-        Forum channels (type 15) get a new thread whose starter message
-        carries the file — they reject direct POST /messages.
+        When ``thread_id`` is provided the file is posted into that existing
+        thread (so a forum's weekly thread accrues the file as a reply rather
+        than spawning a new thread per attachment).  Otherwise, forum parent
+        channels (type 15) get a new thread whose starter message carries the
+        file — they reject direct POST /messages.
         """
         if not self._client:
             return SendResult(success=False, error="Not connected")
 
-        channel = self._client.get_channel(int(chat_id))
+        # A thread_id in metadata takes precedence — address the thread directly
+        # so attachments land inside the existing thread instead of creating one.
+        target_id = thread_id or chat_id
+        channel = self._client.get_channel(int(target_id))
         if not channel:
-            channel = await self._client.fetch_channel(int(chat_id))
+            channel = await self._client.fetch_channel(int(target_id))
         if not channel:
-            return SendResult(success=False, error=f"Channel {chat_id} not found")
+            label = "Thread" if thread_id else "Channel"
+            return SendResult(success=False, error=f"{label} {target_id} not found")
 
         filename = file_name or os.path.basename(file_path)
         with open(file_path, "rb") as fh:
             file = discord.File(fh, filename=filename)
-            if self._is_forum_parent(channel):
+            # Only create a new thread when the resolved target is itself a
+            # forum parent (no thread_id given). A resolved thread channel
+            # accepts channel.send() with a file directly.
+            if thread_id is None and self._is_forum_parent(channel):
                 return await self._forum_post_file(
                     channel,
                     content=(caption or "").strip(),
@@ -1967,11 +1978,17 @@ class DiscordAdapter(BasePlatformAdapter):
         try:
             import io
 
-            channel = self._client.get_channel(int(chat_id))
+            # A thread_id in metadata takes precedence so audio lands inside the
+            # existing thread (e.g. the weekly lesson thread) rather than
+            # spawning a new forum thread per audio file.
+            thread_id = metadata.get("thread_id") if metadata else None
+            target_id = thread_id or chat_id
+            channel = self._client.get_channel(int(target_id))
             if not channel:
-                channel = await self._client.fetch_channel(int(chat_id))
+                channel = await self._client.fetch_channel(int(target_id))
             if not channel:
-                return SendResult(success=False, error=f"Channel {chat_id} not found")
+                label = "Thread" if thread_id else "Channel"
+                return SendResult(success=False, error=f"{label} {target_id} not found")
 
             if not os.path.exists(audio_path):
                 return SendResult(success=False, error=f"Audio file not found: {audio_path}")
@@ -1981,11 +1998,12 @@ class DiscordAdapter(BasePlatformAdapter):
             with open(audio_path, "rb") as f:
                 file_data = f.read()
 
-            # Forum channels (type 15) reject direct POST /messages — the
+            # Forum *parent* channels (type 15) reject direct POST /messages — the
             # native voice flag path also targets /messages so it would fail
             # too.  Create a thread post with the audio as the starter
-            # attachment instead.
-            if self._is_forum_parent(channel):
+            # attachment instead.  When a thread_id resolved a thread channel,
+            # skip this — threads accept channel.send() with a file directly.
+            if thread_id is None and self._is_forum_parent(channel):
                 forum_file = discord.File(io.BytesIO(file_data), filename=filename)
                 return await self._forum_post_file(
                     channel,
@@ -2954,7 +2972,8 @@ class DiscordAdapter(BasePlatformAdapter):
     ) -> SendResult:
         """Send a local image file natively as a Discord file attachment."""
         try:
-            return await self._send_file_attachment(chat_id, image_path, caption)
+            thread_id = metadata.get("thread_id") if metadata else None
+            return await self._send_file_attachment(chat_id, image_path, caption, thread_id=thread_id)
         except FileNotFoundError:
             return SendResult(success=False, error=f"Image file not found: {image_path}")
         except Exception as e:  # pragma: no cover - defensive logging
@@ -3119,7 +3138,8 @@ class DiscordAdapter(BasePlatformAdapter):
     ) -> SendResult:
         """Send a local video file natively as a Discord attachment."""
         try:
-            return await self._send_file_attachment(chat_id, video_path, caption)
+            thread_id = metadata.get("thread_id") if metadata else None
+            return await self._send_file_attachment(chat_id, video_path, caption, thread_id=thread_id)
         except FileNotFoundError:
             return SendResult(success=False, error=f"Video file not found: {video_path}")
         except Exception as e:  # pragma: no cover - defensive logging
@@ -3137,7 +3157,8 @@ class DiscordAdapter(BasePlatformAdapter):
     ) -> SendResult:
         """Send an arbitrary file natively as a Discord attachment."""
         try:
-            return await self._send_file_attachment(chat_id, file_path, caption, file_name=file_name)
+            thread_id = metadata.get("thread_id") if metadata else None
+            return await self._send_file_attachment(chat_id, file_path, caption, file_name=file_name, thread_id=thread_id)
         except FileNotFoundError:
             return SendResult(success=False, error=f"File not found: {file_path}")
         except Exception as e:  # pragma: no cover - defensive logging

@@ -701,6 +701,72 @@ class TestDeliverResultWrapping:
         assert adapter.send_image_file.call_args[1]["image_path"] == str(media_path)
         adapter.send_voice.assert_not_called()
 
+    def test_discord_lesson_combines_text_with_html_caption(self, tmp_path, monkeypatch):
+        """A teacher lesson (HTML + audio) should post as ONE captioned document
+        plus an audio follow-up, NOT three separate Discord messages.
+
+        The lesson text rides as the caption on the non-audio (HTML) file, so
+        the standalone text send is skipped. The HTML must be sent first so the
+        caption attaches to it, with audio following uncaptioned.
+        """
+        from gateway.config import Platform
+        from concurrent.futures import Future
+        html_path = self._safe_media_path(tmp_path, monkeypatch, "lesson.html", data=b"<html></html>")
+        audio_path = self._safe_media_path(tmp_path, monkeypatch, "lesson.mp3")
+
+        adapter = AsyncMock()
+        adapter.send.return_value = MagicMock(success=True)
+        adapter.send_document.return_value = MagicMock(success=True)
+        adapter.send_voice.return_value = MagicMock(success=True)
+
+        pconfig = MagicMock()
+        pconfig.enabled = True
+        mock_cfg = MagicMock()
+        mock_cfg.platforms = {Platform.DISCORD: pconfig}
+
+        loop = MagicMock()
+        loop.is_running.return_value = True
+
+        def fake_run_coro(coro, _loop):
+            future = Future()
+            future.set_result(MagicMock(success=True))
+            coro.close()
+            return future
+
+        job = {
+            "id": "lesson-job",
+            "deliver": "origin",
+            "origin": {"platform": "discord", "chat_id": "forum-1", "thread_id": "week-2"},
+        }
+
+        # MEDIA order intentionally audio-first to prove reordering puts HTML first.
+        with patch("gateway.config.load_gateway_config", return_value=mock_cfg), \
+             patch("cron.scheduler.load_config", return_value={"cron": {"wrap_response": False}}), \
+             patch("asyncio.run_coroutine_threadsafe", side_effect=fake_run_coro):
+            _deliver_result(
+                job,
+                f"Week 2 Day 10 lesson body\nMEDIA:{audio_path}\nMEDIA:{html_path}",
+                adapters={Platform.DISCORD: adapter},
+                loop=loop,
+            )
+
+        # No standalone text message — the text is combined as the HTML caption.
+        adapter.send.assert_not_called()
+
+        # HTML document carries the lesson text as its caption.
+        adapter.send_document.assert_called_once()
+        doc_call = adapter.send_document.call_args
+        assert doc_call[1]["file_path"] == str(html_path)
+        assert "Week 2 Day 10 lesson body" in doc_call[1]["caption"]
+        # thread_id flows through so the file lands inside the week thread.
+        assert doc_call[1]["metadata"]["thread_id"] == "week-2"
+
+        # Audio follows as a separate, uncaptioned message.
+        adapter.send_voice.assert_called_once()
+        voice_call = adapter.send_voice.call_args
+        assert voice_call[1]["audio_path"] == str(audio_path)
+        assert "caption" not in voice_call[1]
+
     def test_live_adapter_media_only_no_text(self, tmp_path, monkeypatch):
         """When content is ONLY a MEDIA tag with no text, media should still be sent."""
         from gateway.config import Platform
