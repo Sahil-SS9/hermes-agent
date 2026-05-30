@@ -146,6 +146,7 @@ def _manual_export(
     brand: str,
     platform: str,
     title: Optional[str] = None,
+    media_path: Optional[str] = None,
 ) -> None:
     """Print an approved draft to stdout for manual posting.
 
@@ -166,10 +167,11 @@ def _manual_export(
         f"# Publish Queue — {brand} / {platform}",
         f"# Generated: {datetime.now(timezone.utc).isoformat()}",
         f"# Title: {title or ''}",
+        f"# Media: {media_path or '(none)'}",
         "",
         body_text,
         "",
-        "# --- Copy the text above, paste into the platform below ---",
+        "# --- Copy the text above, attach the media file, paste into the platform ---",
     ]
 
     with open(filepath, "w", encoding="utf-8") as f:
@@ -217,14 +219,19 @@ def queue_post(
     publish_at: Optional[datetime] = None,
     group: str = "kensei-generated",
     state: str = "DRAFT",
+    media_path: Optional[str] = None,
 ) -> Optional[str]:
     """Insert a post into Postiz DB, or export manually if no integration.
+
+    ``media_path`` is the local image/video to attach. Until Postiz media-library
+    upload is wired, the path is recorded in the manual export so the asset is
+    never lost; the DB insert stays content-only.
 
     Returns the Postiz post ID if queued, or None (manual export printed).
     """
     integration_id = _get_integration_id(brand, platform)
     if not integration_id:
-        _manual_export(body_text, brand, platform, title=title)
+        _manual_export(body_text, brand, platform, title=title, media_path=media_path)
         return None
 
     post_id = str(uuid.uuid4())
@@ -254,7 +261,7 @@ def queue_post(
     except Exception as e:
         print(f"  Postiz insert failed: {e}")
         print(f"  Falling back to manual export.")
-        _manual_export(body_text, brand, platform, title=title)
+        _manual_export(body_text, brand, platform, title=title, media_path=media_path)
         return None
     finally:
         conn.close()

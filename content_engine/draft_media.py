@@ -70,7 +70,7 @@ def generate_draft_image(
             if path and os.path.exists(path):
                 print(f"[draft_media] generated via {tier}: {path}")
                 return path
-        except Exception as exc:  # noqa: BLE001 — provider failures must fall through
+        except Exception as exc:  # noqa: BLE001 (provider failures must fall through)
             print(f"[draft_media] FAL {tier} failed: {exc}")
 
     # 2. Free fallback: Pollinations.
@@ -87,4 +87,39 @@ def generate_draft_image(
     except Exception as exc:  # noqa: BLE001
         print(f"[draft_media] pollinations failed: {exc}")
 
+    return None
+
+
+def generate_draft_video(
+    image_path: str, caption: str = "", brand: str = "", draft_id: str = "",
+) -> Optional[str]:
+    """Free motion video (ffmpeg) from a generated image + caption. mp4 or None.
+
+    A paid AI-video model (FAL seedance/wan) can be slotted in later as a
+    budget-gated upgrade; ffmpeg keeps the default at zero cost.
+    """
+    if not image_path or not os.path.exists(image_path):
+        print("[draft_media] video needs a base image; none available.")
+        return None
+    try:
+        from video_generator import create_image_slideshow_video
+
+        out_dir = OUTPUT_ROOT / (brand or "misc") / "video"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out = str(out_dir / f"{draft_id or uuid.uuid4().hex[:8]}.mp4")
+        # No burned-in caption: the post copy carries the text, and multiline
+        # captions trip a PIL anchor limitation. The clip is a clean branded
+        # motion shot of the image. (caption kept in the signature for a future
+        # AI-video upgrade that can use it as the generation prompt.)
+        path = create_image_slideshow_video(
+            image_paths=[image_path],
+            captions=None,
+            output_path=out,
+            duration_per_image=5.0,
+        )
+        if path and os.path.exists(path):
+            print(f"[draft_media] video saved: {path}")
+            return path
+    except Exception as exc:  # noqa: BLE001
+        print(f"[draft_media] video generation failed: {exc}")
     return None

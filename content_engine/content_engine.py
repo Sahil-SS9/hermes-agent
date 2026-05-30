@@ -123,52 +123,48 @@ def run_stage_2(dry_run: bool = False) -> List[dict]:
 
     print(f"Enriching {len(approved)} approved draft(s)...")
 
-    from fal_client import generate_image_from_text_card as fal_gen_image
-    from hyperframes_video import generate_stat_reveal_video as make_hyperframes_stat_reveal_video
+    # Unified media path: the same degrading FAL chain + free fallbacks used by
+    # the review digest and the approve flow.
+    from draft_media import generate_draft_image, generate_draft_video, build_prompt
 
     enriched = []
-    from visuals import make_card as make_pillow_card
-
     for d in approved:
         brand = d["brand"]
         draft_id = d["id"]
         body_text = d.get("body_text", "")
-        visual_desc = d.get("visual_description", "")
         content_type = d.get("content_type", "text")
 
         print(f"  [{draft_id}] brand={brand} type={content_type}")
 
-        # Stage 2.1: Pillow static card (free, always)
-        static_path = make_pillow_card(brand, body_text, title=d.get("title"), pillar=d.get("pillar", ""))
-        if static_path:
-            print(f"    Static: {static_path}")
+        needs_media = "image" in content_type or "video" in content_type
+        produced = False
 
-        # Stage 2.2: FAL.ai image for visual content types.
-        # Prompt source falls back to body_text when no art-directed
-        # visual_description was written (the gate used to drop these silently).
-        if "image" in content_type and fal_gen_image:
-            print(f"    FAL.ai: Generating image...")
-            try:
-                img_path = fal_gen_image(brand, visual_desc or body_text)
-                if img_path:
-                    update_draft_ai_image_path(draft_id, img_path)
-                    print(f"    Image: {img_path}")
-            except Exception as e:
-                print(f"    FAL.ai failed: {e}")
+        if needs_media and not d.get("ai_image_path"):
+            img = generate_draft_image(
+                build_prompt(brand, body_text, d.get("visual_description", "")),
+                brand=brand, platform=d.get("platform", ""), draft_id=draft_id,
+            )
+            if img:
+                update_draft_ai_image_path(draft_id, img)
+                d["ai_image_path"] = img
+                produced = True
+                print(f"    Image: {img}")
 
-        # Stage 2.3: HyperFrames video for video content types
-        if "video" in content_type and make_hyperframes_stat_reveal_video:
-            print(f"    HyperFrames: Generating video...")
-            try:
-                vid_path = make_hyperframes_stat_reveal_video(brand, body_text[:100], draft_id=draft_id)
-                if vid_path:
-                    update_draft_ai_video_path(draft_id, vid_path)
-                    print(f"    Video: {vid_path}")
-            except Exception as e:
-                print(f"    HyperFrames failed: {e}")
+        if "video" in content_type and not d.get("ai_video_path"):
+            vid = generate_draft_video(d.get("ai_image_path"), body_text, brand, draft_id)
+            if vid:
+                update_draft_ai_video_path(draft_id, vid)
+                d["ai_video_path"] = vid
+                produced = True
+                print(f"    Video: {vid}")
 
-        mark_enriched(draft_id)
-        enriched.append(d)
+        # Only mark enriched when there was nothing to make or we made it, so a
+        # failed generation is retried on the next Stage 2 pass.
+        if produced or not needs_media:
+            mark_enriched(draft_id)
+            enriched.append(d)
+        else:
+            print(f"    [skip] no media produced, leaving for retry")
 
     return enriched
 
@@ -478,12 +474,38 @@ def main() -> int:
         if d:
             brand = d["brand"]
             platform = d["platform"]
+            ct = d.get("content_type", "text")
+            from draft_media import generate_draft_image, generate_draft_video, build_prompt
+
+            # Ensure a base image exists for any visual post.
+            if ("image" in ct or "video" in ct) and not d.get("ai_image_path"):
+                img = generate_draft_image(
+                    build_prompt(brand, d.get("body_text", ""), d.get("visual_description", "")),
+                    brand=brand, platform=platform, draft_id=d["id"],
+                )
+                if img:
+                    update_draft_ai_image_path(d["id"], img)
+                    d["ai_image_path"] = img
+
+            # Video is generated on approval (cheapest: free ffmpeg motion clip).
+            media_path = None
+            if "video" in ct:
+                if not d.get("ai_video_path"):
+                    vid = generate_draft_video(d.get("ai_image_path"), d.get("body_text", ""), brand, d["id"])
+                    if vid:
+                        update_draft_ai_video_path(d["id"], vid)
+                        d["ai_video_path"] = vid
+                media_path = d.get("ai_video_path") or d.get("ai_image_path")
+            elif "image" in ct:
+                media_path = d.get("ai_image_path")
+
             from postiz_bridge import queue_post
             post_id = queue_post(
                 body_text=d["body_text"],
                 brand=brand,
                 platform=platform,
                 title=d.get("title"),
+                media_path=media_path,
             )
             if post_id:
                 print(f"  Queued in Postiz: {post_id}")
