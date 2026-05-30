@@ -1819,6 +1819,52 @@ class DiscordAdapter(BasePlatformAdapter):
             msg = await channel.send(content=caption if caption else None, file=file)
         return SendResult(success=True, message_id=str(msg.id))
 
+    async def send_documents_bundle(
+        self,
+        chat_id: str,
+        file_paths: list,
+        caption: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        """Send several local files as a SINGLE Discord message (one comment).
+
+        Discord allows up to 10 attachments per message, so a lesson's HTML and
+        audio can ride together on one message instead of posting separately.
+        Honours ``metadata['thread_id']`` so the bundle lands inside the existing
+        weekly thread; only creates a new forum thread when no thread_id is given
+        and the resolved target is a forum parent.
+        """
+        if not self._client:
+            return SendResult(success=False, error="Not connected")
+
+        thread_id = metadata.get("thread_id") if metadata else None
+        target_id = thread_id or chat_id
+        channel = self._client.get_channel(int(target_id))
+        if not channel:
+            channel = await self._client.fetch_channel(int(target_id))
+        if not channel:
+            label = "Thread" if thread_id else "Channel"
+            return SendResult(success=False, error=f"{label} {target_id} not found")
+
+        open_files = []
+        try:
+            for p in file_paths:
+                fh = open(p, "rb")
+                open_files.append(fh)
+            files = [discord.File(fh, filename=os.path.basename(getattr(fh, "name", "file")))
+                     for fh in open_files]
+            content = (caption or "").strip() or None
+            if thread_id is None and self._is_forum_parent(channel):
+                return await self._forum_post_file(channel, content=content or "", files=files)
+            msg = await channel.send(content=content, files=files)
+            return SendResult(success=True, message_id=str(msg.id))
+        finally:
+            for fh in open_files:
+                try:
+                    fh.close()
+                except Exception:
+                    pass
+
     async def send_multiple_images(
         self,
         chat_id: str,

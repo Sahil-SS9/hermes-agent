@@ -701,13 +701,13 @@ class TestDeliverResultWrapping:
         assert adapter.send_image_file.call_args[1]["image_path"] == str(media_path)
         adapter.send_voice.assert_not_called()
 
-    def test_discord_lesson_combines_text_with_html_caption(self, tmp_path, monkeypatch):
-        """A teacher lesson (HTML + audio) should post as ONE captioned document
-        plus an audio follow-up, NOT three separate Discord messages.
+    def test_discord_lesson_bundles_files_into_one_message(self, tmp_path, monkeypatch):
+        """A teacher lesson (HTML + audio) should post the summary text as one
+        comment, then BOTH files bundled into a SINGLE Discord message inside the
+        week thread — not as separate per-file posts.
 
-        The lesson text rides as the caption on the non-audio (HTML) file, so
-        the standalone text send is skipped. The HTML must be sent first so the
-        caption attaches to it, with audio following uncaptioned.
+        The bundled send goes via send_documents_bundle with thread_id flowing
+        through, and the per-file send_document/send_voice paths are NOT used.
         """
         from gateway.config import Platform
         from concurrent.futures import Future
@@ -715,7 +715,9 @@ class TestDeliverResultWrapping:
         audio_path = self._safe_media_path(tmp_path, monkeypatch, "lesson.mp3")
 
         adapter = AsyncMock()
+        adapter.platform = Platform.DISCORD
         adapter.send.return_value = MagicMock(success=True)
+        adapter.send_documents_bundle.return_value = MagicMock(success=True)
         adapter.send_document.return_value = MagicMock(success=True)
         adapter.send_voice.return_value = MagicMock(success=True)
 
@@ -739,33 +741,31 @@ class TestDeliverResultWrapping:
             "origin": {"platform": "discord", "chat_id": "forum-1", "thread_id": "week-2"},
         }
 
-        # MEDIA order intentionally audio-first to prove reordering puts HTML first.
         with patch("gateway.config.load_gateway_config", return_value=mock_cfg), \
              patch("cron.scheduler.load_config", return_value={"cron": {"wrap_response": False}}), \
              patch("asyncio.run_coroutine_threadsafe", side_effect=fake_run_coro):
             _deliver_result(
                 job,
-                f"Week 2 Day 10 lesson body\nMEDIA:{audio_path}\nMEDIA:{html_path}",
+                f"Week 2 Day 10 lesson summary\nMEDIA:{audio_path}\nMEDIA:{html_path}",
                 adapters={Platform.DISCORD: adapter},
                 loop=loop,
             )
 
-        # No standalone text message — the text is combined as the HTML caption.
-        adapter.send.assert_not_called()
+        # Summary text is sent as its own comment into the thread.
+        adapter.send.assert_called_once()
+        assert "Week 2 Day 10 lesson summary" in adapter.send.call_args[0][1]
 
-        # HTML document carries the lesson text as its caption.
-        adapter.send_document.assert_called_once()
-        doc_call = adapter.send_document.call_args
-        assert doc_call[1]["file_path"] == str(html_path)
-        assert "Week 2 Day 10 lesson body" in doc_call[1]["caption"]
-        # thread_id flows through so the file lands inside the week thread.
-        assert doc_call[1]["metadata"]["thread_id"] == "week-2"
+        # Both files go in ONE bundled message, inside the week thread.
+        adapter.send_documents_bundle.assert_called_once()
+        bundle_call = adapter.send_documents_bundle.call_args
+        sent_paths = bundle_call[1]["file_paths"]
+        assert str(html_path) in sent_paths and str(audio_path) in sent_paths
+        assert len(sent_paths) == 2
+        assert bundle_call[1]["metadata"]["thread_id"] == "week-2"
 
-        # Audio follows as a separate, uncaptioned message.
-        adapter.send_voice.assert_called_once()
-        voice_call = adapter.send_voice.call_args
-        assert voice_call[1]["audio_path"] == str(audio_path)
-        assert "caption" not in voice_call[1]
+        # Per-file paths are NOT used when bundling succeeds.
+        adapter.send_document.assert_not_called()
+        adapter.send_voice.assert_not_called()
 
     def test_live_adapter_media_only_no_text(self, tmp_path, monkeypatch):
         """When content is ONLY a MEDIA tag with no text, media should still be sent."""

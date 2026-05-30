@@ -581,6 +581,32 @@ def _send_media_via_adapter(
 
     media_files = BasePlatformAdapter.filter_media_delivery_paths(media_files)
 
+    # Discord: bundle multiple files (e.g. a lesson's HTML + audio) into ONE
+    # message so they read as a single comment rather than separate posts. The
+    # MP3 rides as a normal attachment here (not a native voice bubble) so it can
+    # share the message. Falls back to per-file routing if the bundle send fails
+    # or the adapter lacks the method.
+    route_platform0 = platform if platform is not None else getattr(adapter, "platform", None)
+    is_discord = str(getattr(route_platform0, "value", route_platform0) or "").lower() == "discord"
+    if is_discord and len(media_files) > 1 and hasattr(adapter, "send_documents_bundle"):
+        try:
+            from agent.async_utils import safe_schedule_threadsafe
+            paths = [mp for mp, _v in media_files]
+            future = safe_schedule_threadsafe(
+                adapter.send_documents_bundle(chat_id=chat_id, file_paths=paths, metadata=metadata),
+                loop,
+            )
+            if future is not None:
+                result = future.result(timeout=60)
+                if result and getattr(result, "success", True):
+                    return
+                logger.warning(
+                    "Job '%s': bundled media send failed (%s), falling back to per-file",
+                    job.get("id", "?"), getattr(result, "error", "unknown"),
+                )
+        except Exception as e:
+            logger.warning("Job '%s': bundled media send error (%s), falling back to per-file", job.get("id", "?"), e)
+
     for media_path, _is_voice in media_files:
         try:
             ext = Path(media_path).suffix.lower()
