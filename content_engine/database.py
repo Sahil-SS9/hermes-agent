@@ -253,6 +253,23 @@ def update_draft_visual_path(draft_id: str, visual_path: str) -> None:
     conn.commit()
     conn.close()
 
+def update_draft_ai_image_path(draft_id: str, ai_image_path: str) -> None:
+    """Persist the generated image path (FAL/pollinations) to a draft."""
+    # `with` on a sqlite connection commits on success, rolls back on error.
+    with sqlite3.connect(str(DB_PATH)) as conn:
+        conn.execute(
+            "UPDATE drafts SET ai_image_path = ? WHERE id = ?",
+            (ai_image_path, draft_id),
+        )
+
+def update_draft_ai_video_path(draft_id: str, ai_video_path: str) -> None:
+    """Persist the generated video path to a draft (Stage 2 / on approval)."""
+    with sqlite3.connect(str(DB_PATH)) as conn:
+        conn.execute(
+            "UPDATE drafts SET ai_video_path = ? WHERE id = ?",
+            (ai_video_path, draft_id),
+        )
+
 def truncate_drafts() -> None:
     conn = sqlite3.connect(str(DB_PATH))
     conn.execute("DELETE FROM drafts")

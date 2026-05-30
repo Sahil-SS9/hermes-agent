@@ -16,6 +16,7 @@ from config import BRANDS
 from database import init_db, insert_draft, list_drafts, get_draft, update_draft_visual_path, list_recent_drafts
 from database import approve_draft, reject_draft, mark_enriched
 from database import list_approved_pending_enrichment, truncate_drafts, purge_stale_drafts, count_drafts_older_than
+from database import update_draft_ai_image_path, update_draft_ai_video_path
 from llm_drafts import generate_drafts
 from telegram_digest import deliver_digest, send_message
 
@@ -142,12 +143,15 @@ def run_stage_2(dry_run: bool = False) -> List[dict]:
         if static_path:
             print(f"    Static: {static_path}")
 
-        # Stage 2.2: FAL.ai image for visual content types
-        if "image" in content_type and fal_gen_image and visual_desc:
+        # Stage 2.2: FAL.ai image for visual content types.
+        # Prompt source falls back to body_text when no art-directed
+        # visual_description was written (the gate used to drop these silently).
+        if "image" in content_type and fal_gen_image:
             print(f"    FAL.ai: Generating image...")
             try:
-                img_path = fal_gen_image(brand, visual_desc)
+                img_path = fal_gen_image(brand, visual_desc or body_text)
                 if img_path:
+                    update_draft_ai_image_path(draft_id, img_path)
                     print(f"    Image: {img_path}")
             except Exception as e:
                 print(f"    FAL.ai failed: {e}")
@@ -158,6 +162,7 @@ def run_stage_2(dry_run: bool = False) -> List[dict]:
             try:
                 vid_path = make_hyperframes_stat_reveal_video(brand, body_text[:100], draft_id=draft_id)
                 if vid_path:
+                    update_draft_ai_video_path(draft_id, vid_path)
                     print(f"    Video: {vid_path}")
             except Exception as e:
                 print(f"    HyperFrames failed: {e}")
@@ -285,6 +290,26 @@ def main() -> int:
     dig.add_argument("--dry-run", action="store_true")
     dig.add_argument("--since-minutes", type=int, default=None, help="Only include drafts created in the last N minutes")
 
+    # review-list: recent drafts the agent should image, as compact JSON lines
+    rls = sub.add_parser("review-list", help="List recent drafts (id, brand, platform, content_type, body)")
+    rls.add_argument("--since-minutes", type=int, default=75)
+
+    # gen-image: cheapest-first image for one draft, persisted to ai_image_path
+    gi = sub.add_parser("gen-image", help="Generate + persist an image for a draft (FAL flux_klein → pollinations)")
+    gi.add_argument("draft_id")
+    gi.add_argument("--prompt", default=None, help="Art-directed prompt; falls back to an on-brand prompt from body_text")
+    gi.add_argument("--model", default="flux_klein")
+    gi.add_argument("--force", action="store_true", help="Regenerate even if ai_image_path is already set")
+
+    # deliver-discord: grouped-by-brand review to Discord
+    dd = sub.add_parser("deliver-discord", help="Deliver recent drafts to Discord, grouped by brand")
+    dd.add_argument("--since-minutes", type=int, default=75)
+
+    # review-digest: generate cheap images for recent text+image drafts, then deliver
+    rd = sub.add_parser("review-digest", help="Generate images for recent text+image drafts and deliver to Discord")
+    rd.add_argument("--since-minutes", type=int, default=75)
+    rd.add_argument("--max", type=int, default=None, help="Cap drafts delivered (flood guard / testing)")
+
     # Approve
     app = sub.add_parser("approve", help="Approve a draft")
     app.add_argument("draft_id")
@@ -368,6 +393,82 @@ def main() -> int:
         if digest_drafts is not None:
             attach_free_visual_previews(digest_drafts, dry_run=args.dry_run)
         ok = run_digest(dry_run=args.dry_run, drafts=digest_drafts)
+        return 0 if ok else 1
+
+    elif args.cmd == "review-list":
+        drafts = list_recent_drafts(args.since_minutes)
+        for d in drafts:
+            if not (d.get("body_text") or "").strip():
+                continue
+            print(json.dumps({
+                "id": d["id"],
+                "brand": d["brand"],
+                "platform": d["platform"],
+                "content_type": d.get("content_type", "text"),
+                "has_image": bool(d.get("ai_image_path")),
+                "body": (d.get("body_text") or "")[:200],
+            }))
+        return 0
+
+    elif args.cmd == "gen-image":
+        from draft_media import generate_draft_image, build_prompt
+        d = get_draft(args.draft_id)
+        if not d:
+            print(f"Draft not found: {args.draft_id}")
+            return 1
+        if d.get("ai_image_path") and not args.force:
+            print(f"Already has image: {d['ai_image_path']} (use --force to regenerate)")
+            return 0
+        prompt = args.prompt or build_prompt(d["brand"], d.get("body_text", ""), d.get("visual_description", ""))
+        path = generate_draft_image(
+            prompt, brand=d["brand"], platform=d.get("platform", ""),
+            draft_id=d["id"], model=args.model,
+        )
+        if not path:
+            print(f"Image generation failed for {args.draft_id}")
+            return 1
+        update_draft_ai_image_path(args.draft_id, path)
+        print(f"Image: {path}")
+        return 0
+
+    elif args.cmd == "deliver-discord":
+        from discord_digest import deliver_discord_digest
+        drafts = list_recent_drafts(args.since_minutes)
+        ok = deliver_discord_digest(drafts)
+        return 0 if ok else 1
+
+    elif args.cmd == "review-digest":
+        # One deterministic pass: generate a cheap on-brand image for each recent
+        # text+image draft (cheapest-first, free fallback), then deliver the whole
+        # batch to Discord grouped by brand. text+video shows copy only here;
+        # the video is generated on approval (Phase 2).
+        from draft_media import generate_draft_image, build_prompt
+        from discord_digest import deliver_discord_digest
+
+        drafts = list_recent_drafts(args.since_minutes)
+        drafts = [d for d in drafts if (d.get("body_text") or "").strip()]
+        if args.max is not None:
+            drafts = drafts[:args.max]
+        if not drafts:
+            print("No recent drafts to review.")
+            return 0
+
+        for d in drafts:
+            ct = d.get("content_type", "text")
+            if "image" not in ct or d.get("ai_image_path"):
+                continue
+            prompt = build_prompt(d["brand"], d.get("body_text", ""), d.get("visual_description", ""))
+            path = generate_draft_image(
+                prompt, brand=d["brand"], platform=d.get("platform", ""), draft_id=d["id"],
+            )
+            if path:
+                update_draft_ai_image_path(d["id"], path)
+                d["ai_image_path"] = path
+                print(f"  [{d['id']}] image: {path}")
+            else:
+                print(f"  [{d['id']}] image generation failed")
+
+        ok = deliver_discord_digest(drafts)
         return 0 if ok else 1
 
     elif args.cmd == "approve":
