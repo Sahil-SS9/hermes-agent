@@ -184,6 +184,7 @@ def check_swap() -> dict | None:
                             "title": f"Swap {pct}% full",
                             "body": f"Swap: {used}MB/{total}MB ({pct}%).",
                             "priority": "P2",
+                            "slug": "swap-high",
                         }
     return None
 
@@ -221,6 +222,7 @@ def check_cron_gaps() -> dict | None:
             "title": f"{len(gaps)} cron(s) overdue",
             "body": "Overdue crons:\n" + "\n".join(gaps[:6]),
             "priority": "P2",
+            "slug": "cron-gaps",
         }
     return None
 
@@ -285,6 +287,7 @@ def check_stale_crons() -> dict | None:
             "title": f"{len(stale)} cron(s) stale",
             "body": "Stale crons:\n" + "\n".join(stale[:6]),
             "priority": "P2",
+            "slug": "cron-stale",
         }
     return None
 
@@ -429,6 +432,7 @@ def check_wfa_live() -> dict | None:
             "title": f"WFA: {len(live_findings)} live task/run drift",
             "body": f"By type:\n" + "\n".join(lines) + f"\n\nTop examples:\n{detail}",
             "priority": "P1" if any(f["kind"] == "terminal_without_completed_run" for f in live_findings) else "P2",
+            "slug": "wfa-live-drift",
         }
     return None
 
