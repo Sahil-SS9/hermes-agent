@@ -49,6 +49,7 @@ AUTHOR_MAP = {
     "mathijs.vd.hurk@gmail.com": "mathijsvandenhurk",
     "drpelagik@gmail.com": "SeaXen",
     "lengr@users.noreply.github.com": "LengR",
+    "17255546+CharZhou@users.noreply.github.com": "CharZhou",
     "metalclaudbot@gmail.com": "HashClawAI",
     "tonybear55665566@gmail.com": "TonyPepeBear",
     "kaspersniels@gmail.com": "nielskaspers",
@@ -80,6 +81,7 @@ AUTHOR_MAP = {
     "interstellar.consulting@gmail.com": "Interstellar-code",
     "33978413+Interstellar-code@users.noreply.github.com": "Interstellar-code",
     "tillfalko@gmail.com": "tillfalko",
+    "hi@fesalfayed.com": "fesalfayed",
     # teknium (multiple emails)
     "teknium1@gmail.com": "teknium1",
     "kenyon1977@gmail.com": "kenyonxu",
