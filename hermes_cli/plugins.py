@@ -137,6 +137,13 @@ VALID_HOOKS: Set[str] = {
     "post_llm_call",
     "pre_api_request",
     "post_api_request",
+    # CLI/TUI user-message hook. Fired after local preprocessing (attachments,
+    # @refs, surrogate sanitisation) but before the message is persisted to
+    # conversation history or sent to the model. Plugins may return:
+    #   {"action": "rewrite", "text": "..."} -> replace user message
+    #   {"action": "skip", "reason": "..."} -> drop this turn
+    #   None / {"action": "allow"} -> continue unchanged
+    "pre_user_message",
     "on_session_start",
     "on_session_end",
     "on_session_finalize",

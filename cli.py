@@ -12029,6 +12029,37 @@ class HermesCLI:
             from run_agent import _sanitize_surrogates
             message = _sanitize_surrogates(message)
 
+        # Plugin hook: pre_user_message. This lets local plugins rewrite or
+        # deliberately skip a turn before the message is persisted to history or
+        # sent to the model. Gateway has its own pre_gateway_dispatch hook; this
+        # is the matching CLI surface.
+        if isinstance(message, str):
+            try:
+                from hermes_cli.plugins import invoke_hook
+                hook_results = invoke_hook(
+                    "pre_user_message",
+                    message=message,
+                    session_id=self.session_id or "",
+                    platform="cli",
+                    model=self.model or "",
+                    provider=self.provider or "",
+                )
+                for hook_result in hook_results:
+                    if isinstance(hook_result, dict):
+                        action = str(hook_result.get("action") or "").lower()
+                        if action == "rewrite":
+                            text = hook_result.get("text")
+                            if isinstance(text, str):
+                                message = text
+                                break
+                        if action == "skip":
+                            return None
+                    elif isinstance(hook_result, str) and hook_result:
+                        message = hook_result
+                        break
+            except Exception as e:
+                logging.debug("pre_user_message hook failed: %s", e)
+
         # Add user message to history
         self.conversation_history.append({"role": "user", "content": message})
 
