@@ -2514,26 +2514,38 @@ def parent_results(conn: sqlite3.Connection, task_id: str) -> list[tuple[str, Op
 # Comments & events
 # ---------------------------------------------------------------------------
 
-def add_comment(
-    conn: sqlite3.Connection, task_id: str, author: str, body: str
+def _add_comment_inline(
+    conn: sqlite3.Connection, task_id: str, *, author: str, body: str,
 ) -> int:
+    """Insert a comment row inside an already-open write_txn.
+
+    Helper for callers that need to bundle the comment with other state
+    changes in a single atomic write. Same input contract as
+    ``add_comment`` but no transaction of its own.
+    """
     if not body or not body.strip():
         raise ValueError("comment body is required")
     if not author or not author.strip():
         raise ValueError("comment author is required")
+    if not conn.execute(
+        "SELECT 1 FROM tasks WHERE id = ?", (task_id,)
+    ).fetchone():
+        raise ValueError(f"unknown task {task_id}")
     now = int(time.time())
+    cur = conn.execute(
+        "INSERT INTO task_comments (task_id, author, body, created_at) "
+        "VALUES (?, ?, ?, ?)",
+        (task_id, author.strip(), body.strip(), now),
+    )
+    _append_event(conn, task_id, "commented", {"author": author, "len": len(body)})
+    return int(cur.lastrowid or 0)
+
+
+def add_comment(
+    conn: sqlite3.Connection, task_id: str, author: str, body: str
+) -> int:
     with write_txn(conn):
-        if not conn.execute(
-            "SELECT 1 FROM tasks WHERE id = ?", (task_id,)
-        ).fetchone():
-            raise ValueError(f"unknown task {task_id}")
-        cur = conn.execute(
-            "INSERT INTO task_comments (task_id, author, body, created_at) "
-            "VALUES (?, ?, ?, ?)",
-            (task_id, author.strip(), body.strip(), now),
-        )
-        _append_event(conn, task_id, "commented", {"author": author, "len": len(body)})
-        return int(cur.lastrowid or 0)
+        return _add_comment_inline(conn, task_id, author=author, body=body)
 
 
 def list_comments(conn: sqlite3.Connection, task_id: str) -> list[Comment]:
@@ -3442,6 +3454,36 @@ def reassign_task(
         return False
 
 
+def reassign_task_with_note(
+    conn: sqlite3.Connection,
+    task_id: str,
+    profile: Optional[str],
+    *,
+    handoff_note: Optional[str] = None,
+    author: Optional[str] = None,
+) -> bool:
+    """Reassign and append a handoff comment in one logical operation.
+
+    ``reassign_task`` runs reclaim + assign as its own write_txns, then
+    this helper appends the comment in a tightly-coupled follow-up txn
+    on the same connection. The two-step sequence is on a local SQLite
+    file with WAL, so the inter-txn window is microseconds. Callers
+    that need true single-txn atomicity should inline the SQL directly.
+    """
+    ok = reassign_task(conn, task_id, profile, reclaim_first=True,
+                       reason="kanban_reassign")
+    if not ok:
+        return False
+    if handoff_note and handoff_note.strip():
+        with write_txn(conn):
+            _add_comment_inline(
+                conn, task_id,
+                author=author or "orchestrator",
+                body=f"reassign handoff: {handoff_note.strip()}",
+            )
+    return True
+
+
 def _verify_created_cards(
     conn: sqlite3.Connection,
     completing_task_id: str,
@@ -4263,6 +4305,606 @@ def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
             {"status": new_status} if new_status != "ready" else None,
         )
         return True
+
+
+# ---------------------------------------------------------------------------
+# Review flow: request / approve / reject + sticky-reviewer helpers
+# ---------------------------------------------------------------------------
+
+def _count_events(conn: sqlite3.Connection, task_id: str, kind: str) -> int:
+    row = conn.execute(
+        "SELECT COUNT(*) AS n FROM task_events WHERE task_id = ? AND kind = ?",
+        (task_id, kind),
+    ).fetchone()
+    return int(row["n"]) if row else 0
+
+
+def review_pass_count(conn: sqlite3.Connection, task_id: str) -> int:
+    """How many chained `review_passed` events this task has accumulated.
+
+    Used by `approve_review_task` to enforce `kanban.max_review_passes`.
+    """
+    return _count_events(conn, task_id, "review_passed")
+
+
+def reassign_count(conn: sqlite3.Connection, task_id: str) -> int:
+    """How many `assigned` events this task has accumulated.
+
+    Used by `kanban_reassign` to enforce `kanban.max_reassigns`. Mirrors
+    the `assigned` event emitted by `assign_task`.
+    """
+    return _count_events(conn, task_id, "assigned")
+
+
+def latest_worker_profile(conn: sqlite3.Connection, task_id: str) -> Optional[str]:
+    """Profile of the most recent worker run that requested review.
+
+    Conditional approval pins the task back to this profile so the same
+    worker resumes the task with full context on the requested fix.
+    """
+    row = conn.execute(
+        """
+        SELECT profile FROM task_runs
+         WHERE task_id = ? AND outcome = 'review_requested'
+         ORDER BY id DESC LIMIT 1
+        """,
+        (task_id,),
+    ).fetchone()
+    return row["profile"] if row and row["profile"] else None
+
+
+def _latest_event_payload(
+    conn: sqlite3.Connection, task_id: str, kind: str,
+) -> Optional[dict]:
+    row = conn.execute(
+        "SELECT payload FROM task_events WHERE task_id = ? AND kind = ? "
+        "ORDER BY id DESC LIMIT 1",
+        (task_id, kind),
+    ).fetchone()
+    if not row or not row["payload"]:
+        return None
+    try:
+        payload = json.loads(row["payload"])
+    except Exception:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def latest_reviewer_profile(conn: sqlite3.Connection, task_id: str) -> Optional[str]:
+    """Profile from the most recent `review_passed` event payload.
+
+    Used by the chained approver-profile guard so the same reviewer cannot
+    rubber-stamp their own pass-along.
+    """
+    payload = _latest_event_payload(conn, task_id, "review_passed")
+    if not payload:
+        return None
+    value = payload.get("approver_profile") or payload.get("by_profile")
+    return str(value) if value else None
+
+
+def preferred_reviewer_profile(
+    conn: sqlite3.Connection, task_id: str,
+) -> Optional[str]:
+    """Profile recorded as the rejecting reviewer on the latest `review_rejected`.
+
+    Sticky-reviewer rule: when a task re-enters `review` after fixes,
+    spawn the same reviewer who logged the original findings.
+    """
+    payload = _latest_event_payload(conn, task_id, "review_rejected")
+    if not payload:
+        return None
+    value = payload.get("rejected_by_profile")
+    return str(value) if value else None
+
+
+def request_review(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    summary: str,
+    artefacts: Optional[Iterable[str]] = None,
+    next_steps: Optional[str] = None,
+    expected_run_id: Optional[int] = None,
+) -> bool:
+    """Transition ``running -> review`` with a structured handoff.
+
+    Returns ``True`` on success, ``False`` when the task is not in
+    ``running`` (or the optimistic ``expected_run_id`` did not match).
+    Ends the current run with ``outcome='review_requested'`` so attempt
+    history records the handoff and ``latest_worker_profile`` can read
+    the reviewer's worker back.
+
+    The ``review`` column is unclaimed (claim_lock cleared) so the next
+    dispatcher tick picks it up via ``claim_review_task``.
+    """
+    if not summary or not str(summary).strip():
+        raise ValueError("summary is required")
+    artefacts_list: list[str] = []
+    if artefacts is not None:
+        for raw in artefacts:
+            s = str(raw).strip()
+            if s:
+                artefacts_list.append(s)
+    payload = {
+        "summary": str(summary).strip(),
+        "artefacts": artefacts_list,
+        "next_steps": (next_steps.strip() if isinstance(next_steps, str) and next_steps.strip() else None),
+    }
+    with write_txn(conn):
+        if expected_run_id is None:
+            cur = conn.execute(
+                """
+                UPDATE tasks
+                   SET status        = 'review',
+                       claim_lock    = NULL,
+                       claim_expires = NULL,
+                       worker_pid    = NULL
+                 WHERE id = ? AND status = 'running'
+                """,
+                (task_id,),
+            )
+        else:
+            cur = conn.execute(
+                """
+                UPDATE tasks
+                   SET status        = 'review',
+                       claim_lock    = NULL,
+                       claim_expires = NULL,
+                       worker_pid    = NULL
+                 WHERE id = ? AND status = 'running'
+                   AND current_run_id = ?
+                """,
+                (task_id, int(expected_run_id)),
+            )
+        if cur.rowcount != 1:
+            return False
+        run_id = _end_run(
+            conn, task_id,
+            outcome="review_requested",
+            status="review_requested",
+            summary=payload["summary"],
+            metadata={
+                "artefacts": artefacts_list,
+                "next_steps": payload["next_steps"],
+            },
+        )
+        _append_event(
+            conn, task_id, "review_requested", payload, run_id=run_id,
+        )
+        return True
+
+
+class ApproverProfileError(ValueError):
+    """Raised when the approver's profile matches the most recent worker
+    (first-pass) or the previous reviewer (chained). Signals that the
+    caller must not self-approve."""
+
+
+class ReviewCircuitBreakError(ValueError):
+    """Raised when the chain or reassign cap is hit."""
+
+
+def _kanban_setting(name: str, default: int) -> int:
+    try:
+        from hermes_cli.config import load_config
+        cfg = load_config().get("kanban", {})
+    except Exception:
+        return default
+    value = cfg.get(name, default)
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def approve_review_task(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    outcome: str,
+    approver_profile: str,
+    summary: Optional[str] = None,
+    follow_up_spec: Optional[dict] = None,
+    next_reviewer: Optional[str] = None,
+    comment: Optional[str] = None,
+    expected_run_id: Optional[int] = None,
+) -> dict:
+    """Three-outcome approval handler called by `kanban_approve`.
+
+    - ``outcome="terminal"`` flips to ``done`` via ``complete_task`` so
+      ``created_cards`` verification and run-summary persistence behave
+      consistently. Optional ``follow_up_spec`` creates a child task in
+      ``backlog`` linked under the approved task.
+    - ``outcome="chained"`` keeps the task in ``review`` and reassigns to
+      ``next_reviewer``. Records a ``review_passed`` event carrying the
+      approver. Caller must not pass ``follow_up_spec``.
+    - ``outcome="conditional"`` returns the task to ``todo`` with assignee
+      pinned to the most recent worker (the implementer who requested
+      review). The optional ``comment`` is appended for the worker to
+      read on next claim.
+
+    Returns a dict describing the resulting state. Raises
+    ``ApproverProfileError`` if the approver is the original implementer
+    (first pass) or the previous reviewer (chained), and
+    ``ReviewCircuitBreakError`` when ``kanban.max_review_passes`` is hit
+    on a chained call.
+    """
+    if not approver_profile:
+        raise ValueError("approver_profile is required")
+    if outcome not in {"terminal", "chained", "conditional"}:
+        raise ValueError(
+            "outcome must be one of terminal | chained | conditional"
+        )
+    if outcome != "terminal" and follow_up_spec is not None:
+        raise ValueError(
+            "follow_up_spec is only valid for outcome='terminal'"
+        )
+    if outcome == "chained" and not next_reviewer:
+        raise ValueError("next_reviewer is required for chained approval")
+
+    # First-pass vs chained approver guard. Reads must be inside the txn
+    # so a concurrent reject doesn't slip in between the check and the
+    # status transition.
+    prior_passes = review_pass_count(conn, task_id)
+    if prior_passes == 0:
+        original = latest_worker_profile(conn, task_id)
+        if original and approver_profile == original:
+            raise ApproverProfileError(
+                f"approver_profile={approver_profile!r} matches the most "
+                "recent worker; the original implementer cannot approve "
+                "their own work. Reassign to a different reviewer first."
+            )
+    else:
+        prev = latest_reviewer_profile(conn, task_id)
+        if prev and approver_profile == prev:
+            raise ApproverProfileError(
+                f"approver_profile={approver_profile!r} matches the previous "
+                "reviewer; chained approvals must hand off to a different "
+                "profile."
+            )
+
+    if outcome == "chained":
+        cap = _kanban_setting("max_review_passes", 4)
+        if prior_passes >= cap:
+            raise ReviewCircuitBreakError(
+                f"chained approvals exhausted (max_review_passes={cap}); "
+                "terminal-approve, reject, or reassign instead."
+            )
+
+    if outcome == "terminal":
+        ok = complete_task(
+            conn, task_id,
+            summary=summary,
+            metadata={"approver_profile": approver_profile},
+            expected_run_id=expected_run_id,
+        )
+        if not ok:
+            return {"ok": False, "reason": "complete_task refused"}
+        # Lay down a `review_approved` event so review history is
+        # explicit alongside the standard `completed` event.
+        with write_txn(conn):
+            _append_event(
+                conn, task_id, "review_approved",
+                {"approver_profile": approver_profile, "outcome": "terminal"},
+            )
+        result = {"ok": True, "status": "done", "outcome": "terminal"}
+        if follow_up_spec:
+            child_id = _create_followup_from_approval(
+                conn, parent_id=task_id,
+                spec=follow_up_spec, approver_profile=approver_profile,
+            )
+            result["follow_up_task_id"] = child_id
+        return result
+
+    if outcome == "chained":
+        with write_txn(conn):
+            # End the reviewer's run, reset assignee + status to review
+            # so claim_review_task picks the next reviewer up on the next
+            # dispatcher tick. Clear the claim under the same txn.
+            run_id = _end_run(
+                conn, task_id,
+                outcome="approved_chained",
+                status="approved_chained",
+                summary=summary,
+                metadata={
+                    "approver_profile": approver_profile,
+                    "next_reviewer": next_reviewer,
+                },
+            )
+            cur = conn.execute(
+                """
+                UPDATE tasks
+                   SET status        = 'review',
+                       assignee      = ?,
+                       claim_lock    = NULL,
+                       claim_expires = NULL,
+                       worker_pid    = NULL
+                 WHERE id = ?
+                """,
+                (_canonical_assignee(next_reviewer), task_id),
+            )
+            if cur.rowcount != 1:
+                return {"ok": False, "reason": "task not found"}
+            _append_event(
+                conn, task_id, "review_passed",
+                {
+                    "approver_profile": approver_profile,
+                    "next_reviewer": _canonical_assignee(next_reviewer),
+                    "summary": summary,
+                },
+                run_id=run_id,
+            )
+        return {
+            "ok": True, "status": "review",
+            "outcome": "chained",
+            "next_reviewer": _canonical_assignee(next_reviewer),
+        }
+
+    # conditional
+    original_worker = latest_worker_profile(conn, task_id)
+    if not original_worker:
+        raise ValueError(
+            "no prior worker run found; cannot pin assignee for "
+            "conditional approval"
+        )
+    with write_txn(conn):
+        run_id = _end_run(
+            conn, task_id,
+            outcome="approved_conditional",
+            status="approved_conditional",
+            summary=summary,
+            metadata={
+                "approver_profile": approver_profile,
+                "comment": comment,
+            },
+        )
+        cur = conn.execute(
+            """
+            UPDATE tasks
+               SET status        = 'todo',
+                   assignee      = ?,
+                   claim_lock    = NULL,
+                   claim_expires = NULL,
+                   worker_pid    = NULL
+             WHERE id = ?
+            """,
+            (original_worker, task_id),
+        )
+        if cur.rowcount != 1:
+            return {"ok": False, "reason": "task not found"}
+        if comment and comment.strip():
+            _add_comment_inline(
+                conn, task_id,
+                author=approver_profile,
+                body=f"conditional approval: {comment.strip()}",
+            )
+        _append_event(
+            conn, task_id, "review_approved",
+            {
+                "approver_profile": approver_profile,
+                "outcome": "conditional",
+                "pinned_assignee": original_worker,
+            },
+            run_id=run_id,
+        )
+    # Recompute so the task either lands in ``ready`` (no parents) or
+    # waits in ``todo`` until parents resolve. Matches the
+    # ``unblock_task`` policy.
+    recompute_ready(conn)
+    return {
+        "ok": True, "status": "todo",
+        "outcome": "conditional",
+        "pinned_assignee": original_worker,
+    }
+
+
+def _create_followup_from_approval(
+    conn: sqlite3.Connection,
+    *,
+    parent_id: str,
+    spec: dict,
+    approver_profile: str,
+) -> str:
+    """Land a follow_up_spec from a terminal approval as a new backlog task.
+
+    ``spec`` must include ``title`` and ``assignee``. ``body``, ``theme``,
+    and ``sub_goals`` are optional. The new task is linked as a child of
+    ``parent_id`` so the audit trail joins them.
+    """
+    title = (spec.get("title") or "").strip()
+    assignee = (spec.get("assignee") or "").strip()
+    if not title:
+        raise ValueError("follow_up_spec.title is required")
+    if not assignee:
+        raise ValueError("follow_up_spec.assignee is required")
+    body_parts: list[str] = []
+    if spec.get("body"):
+        body_parts.append(str(spec["body"]).strip())
+    sub_goals = spec.get("sub_goals")
+    if isinstance(sub_goals, (list, tuple)) and sub_goals:
+        body_parts.append("Sub-goals:")
+        body_parts.extend(f"- {str(g).strip()}" for g in sub_goals if str(g).strip())
+    body = "\n\n".join(p for p in body_parts if p) or None
+    child_id = create_task(
+        conn,
+        title=title,
+        body=body,
+        assignee=assignee,
+        created_by=approver_profile,
+        parents=(parent_id,),
+        theme=spec.get("theme"),
+        initial_status="backlog",
+    )
+    return child_id
+
+
+def reject_review_task(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    findings: dict,
+    rejected_by_profile: str,
+    expected_run_id: Optional[int] = None,
+) -> bool:
+    """Transition ``running -> blocked`` from a review claim.
+
+    The task was in ``review`` and got claimed by the rejecting reviewer
+    (so its live status is ``running`` with the reviewer's run active).
+    This helper closes that run, flips the task to ``blocked``, records
+    the rejecting reviewer's profile under ``rejected_by_profile`` on
+    the ``review_rejected`` event so the sticky-reviewer logic can route
+    the next pass back to the same reviewer.
+    """
+    if not isinstance(findings, dict):
+        raise ValueError("findings must be an object")
+    if not rejected_by_profile:
+        raise ValueError("rejected_by_profile is required")
+    with write_txn(conn):
+        if expected_run_id is None:
+            cur = conn.execute(
+                """
+                UPDATE tasks
+                   SET status        = 'blocked',
+                       claim_lock    = NULL,
+                       claim_expires = NULL,
+                       worker_pid    = NULL
+                 WHERE id = ? AND status = 'running'
+                """,
+                (task_id,),
+            )
+        else:
+            cur = conn.execute(
+                """
+                UPDATE tasks
+                   SET status        = 'blocked',
+                       claim_lock    = NULL,
+                       claim_expires = NULL,
+                       worker_pid    = NULL
+                 WHERE id = ? AND status = 'running'
+                   AND current_run_id = ?
+                """,
+                (task_id, int(expected_run_id)),
+            )
+        if cur.rowcount != 1:
+            return False
+        summary_preview = None
+        reasons = findings.get("reasons")
+        if isinstance(reasons, (list, tuple)) and reasons:
+            summary_preview = str(reasons[0])[:400]
+        run_id = _end_run(
+            conn, task_id,
+            outcome="review_rejected",
+            status="review_rejected",
+            summary=summary_preview,
+            metadata={"findings": findings, "rejected_by_profile": rejected_by_profile},
+        )
+        payload = {
+            "findings": findings,
+            "rejected_by_profile": rejected_by_profile,
+        }
+        _append_event(
+            conn, task_id, "review_rejected", payload, run_id=run_id,
+        )
+        # Emit `blocked` second so _has_sticky_block sees a worker-style
+        # block and recompute_ready will not auto-promote on the next tick.
+        _append_event(
+            conn, task_id, "blocked",
+            {"reason": "review-rejected", "rejected_by_profile": rejected_by_profile},
+            run_id=run_id,
+        )
+        return True
+
+
+def edit_task_skills(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    skills: Iterable[str],
+    author: str,
+) -> dict:
+    """Replace a task's ``skills`` list. Scope-locked to ``skills`` only.
+
+    Allowed on any non-terminal status. For a ``running`` task the row
+    updates but the live worker keeps its already-loaded skill set; the
+    return value carries ``applies_on_next_spawn=True`` so the caller
+    knows whether to follow up with a reassign or wait for a natural
+    respawn.
+    """
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for raw in skills or ():
+        s = str(raw).strip()
+        if not s or s in seen:
+            continue
+        if "," in s:
+            raise ValueError(f"skill name {s!r} contains a comma; pass a list instead")
+        seen.add(s)
+        cleaned.append(s)
+    with write_txn(conn):
+        row = conn.execute(
+            "SELECT status FROM tasks WHERE id = ?", (task_id,),
+        ).fetchone()
+        if not row:
+            raise ValueError(f"unknown task {task_id!r}")
+        status = row["status"]
+        if status in {"done", "archived"}:
+            raise ValueError(
+                f"cannot edit skills on terminal task (status={status!r})"
+            )
+        payload = json.dumps(cleaned) if cleaned else None
+        conn.execute(
+            "UPDATE tasks SET skills = ? WHERE id = ?", (payload, task_id),
+        )
+        if author:
+            _add_comment_inline(
+                conn, task_id,
+                author=author,
+                body=f"edit: skills <- {cleaned!r}",
+            )
+        _append_event(
+            conn, task_id, "edited",
+            {"fields": ["skills"], "skills": cleaned, "author": author},
+        )
+    return {
+        "ok": True,
+        "skills": cleaned,
+        "applies_on_next_spawn": status == "running",
+        "status": status,
+    }
+
+
+def _pin_sticky_reviewers(conn: sqlite3.Connection) -> int:
+    """Reassign unclaimed review-column tasks to their preferred reviewer.
+
+    Called from ``dispatch_once`` right before the review-row sweep.
+    Bounded scan: at most one UPDATE per review task with a recorded
+    rejection. Tasks without a prior rejection are no-ops.
+    """
+    rows = conn.execute(
+        "SELECT id, assignee FROM tasks "
+        "WHERE status = 'review' AND claim_lock IS NULL"
+    ).fetchall()
+    pinned = 0
+    for row in rows:
+        preferred = preferred_reviewer_profile(conn, row["id"])
+        if not preferred:
+            continue
+        if row["assignee"] == preferred:
+            continue
+        with write_txn(conn):
+            cur = conn.execute(
+                "UPDATE tasks SET assignee = ? "
+                "WHERE id = ? AND status = 'review' AND claim_lock IS NULL",
+                (preferred, row["id"]),
+            )
+            if cur.rowcount == 1:
+                _append_event(
+                    conn, row["id"], "assigned",
+                    {"profile": preferred, "via": "sticky_reviewer"},
+                )
+                pinned += 1
+    return pinned
 
 
 def promote_from_backlog(conn: sqlite3.Connection, task_id: str) -> bool:
