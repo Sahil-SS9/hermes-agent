@@ -317,6 +317,34 @@ def test_kanban_not_gateway_only():
     assert not cmd.gateway_only
 
 
+def test_worker_run_id_ignores_stale_env_run_id(kanban_home, monkeypatch, capsys):
+    with kb.connect_closing() as conn:
+        tid = kb.create_task(conn, title="stale run guard")
+        conn.execute("UPDATE tasks SET current_run_id=? WHERE id=?", (222, tid))
+        conn.commit()
+
+    monkeypatch.setenv("HERMES_KANBAN_TASK", tid)
+    monkeypatch.setenv("HERMES_KANBAN_RUN_ID", "111")
+
+    assert kc._worker_run_id_for(tid) is None
+    err = capsys.readouterr().err
+    assert "stale_run_id_recovery" in err
+    assert "env_run=111" in err
+    assert "db_run=222" in err
+
+
+def test_worker_run_id_returns_current_env_run_id(kanban_home, monkeypatch):
+    with kb.connect_closing() as conn:
+        tid = kb.create_task(conn, title="current run guard")
+        conn.execute("UPDATE tasks SET current_run_id=? WHERE id=?", (333, tid))
+        conn.commit()
+
+    monkeypatch.setenv("HERMES_KANBAN_TASK", tid)
+    monkeypatch.setenv("HERMES_KANBAN_RUN_ID", "333")
+
+    assert kc._worker_run_id_for(tid) == 333
+
+
 # ---------------------------------------------------------------------------
 # reclaim + reassign CLI smoke tests
 # ---------------------------------------------------------------------------

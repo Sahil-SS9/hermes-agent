@@ -314,7 +314,8 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
     p_create.add_argument("--branch", default=None,
                           help="Branch name for worktree tasks, e.g. wt/t6-wire")
     p_create.add_argument("--tenant", default=None, help="Tenant namespace")
-    p_create.add_argument("--priority", type=int, default=0, help="Priority tiebreaker")
+    p_create.add_argument("--priority", type=int, default=0,
+                          help="0=highest, 5=lowest (default: 0)")
     p_create.add_argument("--triage", action="store_true",
                           help="Park in triage — a specifier will flesh out the spec and promote to todo")
     p_create.add_argument("--idempotency-key", default=None,
@@ -1865,15 +1866,42 @@ def _cmd_comment(args: argparse.Namespace) -> int:
 
 
 def _worker_run_id_for(task_id: str) -> Optional[int]:
+    """Return this worker's dispatcher run id when it is scoped to task_id.
+
+    Returns ``None`` if the env run id is stale relative to the DB. A
+    crash-then-reclaim cycle can leave a retried worker process carrying the
+    original dispatch's ``HERMES_KANBAN_RUN_ID`` while the task has moved on
+    to a new ``current_run_id``. Passing the stale id as an expected guard
+    rejects an otherwise legitimate completion, so fall back to status-only
+    completion semantics in that case.
+    """
     if os.environ.get("HERMES_KANBAN_TASK") != task_id:
         return None
     raw = os.environ.get("HERMES_KANBAN_RUN_ID")
     if not raw:
         return None
     try:
-        return int(raw)
+        env_run_id = int(raw)
     except ValueError:
         return None
+
+    try:
+        with kb.connect_closing() as conn:
+            row = conn.execute(
+                "SELECT current_run_id FROM tasks WHERE id = ?", (task_id,),
+            ).fetchone()
+        db_run_id = int(row["current_run_id"]) if row and row["current_run_id"] else None
+        if db_run_id is not None and db_run_id != env_run_id:
+            print(
+                f"kanban: stale_run_id_recovery: env_run={env_run_id} "
+                f"db_run={db_run_id} task={task_id}",
+                file=sys.stderr,
+            )
+            return None
+    except Exception:
+        pass
+
+    return env_run_id
 
 
 def _cmd_complete(args: argparse.Namespace) -> int:
