@@ -17,7 +17,8 @@ import requests
 
 DISCORD_API = "https://discord.com/api/v10"
 INBOX_CHANNEL = os.getenv("REPURPOSE_INBOX_CHANNEL", "1510403518169878689")
-STATE_PATH = Path(os.path.expanduser("~/.hermes/state/repurpose-inbox.json"))
+# State lives in the content engine's own data dir, not KENSEI's ~/.hermes state.
+STATE_PATH = Path(__file__).resolve().parent / "data" / "repurpose-inbox-state.json"
 INBOX_DIR = Path(__file__).resolve().parent / "inbox"
 
 _IMG_EXT = (".png", ".jpg", ".jpeg", ".webp", ".gif")
@@ -32,13 +33,13 @@ def _safe_inbox_dest(msg_id: str, raw_name: str) -> Optional[Path]:
     basename of safe characters and verify the resolved path stays under the
     inbox root before any download.
     """
-    safe_msg = re.sub(r"[^0-9]", "", str(msg_id)) or "msg"
+    safe_msg = re.sub(r"[^0-9]", "", str(msg_id))
     safe_name = re.sub(r"[^A-Za-z0-9._-]", "_", os.path.basename(raw_name or "file"))
-    if not safe_name or safe_name.startswith("."):
+    if not safe_msg or not safe_name or safe_name.startswith("."):
         return None
     root = INBOX_DIR.resolve()
     dest = (root / safe_msg / safe_name).resolve()
-    if not str(dest).startswith(str(root) + os.sep):
+    if not dest.is_relative_to(root):
         return None
     return dest
 

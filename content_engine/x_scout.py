@@ -32,11 +32,14 @@ SUGGESTIONS_PER_RUN = 4
 def _search(query: str, n: int = 10) -> List[dict]:
     """Run an xurl search. Returns tweet dicts, or [] on spend cap / error."""
     try:
-        out = subprocess.run(
+        result = subprocess.run(
             [XURL, "search", query, "-n", str(n)],
             capture_output=True, text=True, timeout=60,
-        ).stdout
-        data = json.loads(out)
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            print(f"[x_scout] xurl returned {result.returncode}: {result.stderr[:120]}")
+            return []
+        data = json.loads(result.stdout)
     except Exception as exc:  # noqa: BLE001
         print(f"[x_scout] search failed: {exc}")
         return []

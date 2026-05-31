@@ -121,6 +121,11 @@ def run_stage_2(dry_run: bool = False) -> List[dict]:
         print("No approved drafts pending Stage 2 enrichment.")
         return []
 
+    if dry_run:
+        for d in approved:
+            print(f"  [DRY] {d['id']} brand={d['brand']} type={d.get('content_type', 'text')}")
+        return approved
+
     print(f"Enriching {len(approved)} approved draft(s)...")
 
     # Unified media path: the same degrading FAL chain + free fallbacks used by
@@ -137,7 +142,6 @@ def run_stage_2(dry_run: bool = False) -> List[dict]:
         print(f"  [{draft_id}] brand={brand} type={content_type}")
 
         needs_media = "image" in content_type or "video" in content_type
-        produced = False
 
         if needs_media and not d.get("ai_image_path"):
             img = generate_draft_image(
@@ -147,7 +151,6 @@ def run_stage_2(dry_run: bool = False) -> List[dict]:
             if img:
                 update_draft_ai_image_path(draft_id, img)
                 d["ai_image_path"] = img
-                produced = True
                 print(f"    Image: {img}")
 
         if "video" in content_type and not d.get("ai_video_path"):
@@ -155,16 +158,18 @@ def run_stage_2(dry_run: bool = False) -> List[dict]:
             if vid:
                 update_draft_ai_video_path(draft_id, vid)
                 d["ai_video_path"] = vid
-                produced = True
                 print(f"    Video: {vid}")
 
-        # Only mark enriched when there was nothing to make or we made it, so a
-        # failed generation is retried on the next Stage 2 pass.
-        if produced or not needs_media:
+        # Mark enriched only when the required media exists, so a failed
+        # generation is retried on the next Stage 2 pass. A video post needs its
+        # video; an image post needs its image.
+        video_ok = "video" not in content_type or d.get("ai_video_path")
+        image_ok = "image" not in content_type or d.get("ai_image_path")
+        if not needs_media or (video_ok and image_ok):
             mark_enriched(draft_id)
             enriched.append(d)
         else:
-            print(f"    [skip] no media produced, leaving for retry")
+            print(f"    [skip] media incomplete, leaving for retry")
 
     return enriched
 
