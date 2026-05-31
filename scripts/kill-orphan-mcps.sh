@@ -37,17 +37,19 @@ MCP_PIDS=$(ps -eo pid,comm --no-headers \
     | grep -v grep \
     | awk '{print $1}')
 
-# nanobanana runs under npm exec or sh wrappers, so also catch child nodes
+# nanobanana runs under npm exec or sh wrappers, so also catch child nodes.
+# Grep no-match is a healthy state here, so never let it trip set -e/pipefail.
 NANO_PIDS=$(ps -eo pid,comm,args --no-headers \
     | grep -i 'nanobanana' \
     | grep -v grep \
-    | awk '{print $1}')
+    | awk '{print $1}' || true)
 
-# Also catch the uv launchers for workspace-mcp and npm exec launchers
+# Also catch the uv launchers for workspace-mcp and npm exec launchers.
+# No matches is healthy; keep it non-fatal.
 LAUNCHER_PIDS=$(ps -eo pid,args --no-headers \
     | grep -E 'uv tool uvx workspace-mcp' \
     | grep -v grep \
-    | awk '{print $1}')
+    | awk '{print $1}' || true)
 
 ALL_PIDS=$(echo "$MCP_PIDS $NANO_PIDS $LAUNCHER_PIDS" | tr ' ' '\n' | sort -nu)
 

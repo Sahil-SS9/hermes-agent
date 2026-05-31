@@ -23,22 +23,39 @@ elif [[ ! -t 1 ]]; then
     DRY_RUN=false
 fi
 
-# Find all gateway --replace processes ordered by PID (oldest first)
-# We keep the oldest one as the primary, kill the rest if they're PPID=1
+# Find all gateway --replace processes. We prefer the live systemd MainPID as the
+# primary, because an older orphan can outlive the real gateway. If systemd is not
+# available, fall back to the newest PID seen in ps output.
 mapfile -t GATEWAY_PIDS < <(ps -eo pid,ppid,lstart,args --no-headers \
     | grep -E 'python.*hermes_cli\.main gateway run --replace' \
     | grep -v grep \
-    | sort -k3 \
     | awk '{print $1}')
 
 if [[ ${#GATEWAY_PIDS[@]} -eq 0 ]]; then
-    echo "[SILENT] No gateway processes found."
     exit 0
 fi
 
-# The first PID (oldest) is the primary — keep it
-PRIMARY="${GATEWAY_PIDS[0]}"
+SYSTEMD_MAIN_PID=$(systemctl show -p MainPID --value hermes-gateway.service 2>/dev/null | tr -d ' ' || true)
+PRIMARY=""
+if [[ -n "$SYSTEMD_MAIN_PID" && "$SYSTEMD_MAIN_PID" != "0" ]]; then
+    for pid in "${GATEWAY_PIDS[@]}"; do
+        if [[ "$pid" == "$SYSTEMD_MAIN_PID" ]]; then
+            PRIMARY="$pid"
+            break
+        fi
+    done
+fi
+
+if [[ -z "$PRIMARY" ]]; then
+    PRIMARY=$(printf '%s\n' "${GATEWAY_PIDS[@]}" | sort -n | tail -1)
+fi
+
 PRIMARY_PPID=$(ps -o ppid= -p "$PRIMARY" 2>/dev/null | tr -d ' ' || echo "?")
+
+# Stay silent when healthy: 0 or 1 gateway process means nothing to do.
+if [[ ${#GATEWAY_PIDS[@]} -le 1 ]]; then
+    exit 0
+fi
 
 echo "=== Gateway Orphan Killer ==="
 echo "Primary: PID $PRIMARY (PPID=$PRIMARY_PPID)"
@@ -48,7 +65,10 @@ echo ""
 KILLED=0
 KEPT=1  # the primary
 
-for pid in "${GATEWAY_PIDS[@]:1}"; do
+for pid in "${GATEWAY_PIDS[@]}"; do
+    if [[ "$pid" == "$PRIMARY" ]]; then
+        continue
+    fi
     ppid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ' || echo "?")
     comm=$(ps -o comm= -p "$pid" 2>/dev/null || echo "<gone>")
     elapsed=$(ps -o etime= -p "$pid" 2>/dev/null | tr -d ' ' || echo "?")
