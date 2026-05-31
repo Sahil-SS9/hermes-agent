@@ -114,7 +114,7 @@ def _group_by_brand(drafts: List[dict]) -> "OrderedDict[str, list]":
 def deliver_discord_digest(drafts: List[dict], channel_id: str = DEFAULT_CHANNEL) -> bool:
     """Deliver the review grouped by brand. Skips drafts with empty body_text."""
     if not _token():
-        print("[discord_digest] DISCORD_BOT_TOKEN not set — cannot deliver.")
+        print("[discord_digest] DISCORD_BOT_TOKEN not set, cannot deliver.")
         return False
 
     drafts = [d for d in drafts if (d.get("body_text") or "").strip()]
