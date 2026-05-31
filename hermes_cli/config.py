@@ -1834,6 +1834,16 @@ DEFAULT_CONFIG = {
         # worker process (if still running host-locally) is terminated
         # before the reclaim.  0 disables stale detection entirely.
         "dispatch_stale_timeout_seconds": 14400,
+        # Review-flow circuit-breaks. Both cap pathological loops without
+        # blocking the common multi-stage case (which is N=2 or N=3 chained
+        # reviewers, with maybe 1-2 reassigns per stage).
+        # ``max_reassigns``: per-task cap on `kanban_reassign` calls. The
+        # Nth+1 call errors out so the operator notices the thrash.
+        "max_reassigns": 3,
+        # ``max_review_passes``: per-task cap on chained ``kanban_approve``
+        # calls (``outcome="chained"``). Terminal and conditional approvals
+        # don't count.
+        "max_review_passes": 4,
     },
 
     # execute_code settings — controls the tool used for programmatic tool calls.
