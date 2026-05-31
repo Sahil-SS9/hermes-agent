@@ -6861,6 +6861,12 @@ def dispatch_once(
     # Same concurrency model as ready dispatch: review spawns count
     # against max_spawn alongside ready tasks, so the total number of
     # running workers stays bounded.
+    #
+    # Sticky-reviewer pin: tasks that re-enter review after a rejection
+    # get their assignee swapped to the rejecting reviewer's profile
+    # so the same reviewer (with context) picks up the follow-up pass.
+    # No-op for tasks without a prior review_rejected.
+    _pin_sticky_reviewers(conn)
     review_rows = conn.execute(
         "SELECT id, assignee, skills FROM tasks "
         "WHERE status = 'review' AND claim_lock IS NULL "
