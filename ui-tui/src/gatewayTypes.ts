@@ -259,6 +259,21 @@ export interface SessionSteerResponse {
   text?: string
 }
 
+export interface PromptOptimizePreviewResponse {
+  status: 'bypass' | 'preview'
+  reason?: string
+  preview?: {
+    session_key: string
+    original: string
+    rewritten: string
+    quality_before: number
+    quality_after: number
+    token_delta_pct: number
+    model_profile: string
+    template_name?: string | null
+  }
+}
+
 // ── Prompt / submission ──────────────────────────────────────────────
 
 export interface PromptSubmitResponse {
@@ -551,6 +566,11 @@ export type GatewayEvent =
   | { payload: { command: string; description: string }; session_id?: string; type: 'approval.request' }
   | { payload: { request_id: string }; session_id?: string; type: 'sudo.request' }
   | { payload: { env_var: string; prompt: string; request_id: string }; session_id?: string; type: 'secret.request' }
+  | {
+      payload: PromptOptimizePreviewResponse
+      session_id?: string
+      type: 'prompt.optimize.preview'
+    }
   | { payload: { task_id: string; text: string }; session_id?: string; type: 'background.complete' }
   | { payload?: { text?: string }; session_id?: string; type: 'review.summary' }
   | { payload: SubagentEventPayload; session_id?: string; type: 'subagent.spawn_requested' }

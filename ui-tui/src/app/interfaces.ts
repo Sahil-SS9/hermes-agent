@@ -14,6 +14,7 @@ import type {
   DetailsMode,
   Msg,
   PanelSection,
+  PromptOptimizationReq,
   SecretReq,
   SectionVisibility,
   SessionInfo,
@@ -90,6 +91,7 @@ export interface OverlayState {
   modelPicker: boolean
   pager: null | PagerState
   picker: boolean
+  promptOptimization: null | PromptOptimizationReq
   secret: null | SecretReq
   sessions: boolean
   skillsHub: boolean
@@ -174,7 +176,7 @@ export interface ComposerRefs {
   historyRef: MutableRefObject<string[]>
   queueEditRef: MutableRefObject<null | number>
   queueRef: MutableRefObject<string[]>
-  submitRef: MutableRefObject<(value: string) => void>
+  submitRef: MutableRefObject<(value: string, skipOptimization?: boolean) => void>
 }
 
 export interface ComposerState {
@@ -193,7 +195,7 @@ export interface UseComposerStateOptions {
   gw: GatewayClient
   onClipboardPaste: (quiet?: boolean) => Promise<void> | void
   onImageAttached?: (info: ImageAttachResponse) => void
-  submitRef: MutableRefObject<(value: string) => void>
+  submitRef: MutableRefObject<(value: string, skipOptimization?: boolean) => void>
 }
 
 export interface UseComposerStateResult {
@@ -206,7 +208,7 @@ export interface InputHandlerActions {
   answerClarify: (answer: string) => void
   appendMessage: (msg: Msg) => void
   die: () => void
-  dispatchSubmission: (full: string) => void
+  dispatchSubmission: (full: string, skipOptimization?: boolean) => void
   guardBusySessionSwitch: (what?: string) => boolean
   newSession: (msg?: string, title?: string) => void
   sys: (text: string) => void
@@ -261,7 +263,7 @@ export interface GatewayEventHandlerContext {
     setCatalog: StateSetter<null | SlashCatalog>
   }
   submission: {
-    submitRef: MutableRefObject<(value: string) => void>
+    submitRef: MutableRefObject<(value: string, skipOptimization?: boolean) => void>
   }
   system: {
     bellOnComplete: boolean
@@ -328,6 +330,7 @@ export interface SlashHandlerContext {
 export interface AppLayoutActions {
   answerApproval: (choice: string) => void
   answerClarify: (answer: string) => void
+  answerPromptOptimization: (choice: string) => void
   answerSecret: (value: string) => void
   answerSudo: (pw: string) => void
   clearSelection: () => void
@@ -351,7 +354,7 @@ export interface AppLayoutComposerProps {
   pagerPageSize: number
   queueEditIdx: null | number
   queuedDisplay: string[]
-  submit: (value: string) => void
+  submit: (value: string, skipOptimization?: boolean) => void
   updateInput: StateSetter<string>
   voiceRecordKey: ParsedVoiceRecordKey
 }
@@ -399,6 +402,7 @@ export interface AppOverlaysProps {
   onNewLiveSession: () => void
   onNewPromptSession: (prompt: string, modelArg?: string) => void
   onPickerSelect: (sessionId: string) => void
+  onPromptOptimizationChoice: (choice: string) => void
   onSecretSubmit: (value: string) => void
   onSudoSubmit: (pw: string) => void
   pagerPageSize: number

@@ -197,7 +197,7 @@ export function useMainApp(gw: GatewayClient) {
   const scrollRef = useRef<null | ScrollBoxHandle>(null)
   const onEventRef = useRef<(ev: GatewayEvent) => void>(() => {})
   const clipboardPasteRef = useRef<(quiet?: boolean) => Promise<void> | void>(() => {})
-  const submitRef = useRef<(value: string) => void>(() => {})
+  const submitRef = useRef<(value: string, skipOptimization?: boolean) => void>(() => {})
   const terminalHintsShownRef = useRef(new Set<string>())
   const historyItemsRef = useRef(historyItems)
   const lastUserMsgRef = useRef(lastUserMsg)
@@ -880,6 +880,28 @@ export function useMainApp(gw: GatewayClient) {
     [overlay.secret, respondWith]
   )
 
+  const answerPromptOptimization = useCallback(
+    (choice: string) => {
+      const opt = overlay.promptOptimization
+
+      if (!opt) {
+        return
+      }
+
+      patchOverlayState({ promptOptimization: null })
+
+      if (choice === 'accept' && opt.preview) {
+        submitRef.current(opt.preview.rewritten, true)
+      } else if (choice === 'edit' && opt.preview) {
+        composerActions.setInput(opt.preview.rewritten)
+        sys('optimised prompt loaded for editing')
+      } else {
+        submitRef.current(opt.preview?.original ?? '', true)
+      }
+    },
+    [composerActions, overlay.promptOptimization, sys]
+  )
+
   const onModelSelect = useCallback((value: string) => {
     patchOverlayState({ modelPicker: false })
     slashRef.current(`/model ${value}`)
@@ -982,6 +1004,7 @@ export function useMainApp(gw: GatewayClient) {
       closeLiveSession,
       answerApproval,
       answerClarify,
+      answerPromptOptimization,
       answerSecret,
       answerSudo,
       clearSelection,
@@ -994,6 +1017,7 @@ export function useMainApp(gw: GatewayClient) {
     [
       answerApproval,
       answerClarify,
+      answerPromptOptimization,
       answerSecret,
       answerSudo,
       clearSelection,

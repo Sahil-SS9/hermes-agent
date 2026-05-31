@@ -186,6 +186,23 @@ export interface SecretReq {
   requestId: string
 }
 
+export interface PromptOptimizationPreview {
+  session_key: string
+  original: string
+  rewritten: string
+  quality_before: number
+  quality_after: number
+  token_delta_pct: number
+  model_profile: string
+  template_name?: string | null
+}
+
+export interface PromptOptimizationReq {
+  preview: PromptOptimizationPreview
+  reason?: string
+  status: 'bypass' | 'preview'
+}
+
 export interface PanelData {
   sections: PanelSection[]
   title: string

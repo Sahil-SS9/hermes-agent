@@ -6,6 +6,7 @@ import { looksLikeSlashCommand } from '../domain/slash.js'
 import type { GatewayClient } from '../gatewayClient.js'
 import type {
   InputDetectDropResponse,
+  PromptOptimizePreviewResponse,
   PromptSubmitResponse,
   SessionSteerResponse,
   ShellExecResponse
@@ -16,6 +17,7 @@ import { PASTE_SNIPPET_RE } from '../protocol/paste.js'
 import type { Msg } from '../types.js'
 
 import type { ComposerActions, ComposerRefs, ComposerState, PasteSnippet } from './interfaces.js'
+import { patchOverlayState } from './overlayStore.js'
 import { turnController } from './turnController.js'
 import { getUiState, patchUiState } from './uiStore.js'
 
@@ -85,7 +87,7 @@ export function useSubmission(opts: UseSubmissionOptions) {
   }, [composerState.input, composerState.inputBuf])
 
   const send = useCallback(
-    (text: string, showUserMessage = true) => {
+    (text: string, showUserMessage = true, skipOptimization = false) => {
       const expand = expandSnips(composerState.pasteSnips)
 
       const startSubmit = (displayText: string, submitText: string, showUserMessage = true) => {
@@ -126,13 +128,44 @@ export function useSubmission(opts: UseSubmissionOptions) {
         return sys('session not ready yet')
       }
 
+      // Skip both the file-drop check and the optimisation preview when
+      // re-submitting a prompt that has just come back from the overlay —
+      // otherwise the rewritten text gets re-optimised in a loop.
+      if (skipOptimization) {
+        startSubmit(text, expand(text), showUserMessage)
+        return
+      }
+
       // Always ask the backend whether this looks like a file drop.
       // The backend's _detect_file_drop handles paths with spaces, quotes,
       // Windows drive letters, and escaped characters correctly.
       gw.request<InputDetectDropResponse>('input.detect_drop', { session_id: sid, text })
         .then(r => {
           if (!r?.matched) {
-            return startSubmit(text, expand(text), showUserMessage)
+            patchUiState({ busy: true, status: 'optimising…' })
+            return gw
+              .request<PromptOptimizePreviewResponse>('prompt.optimize.preview', {
+                session_id: sid,
+                text: expand(text)
+              })
+              .then(preview => {
+                patchUiState({ busy: false, status: 'ready' })
+                if (preview?.status === 'preview' && preview.preview) {
+                  patchOverlayState({
+                    promptOptimization: {
+                      preview: preview.preview,
+                      reason: preview.reason,
+                      status: 'preview'
+                    }
+                  })
+                  return
+                }
+                startSubmit(text, expand(text), showUserMessage)
+              })
+              .catch(() => {
+                patchUiState({ busy: false, status: 'ready' })
+                startSubmit(text, expand(text), showUserMessage)
+              })
           }
 
           if (r.is_image) {
@@ -282,7 +315,7 @@ export function useSubmission(opts: UseSubmissionOptions) {
   )
 
   const dispatchSubmission = useCallback(
-    (full: string) => {
+    (full: string, skipOptimization = false) => {
       if (!full.trim()) {
         return
       }
@@ -353,13 +386,13 @@ export function useSubmission(opts: UseSubmissionOptions) {
         return interpolate(full, send)
       }
 
-      send(full)
+      send(full, true, skipOptimization)
     },
     [appendMessage, composerActions, composerRefs, handleBusyInput, interpolate, send, sendQueued, shellExec, slashRef]
   )
 
   const submit = useCallback(
-    (value: string) => {
+    (value: string, skipOptimization = false) => {
       if (composerState.completions.length) {
         const row = composerState.completions[composerState.compIdx]
 
@@ -405,7 +438,7 @@ export function useSubmission(opts: UseSubmissionOptions) {
         return composerActions.setInput('')
       }
 
-      dispatchSubmission([...composerState.inputBuf, value].join('\n'))
+      dispatchSubmission([...composerState.inputBuf, value].join('\n'), skipOptimization)
     },
     [appendMessage, composerActions, composerRefs, composerState, dispatchSubmission, gw, sys]
   )
@@ -424,6 +457,6 @@ export interface UseSubmissionOptions {
   maybeGoodVibes: (text: string) => void
   setLastUserMsg: (value: string) => void
   slashRef: MutableRefObject<(cmd: string) => boolean>
-  submitRef: MutableRefObject<(value: string) => void>
+  submitRef: MutableRefObject<(value: string, skipOptimization?: boolean) => void>
   sys: (text: string) => void
 }

@@ -11,6 +11,7 @@ import { FloatBox } from './appChrome.js'
 import { MaskedPrompt } from './maskedPrompt.js'
 import { ModelPicker } from './modelPicker.js'
 import { OverlayHint } from './overlayControls.js'
+import { PromptOptimizationOverlay } from './promptOptimizationOverlay.js'
 import { ApprovalPrompt, ClarifyPrompt, ConfirmPrompt } from './prompts.js'
 import { SessionPicker } from './sessionPicker.js'
 import { SkillsHub } from './skillsHub.js'
@@ -21,11 +22,20 @@ export function PromptZone({
   cols,
   onApprovalChoice,
   onClarifyAnswer,
+  onPromptOptimizationChoice,
   onSecretSubmit,
   onSudoSubmit
-}: Pick<AppOverlaysProps, 'cols' | 'onApprovalChoice' | 'onClarifyAnswer' | 'onSecretSubmit' | 'onSudoSubmit'>) {
+}: Pick<AppOverlaysProps, 'cols' | 'onApprovalChoice' | 'onClarifyAnswer' | 'onPromptOptimizationChoice' | 'onSecretSubmit' | 'onSudoSubmit'>) {
   const overlay = useStore($overlayState)
   const theme = useStore($uiTheme)
+
+  if (overlay.promptOptimization) {
+    return (
+      <Box flexDirection="column" flexShrink={0} paddingX={1} paddingY={1}>
+        <PromptOptimizationOverlay onChoice={onPromptOptimizationChoice} req={overlay.promptOptimization} t={theme} />
+      </Box>
+    )
+  }
 
   if (overlay.approval) {
     return (
