@@ -14,6 +14,7 @@ import contextvars
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -43,6 +44,74 @@ from hermes_time import now as _hermes_now
 from hermes_cli.profile_activity_ledger import record_event_if_enabled
 
 logger = logging.getLogger(__name__)
+
+
+def _summarise_cron_failure_for_delivery(job: dict, error: str | None) -> str:
+    """Return a compact one-line failure message for chat delivery.
+
+    Full details stay in the cron output directory and the logs. Chat should
+    show the operator what broke without dumping provider JSON, retry noise, or
+    stack traces into Telegram.
+    """
+    job_name = job.get("name") or job.get("id") or "cron job"
+    text = (error or "unknown error").strip()
+    lower = text.lower()
+
+    # Provider/API failures are the common noisy path. Keep these short.
+    if "429" in text or "rate limit" in lower or "usage limit" in lower:
+        reason = "rate limit"
+        if "weekly usage limit" in lower:
+            reason = "weekly usage limit"
+        elif "quota" in lower:
+            reason = "quota limit"
+        return f"⚠️ Cron '{job_name}' failed: provider {reason}. Fallback chain was exhausted or unavailable. Full details saved in cron output."
+
+    if "readtimeout" in lower or "timed out" in lower or "timeout" in lower:
+        return f"⚠️ Cron '{job_name}' failed: provider timeout. Fallback chain was exhausted or unavailable. Full details saved in cron output."
+
+    # Match authentication/authorisation wording at a word boundary and the
+    # 401/403 status codes as whole tokens, so "oauth", "4015" and similar do
+    # not trip a misleading auth message.
+    if re.search(r"authenticat|authoriz|authoris", lower) or re.search(r"\b(401|403)\b", text):
+        return f"⚠️ Cron '{job_name}' failed: provider authentication error. Full details saved in cron output."
+
+    # Strip common exception wrappers and collapse provider payloads. Bound the
+    # input first so a multi-KB provider blob cannot slow the substitutions.
+    cleaned = re.sub(r"^(RuntimeError|Exception|ValueError|HTTPStatusError):\s*", "", text[:2000])
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    if len(cleaned) > 180:
+        cleaned = cleaned[:177].rstrip() + "..."
+    return f"⚠️ Cron '{job_name}' failed: {cleaned}"
+
+
+def _build_cron_prompt_summary(job: dict) -> str:
+    """Compact prompt summary for the cron output file.
+
+    Avoids inlining the full assembled prompt (skill content, script output,
+    context_from chains) which bloats every run file by 1MB+. The full prompt
+    is still sent to the agent; only the saved output file is summarised.
+    """
+    orig_prompt = str(job.get("prompt") or "").strip()
+    # Skill entries may be plain names or dicts (see _build_job_prompt), so
+    # coerce to str before joining to avoid a TypeError on delivery.
+    skill_names = [str(s).strip() for s in (job.get("skills") or []) if str(s).strip()]
+    if not skill_names and job.get("skill"):
+        skill_names = [str(job["skill"]).strip()]
+    script_path = job.get("script") or ""
+    ctx_from = job.get("context_from") or []
+    if isinstance(ctx_from, str):
+        ctx_from = [ctx_from]
+
+    parts = [f"**Original prompt:** {orig_prompt[:500]}"]
+    if len(orig_prompt) > 500:
+        parts[-1] += " **[truncated]**"
+    if skill_names:
+        parts.append(f"**Skills loaded:** {', '.join(skill_names)}")
+    if script_path:
+        parts.append(f"**Script:** {script_path}")
+    if ctx_from:
+        parts.append(f"**Context from jobs:** {', '.join(ctx_from)}")
+    return "\n".join(parts)
 
 
 class CronPromptInjectionBlocked(Exception):
@@ -1829,9 +1898,11 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
 **Run Time:** {_hermes_now().strftime('%Y-%m-%d %H:%M:%S')}
 **Schedule:** {job.get('schedule_display', 'N/A')}
 
-## Prompt
+## Prompt Summary
 
-{prompt}
+{_build_cron_prompt_summary(job)}
+
+*(Full assembled prompt was sent to the agent but not saved to the output file for space; check agent logs for diagnostics)*
 
 ## Response
 
@@ -1851,9 +1922,9 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
 **Run Time:** {_hermes_now().strftime('%Y-%m-%d %H:%M:%S')}
 **Schedule:** {job.get('schedule_display', 'N/A')}
 
-## Prompt
+## Prompt Summary
 
-{prompt}
+{_build_cron_prompt_summary(job)}
 
 ## Error
 
@@ -1991,7 +2062,7 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
                 # Deliver the final response to the origin/target chat.
                 # If the agent responded with [SILENT], skip delivery (but
                 # output is already saved above).  Failed jobs always deliver.
-                deliver_content = final_response if success else f"⚠️ Cron job '{job.get('name', job['id'])}' failed:\n{error}"
+                deliver_content = final_response if success else _summarise_cron_failure_for_delivery(job, error)
                 # Treat whitespace-only final responses the same as empty
                 # responses: do not deliver a blank message, and let the
                 # empty-response guard below mark the run as a soft failure.
