@@ -3503,10 +3503,17 @@ class HermesCLI:
         if len(model_short) > 26:
             model_short = f"{model_short[:23]}..."
 
+        provider_name = (getattr(agent, "provider", None) or self.provider or "")
+        reasoning_cfg = getattr(self, "reasoning_config", None)
+        reasoning_effort = ""
+        if isinstance(reasoning_cfg, dict) and reasoning_cfg.get("enabled") is not False:
+            reasoning_effort = str(reasoning_cfg.get("effort", "") or "")
         elapsed_seconds = max(0.0, (datetime.now() - self.session_start).total_seconds())
         snapshot = {
             "model_name": model_name,
             "model_short": model_short,
+            "provider_name": provider_name,
+            "reasoning_effort": reasoning_effort,
             "duration": format_duration_compact(elapsed_seconds),
             "prompt_elapsed": self._format_prompt_elapsed(
                 getattr(self, "_prompt_start_time", None),
@@ -3773,12 +3780,21 @@ class HermesCLI:
 
             yolo_active = self._is_session_yolo_active()
             if width < 52:
-                text = f"⚕ {snapshot['model_short']} · {duration_label}"
+                effort = snapshot.get("reasoning_effort", "")
+                model_segment = f"⚕ {snapshot['model_short']}"
+                if effort and effort != "default":
+                    model_segment += f" 🧠{effort}"
+                text = f"{model_segment} · {duration_label}"
                 if yolo_active:
                     text += " · ⚠ YOLO"
                 return self._trim_status_bar_text(text, width)
             if width < 76:
-                parts = [f"⚕ {snapshot['model_short']}", percent_label]
+                provider = snapshot.get("provider_name", "")
+                effort = snapshot.get("reasoning_effort", "")
+                model_segment = f"⚕ {snapshot['model_short']}"
+                if effort and effort != "default":
+                    model_segment += f" 🧠{effort}"
+                parts = [model_segment, percent_label]
                 compressions = snapshot.get("compressions", 0)
                 if compressions:
                     parts.append(f"🗜️ {compressions}")
@@ -3801,7 +3817,14 @@ class HermesCLI:
                 context_label = "ctx --"
 
             compressions = snapshot.get("compressions", 0)
-            parts = [f"⚕ {snapshot['model_short']}", context_label, percent_label]
+            provider = snapshot.get("provider_name", "")
+            effort = snapshot.get("reasoning_effort", "")
+            model_segment = f"⚕ {snapshot['model_short']}"
+            if provider and provider != "auto":
+                model_segment += f" ({provider})"
+            if effort and effort != "default":
+                model_segment += f" 🧠{effort}"
+            parts = [model_segment, context_label, percent_label]
             if compressions:
                 parts.append(f"🗜️ {compressions}")
             bg_count = snapshot.get("active_background_tasks", 0)
@@ -3838,9 +3861,15 @@ class HermesCLI:
                 frags = [
                     ("class:status-bar", " ⚕ "),
                     ("class:status-bar-strong", snapshot["model_short"]),
+                ]
+                # Reasoning effort badge (small width)
+                effort = snapshot.get("reasoning_effort", "")
+                if effort and effort != "default":
+                    frags.append(("class:status-bar-strong", f" 🧠{effort}"))
+                frags.extend([
                     ("class:status-bar-dim", " · "),
                     ("class:status-bar-dim", duration_label),
-                ]
+                ])
                 if yolo_active:
                     frags.append(("class:status-bar-dim", " · "))
                     frags.append(("class:status-bar-yolo", "⚠ YOLO"))
@@ -3855,9 +3884,15 @@ class HermesCLI:
                     frags = [
                         ("class:status-bar", " ⚕ "),
                         ("class:status-bar-strong", snapshot["model_short"]),
+                    ]
+                    # Reasoning effort badge (medium width)
+                    effort = snapshot.get("reasoning_effort", "")
+                    if effort and effort != "default":
+                        frags.append(("class:status-bar-strong", f" 🧠{effort}"))
+                    frags.extend([
                         ("class:status-bar-dim", " · "),
                         (self._status_bar_context_style(percent), percent_label),
-                    ]
+                    ])
                     if compressions:
                         frags.append(("class:status-bar-dim", " · "))
                         frags.append((self._compression_count_style(compressions), f"🗜️ {compressions}"))
@@ -3890,13 +3925,23 @@ class HermesCLI:
                     frags = [
                         ("class:status-bar", " ⚕ "),
                         ("class:status-bar-strong", snapshot["model_short"]),
+                    ]
+                    # Provider badge
+                    provider = snapshot.get("provider_name", "")
+                    if provider and provider != "auto":
+                        frags.append(("class:status-bar-dim", f" ({provider})"))
+                    # Reasoning effort badge
+                    effort = snapshot.get("reasoning_effort", "")
+                    if effort and effort != "default":
+                        frags.append(("class:status-bar-strong", f" 🧠{effort}"))
+                    frags.extend([
                         ("class:status-bar-dim", " │ "),
                         ("class:status-bar-dim", context_label),
                         ("class:status-bar-dim", " │ "),
                         (bar_style, self._build_context_bar(percent)),
                         ("class:status-bar-dim", " "),
                         (bar_style, percent_label),
-                    ]
+                    ])
                     if compressions:
                         frags.append(("class:status-bar-dim", " │ "))
                         frags.append((self._compression_count_style(compressions), f"🗜️ {compressions}"))
