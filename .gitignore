@@ -124,3 +124,5 @@ investigations/
 reports/
 recommendation-report-t*.md
 report-t_*.md
+.hermes_work/
+content_engine/inbox/
