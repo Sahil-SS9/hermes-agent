@@ -97,8 +97,8 @@ _log = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-VALID_STATUSES = {"triage", "todo", "scheduled", "ready", "running", "blocked", "review", "done", "archived"}
-VALID_INITIAL_STATUSES = {"running", "blocked"}
+VALID_STATUSES = {"triage", "todo", "scheduled", "ready", "running", "blocked", "review", "done", "archived", "backlog"}
+VALID_INITIAL_STATUSES = {"running", "blocked", "backlog"}
 VALID_WORKSPACE_KINDS = {"scratch", "worktree", "dir"}
 KNOWN_TOOLSET_NAMES = frozenset(name.casefold() for name in get_toolset_names())
 _IS_WINDOWS = sys.platform == "win32"
@@ -745,6 +745,9 @@ class Task:
     # set the env var. Lets clients render a per-session board without
     # relying on tenant + time-window heuristics.
     session_id: Optional[str] = None
+    # Optional flat tag for grouping related work (e.g. "atm10").
+    # Not a hierarchy; not validated against an allow-list.
+    theme: Optional[str] = None
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "Task":
@@ -820,6 +823,7 @@ class Task:
             session_id=(
                 row["session_id"] if "session_id" in keys else None
             ),
+            theme=row["theme"] if "theme" in keys else None,
         )
 
 
@@ -981,7 +985,12 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- for tasks created from the CLI, dashboard, or any path that doesn't
     -- set the env var. Indexed so per-session list queries stay cheap on
     -- larger boards.
-    session_id           TEXT
+    session_id           TEXT,
+    -- Optional flat tag for grouping related work (e.g. "atm10",
+    -- "compliance-q2"). Not a hierarchy; not validated against an
+    -- allow-list. Set at create-time or via CLI; ``kanban_edit`` does
+    -- not mutate this in v1 (scope-locked to ``skills``).
+    theme                TEXT
 );
 
 CREATE TABLE IF NOT EXISTS task_links (
@@ -1637,6 +1646,12 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
             conn, "tasks", "session_id", "session_id TEXT"
         )
 
+    if "theme" not in cols:
+        # Optional flat tag for grouping related work across themes
+        # (e.g. project codename, milestone shorthand). Set at create-time
+        # or via CLI; kanban_edit does not mutate this in v1.
+        _add_column_if_missing(conn, "tasks", "theme", "theme TEXT")
+
     # Indexes over additive ``tasks`` columns must be created after the
     # columns exist. Keeping them in SCHEMA_SQL breaks legacy boards: SQLite
     # parses each statement in ``executescript`` against the live schema, so a
@@ -1650,6 +1665,9 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
     )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_tasks_session_id ON tasks(session_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_tasks_theme ON tasks(theme)"
     )
 
     # task_events gained a run_id column; back-fill it as NULL for
@@ -2016,6 +2034,7 @@ def create_task(
     initial_status: str = "running",
     session_id: Optional[str] = None,
     board: Optional[str] = None,
+    theme: Optional[str] = None,
 ) -> str:
     """Create a new task and optionally link it under parent tasks.
 
@@ -2151,6 +2170,15 @@ def create_task(
                         missing = _find_missing_parents(conn, parents)
                         if missing:
                             raise ValueError(f"unknown parent task(s): {', '.join(missing)}")
+                elif initial_status == "backlog":
+                    # Backlog is a non-auto-promoting landing pad for
+                    # approved follow-up specs. Parents are still validated
+                    # so future ``hermes kanban promote`` doesn't dangle.
+                    task_status = "backlog"
+                    if parents:
+                        missing = _find_missing_parents(conn, parents)
+                        if missing:
+                            raise ValueError(f"unknown parent task(s): {', '.join(missing)}")
                 elif triage:
                     task_status = "triage"
                 else:
@@ -2180,8 +2208,9 @@ def create_task(
                         id, title, body, assignee, status, priority,
                         created_by, created_at, workspace_kind, workspace_path,
                         branch_name, tenant, idempotency_key, max_runtime_seconds,
-                        skills, max_retries, goal_mode, goal_max_turns, session_id
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        skills, max_retries, goal_mode, goal_max_turns, session_id,
+                        theme
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         task_id,
@@ -2203,6 +2232,7 @@ def create_task(
                         1 if goal_mode else 0,
                         int(goal_max_turns) if goal_max_turns is not None else None,
                         session_id,
+                        theme.strip() if isinstance(theme, str) and theme.strip() else None,
                     ),
                 )
                 for pid in parents:
@@ -2294,6 +2324,7 @@ def list_tasks(
     order_by: Optional[str] = None,
     workflow_template_id: Optional[str] = None,
     current_step_key: Optional[str] = None,
+    theme: Optional[str] = None,
 ) -> list[Task]:
     query = "SELECT * FROM tasks WHERE 1=1"
     params: list[Any] = []
@@ -2317,6 +2348,9 @@ def list_tasks(
     if current_step_key is not None:
         query += " AND current_step_key = ?"
         params.append(current_step_key)
+    if theme is not None:
+        query += " AND theme = ?"
+        params.append(theme)
     if not include_archived and status != "archived":
         query += " AND status != 'archived'"
     if order_by is not None:
@@ -4228,6 +4262,25 @@ def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
             conn, task_id, "unblocked",
             {"status": new_status} if new_status != "ready" else None,
         )
+        return True
+
+
+def promote_from_backlog(conn: sqlite3.Connection, task_id: str) -> bool:
+    """Transition ``backlog -> triage`` so the task enters the specifier path.
+
+    Returns ``True`` on a successful transition, ``False`` when the task
+    is unknown or not in ``backlog``. Idempotent: second call returns ``False``.
+
+    Emits a ``promoted_from_backlog`` event so the move is auditable.
+    """
+    with write_txn(conn):
+        cur = conn.execute(
+            "UPDATE tasks SET status = 'triage' WHERE id = ? AND status = 'backlog'",
+            (task_id,),
+        )
+        if cur.rowcount != 1:
+            return False
+        _append_event(conn, task_id, "promoted_from_backlog", None)
         return True
 
 

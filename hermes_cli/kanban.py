@@ -76,6 +76,7 @@ def _task_to_dict(t: kb.Task) -> dict[str, Any]:
         "skills": list(t.skills) if t.skills else [],
         "max_retries": t.max_retries,
         "session_id": t.session_id,
+        "theme": t.theme,
         "workflow_template_id": t.workflow_template_id,
         "current_step_key": t.current_step_key,
     }
@@ -395,6 +396,8 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
     p_list.add_argument("--session", default=None,
                         help="Filter by originating chat/agent session id "
                              "(set on tasks created from inside an ACP loop)")
+    p_list.add_argument("--theme", default=None,
+                        help="Filter by theme tag (exact match)")
     p_list.add_argument("--archived", action="store_true",
                         help="Include archived tasks")
     p_list.add_argument("--json", action="store_true")
@@ -600,6 +603,17 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
         dest="json",
         action="store_true",
         help="Emit machine-readable JSON result",
+    )
+
+    p_promote_backlog = sub.add_parser(
+        "promote-backlog",
+        help="Move a backlog task into triage so the specifier can pick it up",
+    )
+    p_promote_backlog.add_argument("task_id")
+    p_promote_backlog.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit JSON output",
     )
 
     p_archive = sub.add_parser("archive", help="Archive one or more tasks")
@@ -952,6 +966,7 @@ def kanban_command(args: argparse.Namespace) -> int:
         "schedule": _cmd_schedule,
         "unblock":  _cmd_unblock,
         "promote":  _cmd_promote,
+        "promote-backlog":  _cmd_promote_backlog,
         "archive":  _cmd_archive,
         "tail":     _cmd_tail,
         "dispatch": _cmd_dispatch,
@@ -1360,6 +1375,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
             goal_mode=bool(getattr(args, "goal_mode", False)),
             goal_max_turns=getattr(args, "goal_max_turns", None),
             initial_status=getattr(args, "initial_status", "running"),
+            theme=getattr(args, "theme", None),
         )
         task = kb.get_task(conn, task_id)
     if getattr(args, "json", False):
@@ -1430,6 +1446,7 @@ def _cmd_list(args: argparse.Namespace) -> int:
             order_by=getattr(args, "sort", None),
             workflow_template_id=args.workflow_template_id,
             current_step_key=args.current_step_key,
+            theme=getattr(args, "theme", None),
         )
     if getattr(args, "json", False):
         print(json.dumps([_task_to_dict(t) for t in tasks], indent=2, ensure_ascii=False))
@@ -2019,6 +2036,29 @@ def _cmd_schedule(args: argparse.Namespace) -> int:
             else:
                 print(f"Scheduled {tid}" + (f": {reason}" if reason else ""))
     return 0 if not failed else 1
+
+
+def _cmd_promote_backlog(args: argparse.Namespace) -> int:
+    tid = args.task_id
+    with kb.connect_closing() as conn:
+        if not kb.promote_from_backlog(conn, tid):
+            print(
+                f"cannot promote-backlog {tid} (not in backlog or unknown)",
+                file=sys.stderr,
+            )
+            return 1
+        task = kb.get_task(conn, tid)
+    if task is None:
+        print(
+            f"promote-backlog {tid}: status flipped but row vanished before read",
+            file=sys.stderr,
+        )
+        return 1
+    if getattr(args, "json", False):
+        print(json.dumps(_task_to_dict(task), indent=2, ensure_ascii=False))
+    else:
+        print(f"Promoted {tid} -> triage")
+    return 0
 
 
 def _cmd_unblock(args: argparse.Namespace) -> int:

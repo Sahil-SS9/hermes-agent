@@ -325,6 +325,7 @@ def _task_summary_dict(kb, conn, task) -> dict[str, Any]:
         "completed_at": task.completed_at,
         "current_run_id": task.current_run_id,
         "model_override": task.model_override,
+        "theme": task.theme,
         "parents": parents,
         "children": children,
         "parent_count": len(parents),
@@ -370,6 +371,7 @@ def _handle_show(args: dict, **kw) -> str:
                     "result": t.result,
                     "current_run_id": t.current_run_id,
                     "model_override": t.model_override,
+                    "theme": t.theme,
                 }
 
             def _run_dict(r):
@@ -448,6 +450,8 @@ def _handle_list(args: dict, **kw) -> str:
                 assignee=assignee,
                 status=status,
                 tenant=tenant,
+                session_id=args.get("session_id"),
+                theme=args.get("theme"),
                 include_archived=include_archived,
                 limit=limit + 1,
             )
@@ -795,9 +799,10 @@ def _handle_create(args: dict, **kw) -> str:
                     int(goal_max_turns) if goal_max_turns is not None else None
                 ),
                 initial_status=str(initial_status),
+                theme=args.get("theme"),
                 created_by=os.environ.get("HERMES_PROFILE") or "worker",
                 session_id=session_id,
-            )
+                )
             new_task = kb.get_task(conn, new_tid)
             return _ok(
                 task_id=new_tid,
@@ -935,13 +940,25 @@ KANBAN_LIST_SCHEMA = {
                 "type": "string",
                 "enum": [
                     "triage", "todo", "ready", "running",
-                    "blocked", "done", "archived",
+                    "blocked", "review", "done", "archived", "backlog",
                 ],
                 "description": "Optional task status filter.",
             },
             "tenant": {
                 "type": "string",
                 "description": "Optional tenant/project namespace filter.",
+            },
+            "session_id": {
+                "type": "string",
+                "description": "Filter by originating chat/agent session id.",
+            },
+            "theme": {
+                "type": "string",
+                "description": (
+                    "Optional theme tag filter (exact match). Use to "
+                    "list all tasks under a project codename or "
+                    "milestone shorthand."
+                ),
             },
             "include_archived": {
                 "type": "boolean",
@@ -1237,12 +1254,15 @@ KANBAN_CREATE_SCHEMA = {
             },
             "initial_status": {
                 "type": "string",
-                "enum": ["running", "blocked"],
+                "enum": ["running", "blocked", "backlog"],
                 "description": (
                     "Initial card status. Use 'blocked' for tasks that "
                     "require immediate human ops (R3 gate) to skip the "
-                    "brief running-to-blocked transition. Defaults to "
-                    "'running', which preserves the usual dispatch path."
+                    "brief running-to-blocked transition. Use 'backlog' "
+                    "to park an approved follow-up spec until a human "
+                    "or specifier calls `hermes kanban promote-backlog`. "
+                    "Defaults to 'running', which preserves the usual "
+                    "dispatch path."
                 ),
             },
             "skills": {
@@ -1279,6 +1299,14 @@ KANBAN_CREATE_SCHEMA = {
                     "continuation turns the worker may take before the task "
                     "is blocked for review. Ignored unless goal_mode is "
                     "true. Defaults to the goal-engine default (20)."
+                ),
+            },
+            "theme": {
+                "type": "string",
+                "description": (
+                    "Optional flat tag for grouping related work "
+                    "(e.g. 'atm10', 'compliance-q2'). Set at create "
+                    "time; kanban_edit does not mutate this in v1."
                 ),
             },
             "board": _board_schema_prop(),
