@@ -8,9 +8,10 @@ returns the items (with Sahil's caption as the creative intent) for the agent.
 """
 import json
 import os
+import re
 import time
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import requests
 
@@ -22,6 +23,24 @@ INBOX_DIR = Path(__file__).resolve().parent / "inbox"
 _IMG_EXT = (".png", ".jpg", ".jpeg", ".webp", ".gif")
 _VID_EXT = (".mp4", ".mov", ".webm", ".m4v")
 _APPROVE_EMOJI = {"✅", "white_check_mark"}
+
+
+def _safe_inbox_dest(msg_id: str, raw_name: str) -> Optional[Path]:
+    """Return a write path pinned inside INBOX_DIR, or None if the name is unsafe.
+
+    Discord attachment filenames are attacker-controllable, so strip them to a
+    basename of safe characters and verify the resolved path stays under the
+    inbox root before any download.
+    """
+    safe_msg = re.sub(r"[^0-9]", "", str(msg_id)) or "msg"
+    safe_name = re.sub(r"[^A-Za-z0-9._-]", "_", os.path.basename(raw_name or "file"))
+    if not safe_name or safe_name.startswith("."):
+        return None
+    root = INBOX_DIR.resolve()
+    dest = (root / safe_msg / safe_name).resolve()
+    if not str(dest).startswith(str(root) + os.sep):
+        return None
+    return dest
 
 
 def _has_approve_reaction(message: Dict) -> bool:
@@ -105,7 +124,9 @@ def fetch_inbox(channel_id: str = INBOX_CHANNEL) -> List[Dict]:
         for a in m.get("attachments", []):
             url = a.get("url", "")
             name = (a.get("filename") or "").lower()
-            dest = INBOX_DIR / m["id"] / (a.get("filename") or "file")
+            dest = _safe_inbox_dest(m["id"], a.get("filename") or "file")
+            if dest is None:
+                continue
             if name.endswith(_IMG_EXT) and _download(url, dest):
                 images.append(str(dest))
             elif name.endswith(_VID_EXT) and _download(url, dest):
