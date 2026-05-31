@@ -388,6 +388,28 @@ class PluginContext:
             cli._pending_input.put(msg)
         return True
 
+    # -- user interaction (AskUserQuestion-style overlay) ----------------------
+
+    def ask_user(self, question: str, choices: list[str]) -> str | None:
+        """Show an arrow-key selection overlay and return the chosen option.
+
+        Reuses the CLI's clarify-callback machinery — the same prompt_toolkit
+        overlay used by the ``clarify`` tool. This is only available for
+        interactive CLI/TUI contexts; gateway, ACP, and headless runs return
+        ``None`` so plugins can fall back to message-based approval.
+        """
+        cli = self._manager._cli_ref
+        if cli is None:
+            return None
+        cb = getattr(cli, "_clarify_callback", None)
+        if cb is None:
+            return None
+        try:
+            return cb(question, list(choices))
+        except Exception:
+            logger.warning("ask_user overlay failed", exc_info=True)
+            return None
+
     # -- CLI command registration --------------------------------------------
 
     def register_cli_command(
