@@ -9438,6 +9438,39 @@ class HermesCLI:
                 _cprint(f"  {_DIM}No active goal.{_RST}")
             return
 
+        if lower == "route" or lower.startswith("route "):
+            route_text = arg.split(None, 1)[1].strip() if lower.startswith("route ") else ""
+            if not route_text:
+                if not mgr.has_goal() or not mgr.state:
+                    _cprint("  /goal route: provide text or set an active goal first.")
+                    return
+                route_text = mgr.state.goal
+            subgoals = list(getattr(mgr.state, "subgoals", []) or []) if mgr.state else []
+            try:
+                from hermes_cli.goal_routing import route_goal_to_kanban
+
+                result = route_goal_to_kanban(
+                    route_text,
+                    subgoals=subgoals,
+                    session_id=getattr(self, "session_id", None),
+                    decompose=bool(subgoals),
+                )
+            except Exception as exc:
+                _cprint(f"  /goal route failed: {exc}")
+                return
+            if not result.ok:
+                _cprint(f"  /goal route failed: {result.error}")
+                return
+            _cprint(
+                f"  ✓ Routed goal to Kanban: {result.task_id} "
+                f"({result.status or 'created'})"
+            )
+            _cprint(
+                f"  {_DIM}Created as triage/backlog for Orchestrator. Open risks remain "
+                f"visible in the task body; this does not auto-dispatch destructive work.{_RST}"
+            )
+            return
+
         # Otherwise treat the arg as the goal text.
         try:
             state = mgr.set(arg)

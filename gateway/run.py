@@ -11128,6 +11128,33 @@ class GatewayRunner:
                 logger.debug("goal clear: pending continuation cleanup failed: %s", exc)
             return t("gateway.goal_cleared") if had else t("gateway.no_active_goal")
 
+        if lower == "route" or lower.startswith("route "):
+            route_text = args.split(None, 1)[1].strip() if lower.startswith("route ") else ""
+            if not route_text:
+                if not mgr.has_goal() or not mgr.state:
+                    return "/goal route: provide text or set an active goal first."
+                route_text = mgr.state.goal
+            subgoals = list(getattr(mgr.state, "subgoals", []) or []) if mgr.state else []
+            try:
+                from hermes_cli.goal_routing import route_goal_to_kanban
+
+                result = route_goal_to_kanban(
+                    route_text,
+                    subgoals=subgoals,
+                    session_id=getattr(mgr, "session_id", None),
+                    decompose=bool(subgoals),
+                )
+            except Exception as exc:
+                logger.warning("goal route failed: %s", exc, exc_info=True)
+                return f"/goal route failed: {exc}"
+            if not result.ok:
+                return f"/goal route failed: {result.error}"
+            return (
+                f"✓ Routed goal to Kanban: {result.task_id} "
+                f"({result.status or 'created'}). Open risks remain visible "
+                f"in the task body; no destructive work was auto-dispatched."
+            )
+
         # Otherwise — treat the remaining text as the new goal.
         try:
             state = mgr.set(args)

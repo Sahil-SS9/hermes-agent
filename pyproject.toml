@@ -253,6 +253,14 @@ markers = [
 # file a fresh Python interpreter; pytest-timeout catches Python-level
 # hangs within a file.
 addopts = "-m 'not integration' --timeout=30 --timeout-method=signal"
+asyncio_default_fixture_loop_scope = "function"
+filterwarnings = [
+    # discord.py imports audioop at module import time for voice/player support.
+    # Python 3.11 emits the deprecation warning even in tests that do not touch
+    # voice playback; keep the warning policy focused until discord.py removes it
+    # or Hermes drops the transitive import path.
+    "ignore:'audioop' is deprecated and slated for removal in Python 3.13:DeprecationWarning:discord.player",
+]
 
 [tool.ty.environment]
 python-version = "3.13"
