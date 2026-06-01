@@ -637,18 +637,32 @@ def _send_media_via_adapter(
     loop,
     job: dict,
     platform=None,
-) -> None:
+    caption: str | None = None,
+) -> bool:
     """Send extracted MEDIA files as native platform attachments via a live adapter.
 
     Routes each file to the appropriate adapter method (send_voice, send_image_file,
-    send_video, send_document) based on file extension — mirroring the routing logic
+    send_video, send_document) based on file extension, mirroring the routing logic
     in ``BasePlatformAdapter._process_message_background``.
+
+    ``caption`` is applied to the first non-audio file only (so the text rides on
+    that attachment instead of a separate message); audio/voice sends never carry
+    a caption because not every adapter supports it on that path.
+
+    Returns ``caption_delivered``: True when no caption was entrusted, or when the
+    captioned first attachment was sent successfully. Returns False if a caption
+    was given but its attachment could not be delivered, so the caller can resend
+    the text on its own and never silently drop it.
     """
     from pathlib import Path
 
     from gateway.platforms.base import BasePlatformAdapter, should_send_media_as_audio
 
     media_files = BasePlatformAdapter.filter_media_delivery_paths(media_files)
+    # A caption only counts as delivered once its attachment actually lands.
+    # Start False whenever text was entrusted (including the case where the
+    # filter above dropped every file) so the caller can resend it standalone.
+    caption_delivered = caption is None
 
     # Discord: bundle multiple files (e.g. a lesson's HTML + audio) into ONE
     # message so they read as a single comment rather than separate posts. The
@@ -668,7 +682,9 @@ def _send_media_via_adapter(
             if future is not None:
                 result = future.result(timeout=60)
                 if result and getattr(result, "success", True):
-                    return
+                    # Multi-file (bundle) is never reached with a caption, so
+                    # caption_delivered stays True here.
+                    return caption_delivered
                 logger.warning(
                     "Job '%s': bundled media send failed (%s), falling back to per-file",
                     job.get("id", "?"), getattr(result, "error", "unknown"),
@@ -676,18 +692,19 @@ def _send_media_via_adapter(
         except Exception as e:
             logger.warning("Job '%s': bundled media send error (%s), falling back to per-file", job.get("id", "?"), e)
 
-    for media_path, _is_voice in media_files:
+    for idx, (media_path, _is_voice) in enumerate(media_files):
         try:
             ext = Path(media_path).suffix.lower()
             route_platform = platform if platform is not None else getattr(adapter, "platform", None)
+            media_caption = caption if idx == 0 else None
             if should_send_media_as_audio(route_platform, ext, is_voice=_is_voice):
                 coro = adapter.send_voice(chat_id=chat_id, audio_path=media_path, metadata=metadata)
             elif ext in _VIDEO_EXTS:
-                coro = adapter.send_video(chat_id=chat_id, video_path=media_path, metadata=metadata)
+                coro = adapter.send_video(chat_id=chat_id, video_path=media_path, caption=media_caption, metadata=metadata)
             elif ext in _IMAGE_EXTS:
-                coro = adapter.send_image_file(chat_id=chat_id, image_path=media_path, metadata=metadata)
+                coro = adapter.send_image_file(chat_id=chat_id, image_path=media_path, caption=media_caption, metadata=metadata)
             else:
-                coro = adapter.send_document(chat_id=chat_id, file_path=media_path, metadata=metadata)
+                coro = adapter.send_document(chat_id=chat_id, file_path=media_path, caption=media_caption, metadata=metadata)
 
             from agent.async_utils import safe_schedule_threadsafe
             future = safe_schedule_threadsafe(coro, loop)
@@ -696,7 +713,7 @@ def _send_media_via_adapter(
                     "Job '%s': cannot send media %s, gateway loop unavailable",
                     job.get("id", "?"), media_path,
                 )
-                return
+                return caption_delivered
             try:
                 result = future.result(timeout=30)
             except TimeoutError:
@@ -707,8 +724,13 @@ def _send_media_via_adapter(
                     "Job '%s': media send failed for %s: %s",
                     job.get("id", "?"), media_path, getattr(result, "error", "unknown"),
                 )
+            elif media_caption is not None:
+                # The captioned attachment landed, so the entrusted text is delivered.
+                caption_delivered = True
         except Exception as e:
             logger.warning("Job '%s': failed to send media %s: %s", job.get("id", "?"), media_path, e)
+
+    return caption_delivered
 
 
 def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Optional[str]:
@@ -814,10 +836,26 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
         if runtime_adapter is not None and loop is not None and getattr(loop, "is_running", lambda: False)():
             send_metadata = {"thread_id": thread_id} if thread_id else None
             try:
-                # Send cleaned text (MEDIA tags stripped) — not the raw content
+                # Send cleaned text (MEDIA tags stripped), not the raw content
                 text_to_send = cleaned_delivery_content.strip()
                 adapter_ok = True
-                if text_to_send:
+
+                # Discord: when there is exactly one non-audio attachment, ride
+                # the text on that attachment as a caption instead of posting a
+                # separate message, so the result reads as one comment. Audio
+                # keeps its own text message (captions are unreliable on voice),
+                # and multi-file lessons stay on the bundle path which already
+                # posts the summary separately.
+                combine_caption = False
+                if text_to_send and len(media_files) == 1:
+                    from gateway.platforms.base import should_send_media_as_audio
+                    _mpath, _is_voice = media_files[0]
+                    _ext = Path(_mpath).suffix.lower()
+                    if str(getattr(platform, "value", platform) or "").lower() == "discord" \
+                            and not should_send_media_as_audio(platform, _ext, is_voice=_is_voice):
+                        combine_caption = True
+
+                if text_to_send and not combine_caption:
                     from agent.async_utils import safe_schedule_threadsafe
                     future = safe_schedule_threadsafe(
                         runtime_adapter.send(chat_id, text_to_send, metadata=send_metadata),
@@ -854,7 +892,7 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
 
                 # Send extracted media files as native attachments via the live adapter
                 if adapter_ok and media_files:
-                    _send_media_via_adapter(
+                    caption_delivered = _send_media_via_adapter(
                         runtime_adapter,
                         chat_id,
                         media_files,
@@ -862,7 +900,30 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
                         loop,
                         job,
                         platform=platform,
+                        caption=text_to_send if combine_caption else None,
                     )
+                    # If we entrusted the text to the attachment caption but the
+                    # attachment did not land, resend the text on its own so it
+                    # is never silently dropped.
+                    if combine_caption and not caption_delivered:
+                        logger.warning(
+                            "Job '%s': captioned attachment to %s:%s did not land, "
+                            "resending text as a separate message",
+                            job["id"], platform_name, chat_id,
+                        )
+                        from agent.async_utils import safe_schedule_threadsafe
+                        _txt_future = safe_schedule_threadsafe(
+                            runtime_adapter.send(chat_id, text_to_send, metadata=send_metadata),
+                            loop,
+                        )
+                        if _txt_future is not None:
+                            try:
+                                _txt_future.result(timeout=60)
+                            except Exception as _txt_exc:
+                                logger.warning(
+                                    "Job '%s': fallback text resend to %s:%s failed: %s",
+                                    job["id"], platform_name, chat_id, _txt_exc,
+                                )
 
                 if adapter_ok:
                     logger.info("Job '%s': delivered to %s:%s via live adapter", job["id"], platform_name, chat_id)
