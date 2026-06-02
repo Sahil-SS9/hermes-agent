@@ -4,11 +4,11 @@
 
 cd /home/kensei
 
-output=$(/home/kensei/.hermes/hermes-agent/venv/bin/python3 /home/kensei/.hermes/scripts/token_health.py)
+output=$(/home/kensei/repos/KenseiAgent/.venv/bin/python /home/kensei/.hermes/scripts/token_health.py)
 exit_code=$?
 
 if [ $exit_code -eq 0 ]; then
-    parsed=$(TOKEN_HEALTH_JSON="$output" /home/kensei/.hermes/hermes-agent/venv/bin/python3 - <<'PY'
+    parsed=$(TOKEN_HEALTH_JSON="$output" /home/kensei/repos/KenseiAgent/.venv/bin/python - <<'PY'
 import json, os
 d = json.loads(os.environ["TOKEN_HEALTH_JSON"])
 print(d["overall"])
@@ -25,7 +25,7 @@ PY
         echo "⚠️ Token health · $overall ($count)"
         echo ""
         echo "Findings"
-        TOKEN_HEALTH_JSON="$output" /home/kensei/.hermes/hermes-agent/venv/bin/python3 - <<'PY'
+        TOKEN_HEALTH_JSON="$output" /home/kensei/repos/KenseiAgent/.venv/bin/python - <<'PY'
 import json, os
 d = json.loads(os.environ["TOKEN_HEALTH_JSON"])
 for account in d["accounts"]:

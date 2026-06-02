@@ -126,3 +126,6 @@ recommendation-report-t*.md
 report-t_*.md
 .hermes_work/
 content_engine/inbox/
+
+# prompt-optimizer runtime metrics (regenerated)
+plugins/prompt-optimizer/metrics.db

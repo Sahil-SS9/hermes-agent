@@ -8,7 +8,11 @@ import subprocess
 import os
 import sys
 
-HERMES_AGENT_PATH = os.path.expanduser("~/.hermes/hermes-agent")
+# Vanilla upstream mirror. Relocated 2026-06-02 out of ~/.hermes (runtime dir)
+# to ~/repos/hermes-agent-upstream. Override with HERMES_AGENT_PATH if needed.
+HERMES_AGENT_PATH = os.path.expanduser(
+    os.environ.get("HERMES_AGENT_PATH", "~/repos/hermes-agent-upstream")
+)
 BEHIND_THRESHOLD = 5  # Alert if more than this many commits behind
 AHEAD_THRESHOLD = 20  # Alert if more than this many non-merge commits ahead
 MERGE_COMMIT_PREFIXES = ("4e685277d",)  # Known merge commit SHAs (can grow)
@@ -59,7 +63,7 @@ def main():
         print(f"  {issue}")
     print(f"")
     print(f"  Runbook: ~/.hermes/kanban/workspaces/t_17b9655e/FORK_DRIFT_RUNBOOK.md")
-    print(f"  To sync: cd ~/.hermes/hermes-agent && git merge origin/main")
+    print(f"  To sync: cd ~/repos/hermes-agent-upstream && git merge origin/main")
 
 if __name__ == "__main__":
     main()

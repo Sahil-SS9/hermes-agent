@@ -260,7 +260,7 @@ restore_backup() {
   log_warn "Backups do NOT include the hermes-agent/ source code."
   log_warn "If the update broke the source code itself, you must roll back"
   log_warn "the git repo manually:"
-  echo "    cd ~/.hermes/hermes-agent"
+  echo "    cd ~/repos/KenseiAgent"
   echo "    git log --oneline -10"
   echo "    git reset --hard <good-commit>"
   echo
