@@ -124,6 +124,13 @@ investigations/
 reports/
 recommendation-report-t*.md
 report-t_*.md
+kanban-t_*
+kanban_dump.json
+recommendation-t_*
+dump_kanban*.py
+query_kanban.py
+_*kanban*.py
+_investigate_*.py
 .hermes_work/
 content_engine/inbox/
 
