@@ -2,8 +2,11 @@
 """
 System Health Daily — consolidated health check.
 
-Replaces: heartbeat audit (hourly LLM), WFA daily, WFA delta, blocked-task-escalator,
-          triage-processor.
+Replaces: heartbeat audit (hourly LLM), WFA daily, WFA delta, triage-processor.
+          (blocked-task-escalator was paused 31/05 with same intent but
+          re-enabled 02/06 — that cron's blocked-task scan is NOT
+          subsumed here. See kensei-blocked-task-escalator for the
+          dedicated 60-min stale-blocker check.)
 
 Runs daily at 08:00. Checks system resources, cron health, kanban pipeline,
 process health. Files kanban tasks for issues. Escalates persistent issues.
@@ -337,7 +340,7 @@ def check_kanban() -> dict | None:
             triage_total += cur.fetchone()[0]
             cur.execute("SELECT COUNT(*) FROM tasks WHERE status = 'blocked'")
             blocked_total += cur.fetchone()[0]
-            cur.execute("SELECT COUNT(*) FROM tasks WHERE status NOT IN ('done','archived') AND updated_at < ?", (stale_ts,))
+            cur.execute("SELECT COUNT(*) FROM tasks WHERE status NOT IN ('done','archived','completed') AND updated_at < ?", (stale_ts,))
             stale_total += cur.fetchone()[0]
             conn.close()
         except Exception:

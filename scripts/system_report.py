@@ -150,13 +150,25 @@ def doctor_highlights() -> dict:
     for line in out.split("\n"):
         stripped = line.strip()
         if stripped.startswith("⚠"):
-            # Skip known optional/low-priority warnings
+            # Skip known optional/low-priority/false-positive warnings
             skip_terms = [
                 "Nous Portal", "OpenRouter", "docker", "Gemini OAuth", "MiniMax OAuth",
                 "codex CLI", "tinker-atropos", "browser-cdp", "discord",
                 "DISCORD_BOT_TOKEN", "homeassistant", "kanban", "moa",
                 "rl (", "TINKER_API_KEY", "WANDB_API_KEY", "hermes-yuanbao",
                 "spotify", "OPENROUTER_API_KEY",
+                # 2026-06-02 audit — false positives confirmed via live probes:
+                "python-telegram-bot (optional, not installed)",  # optional dep
+                "mnemosyne plugin not found",                      # plugin IS active; doctor line is stale
+                "xAI OAuth (not logged in)",                       # XAI_API_KEY works (HTTP 200)
+                # 2026-06-02 audit — known optional tools:
+                "browser-cdp (system dependency not met)",
+                "browser (system dependency not met)",
+                "computer_use (system dependency not met)",
+                "feishu_doc (system dependency not met)",
+                "feishu_drive (system dependency not met)",
+                "hermes-yuanbao (system dependency not met)",
+                "homeassistant (system dependency not met)",
             ]
             if not any(t in stripped for t in skip_terms):
                 warnings.append(stripped)
@@ -397,17 +409,17 @@ def html_text(payload: dict) -> str:
     <div class="section-header">Fires</div>
     <div class="section-body"><table><tbody>{fires_rows}</tbody></table></div>
   </section>
-''' if fires else ""}\
+|''' if fires else ""}\
 {f'''  <section class="watch">
     <div class="section-header">Watchlist</div>
     <div class="section-body"><table><tbody>{watch_rows}</tbody></table></div>
   </section>
-''' if watchlist else ""}\
+|''' if watchlist else ""}\
 {f'''  <section class="healthy">
     <div class="section-header">Healthy</div>
     <div class="section-body"><table><tbody>{healthy_rows}</tbody></table></div>
   </section>
-''' if healthy else ""}\
+|''' if healthy else ""}\
   <footer>
     <div class="label">Recommended Action</div>
     <div style="font-size: 14px; margin-top: 4px;">→ {html.escape(recommendation(overall, fires, watchlist))}</div>

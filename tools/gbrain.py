@@ -3,6 +3,8 @@
 GBrain is Sahil's structured Markdown knowledge layer at ``~/brain``. These
 built-in tools expose the local trusted GBrain CLI to KenseiAgent alongside
 Mnemosyne's conversational memory provider.
+
+# Upstream: HermesAgent | tools/gbrain.py | Last checked: 2026-05-31 | Policy: ~/brain/conventions/infrastructure.md ## Source Code Policy
 """
 
 from __future__ import annotations
