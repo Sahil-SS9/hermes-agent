@@ -80,6 +80,10 @@ htmlcov/
 
 # Generated frontend/static build output
 hermes_cli/web_dist/
+apps/desktop/build/
+apps/desktop/dist/
+apps/desktop/release/
+apps/desktop/*.tsbuildinfo
 
 # Runtime state snapshots
 content_engine/data/activity_state.json
@@ -103,6 +107,16 @@ website/static/api/skills-index.json
 website/static/api/skills.json
 website/static/api/skills-meta.json
 models-dev-upstream/
+
+# Local editor / agent tooling (machine-specific; keep in global config, not the repo)
+.codex/
+.cursor/
+.gemini/
+.zed/
+.mcp.json
+opencode.json
+config/mcporter.json
+
 hermes_cli/tui_dist/*
 hermes_cli/scripts/
 docs/superpowers/*

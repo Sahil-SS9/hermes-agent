@@ -14,7 +14,6 @@ import type {
   DetailsMode,
   Msg,
   PanelSection,
-  PromptOptimizationReq,
   SecretReq,
   SectionVisibility,
   SessionInfo,
@@ -28,18 +27,6 @@ export interface StateSetter<T> {
 }
 
 export type StatusBarMode = 'bottom' | 'off' | 'top'
-
-// ── KENSEI CUSTOM: Agent execution modes ────────────────────────────
-// These 4 blocks (AgentMode / AGENT_MODES / UiState.agentMode / mode
-// badge colours) must survive upstream merges.  If any merge wipes them,
-// see skill `agent-modes` for the full re-apply checklist.
-//
-// Approval gate: this code must NOT be deleted or modified by an
-// automated process (upstream merge, pipx install, rebase) without
-// explicit human approval.
-// ─────────────────────────────────────────────────────────────────────
-export const AGENT_MODES = ['auto', 'plan', 'gods_plan', 'recon'] as const
-export type AgentMode = (typeof AGENT_MODES)[number]
 
 export type BusyInputMode = 'interrupt' | 'queue' | 'steer'
 
@@ -90,8 +77,6 @@ export interface OverlayState {
   confirm: ConfirmReq | null
   modelPicker: boolean
   pager: null | PagerState
-  picker: boolean
-  promptOptimization: null | PromptOptimizationReq
   secret: null | SecretReq
   sessions: boolean
   skillsHub: boolean
@@ -111,7 +96,6 @@ export interface TranscriptRow {
 }
 
 export interface UiState {
-  agentMode: AgentMode
   bgTasks: Set<string>
   busy: boolean
   busyInputMode: BusyInputMode
@@ -176,7 +160,7 @@ export interface ComposerRefs {
   historyRef: MutableRefObject<string[]>
   queueEditRef: MutableRefObject<null | number>
   queueRef: MutableRefObject<string[]>
-  submitRef: MutableRefObject<(value: string, skipOptimization?: boolean) => void>
+  submitRef: MutableRefObject<(value: string) => void>
 }
 
 export interface ComposerState {
@@ -195,7 +179,7 @@ export interface UseComposerStateOptions {
   gw: GatewayClient
   onClipboardPaste: (quiet?: boolean) => Promise<void> | void
   onImageAttached?: (info: ImageAttachResponse) => void
-  submitRef: MutableRefObject<(value: string, skipOptimization?: boolean) => void>
+  submitRef: MutableRefObject<(value: string) => void>
 }
 
 export interface UseComposerStateResult {
@@ -208,7 +192,7 @@ export interface InputHandlerActions {
   answerClarify: (answer: string) => void
   appendMessage: (msg: Msg) => void
   die: () => void
-  dispatchSubmission: (full: string, skipOptimization?: boolean) => void
+  dispatchSubmission: (full: string) => void
   guardBusySessionSwitch: (what?: string) => boolean
   newSession: (msg?: string, title?: string) => void
   sys: (text: string) => void
@@ -263,7 +247,7 @@ export interface GatewayEventHandlerContext {
     setCatalog: StateSetter<null | SlashCatalog>
   }
   submission: {
-    submitRef: MutableRefObject<(value: string, skipOptimization?: boolean) => void>
+    submitRef: MutableRefObject<(value: string) => void>
   }
   system: {
     bellOnComplete: boolean
@@ -330,7 +314,6 @@ export interface SlashHandlerContext {
 export interface AppLayoutActions {
   answerApproval: (choice: string) => void
   answerClarify: (answer: string) => void
-  answerPromptOptimization: (choice: string) => void
   answerSecret: (value: string) => void
   answerSudo: (pw: string) => void
   clearSelection: () => void
@@ -354,7 +337,7 @@ export interface AppLayoutComposerProps {
   pagerPageSize: number
   queueEditIdx: null | number
   queuedDisplay: string[]
-  submit: (value: string, skipOptimization?: boolean) => void
+  submit: (value: string) => void
   updateInput: StateSetter<string>
   voiceRecordKey: ParsedVoiceRecordKey
 }
@@ -401,8 +384,7 @@ export interface AppOverlaysProps {
   onModelSelect: (value: string) => void
   onNewLiveSession: () => void
   onNewPromptSession: (prompt: string, modelArg?: string) => void
-  onPickerSelect: (sessionId: string) => void
-  onPromptOptimizationChoice: (choice: string) => void
+  onResumeSelect: (sessionId: string) => void
   onSecretSubmit: (value: string) => void
   onSudoSubmit: (pw: string) => void
   pagerPageSize: number
