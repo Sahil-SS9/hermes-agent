@@ -28,6 +28,9 @@ export interface StateSetter<T> {
 
 export type StatusBarMode = 'bottom' | 'off' | 'top'
 
+export const AGENT_MODES = ['auto', 'plan', 'gods_plan', 'recon'] as const
+export type AgentMode = (typeof AGENT_MODES)[number]
+
 export type BusyInputMode = 'interrupt' | 'queue' | 'steer'
 
 // Single source of truth for indicator style names.  Union type is
