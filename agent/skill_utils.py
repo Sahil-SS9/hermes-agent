@@ -214,6 +214,71 @@ def get_disabled_skill_names(platform: str | None = None) -> Set[str]:
     return _normalize_string_set(skills_cfg.get("disabled"))
 
 
+def _read_skills_cfg() -> dict:
+    """Read the skills: section of the active profile config (lightweight)."""
+    config_path = get_config_path()
+    if not config_path.exists():
+        return {}
+    try:
+        parsed = yaml_load(config_path.read_text(encoding="utf-8"))
+    except Exception as e:  # noqa: BLE001
+        logger.debug("Could not read skill config %s: %s", config_path, e)
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    cfg = parsed.get("skills")
+    return cfg if isinstance(cfg, dict) else {}
+
+
+def get_always_skill_names() -> Set[str]:
+    """Per-profile ``skills.always_skills`` — pre-loaded into the prompt and
+    therefore implicitly part of the enabled (accessible) set."""
+    return _normalize_string_set(_read_skills_cfg().get("always_skills"))
+
+
+def get_enabled_skill_names() -> Optional[Set[str]]:
+    """Per-profile ``skills.enabled_skills`` allowlist (accessible skills).
+
+    Returns ``None`` when the key is absent — meaning *no allowlist configured*,
+    so access is unrestricted (back-compat until a profile is seeded). An empty
+    list returns an empty set (an explicit allowlist that happens to be empty).
+    ``always_skills`` are always part of the enabled set regardless.
+    """
+    cfg = _read_skills_cfg()  # single read; always_skills computed from the same dict
+    if "enabled_skills" not in cfg:
+        return None
+    return _normalize_string_set(cfg.get("enabled_skills")) | _normalize_string_set(
+        cfg.get("always_skills")
+    )
+
+
+def get_skill_enforcement_mode() -> str:
+    """Allowlist enforcement mode: ``off`` | ``shadow`` | ``enforce``.
+
+    ``off``     — no allowlist gating (default; full progressive disclosure).
+    ``shadow``  — load proceeds but out-of-allowlist loads are logged (would-block).
+    ``enforce`` — out-of-allowlist loads are blocked; agent must use skill_request.
+    Reads the profile config, then falls back to the merged default via
+    load_config so a fleet-wide default in DEFAULT_CONFIG is honoured.
+    """
+    mode = _read_skills_cfg().get("enforcement_mode")
+    if not mode:
+        try:
+            from hermes_cli.config import load_config_readonly
+
+            mode = ((load_config_readonly().get("skills") or {}).get("enforcement_mode"))
+        except Exception as e:  # noqa: BLE001
+            # Fail OPEN to "off" deliberately: enforcement is an opt-in
+            # containment layer, not a security boundary (disabled-list, the
+            # trusted-dir check and injection scanning run first and are
+            # unaffected). A transient config-read failure must never brick
+            # every skill load. The grant check, by contrast, fails CLOSED.
+            logger.debug("enforcement_mode fallback read failed: %s", e)
+            mode = None
+    mode = str(mode or "off").lower()
+    return mode if mode in {"off", "shadow", "enforce"} else "off"
+
+
 def _normalize_string_set(values) -> Set[str]:
     if values is None:
         return set()

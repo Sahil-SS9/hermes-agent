@@ -526,6 +526,67 @@ def _get_session_platform() -> str:
         return ""
 
 
+def _current_profile() -> Optional[str]:
+    """Resolve the active profile name from HERMES_HOME (gateways set HERMES_HOME,
+    not HERMES_PROFILE). Falls back to the HERMES_PROFILE env if present."""
+    try:
+        from hermes_cli.profiles import get_active_profile_name
+
+        return get_active_profile_name()
+    except Exception:  # noqa: BLE001
+        return os.environ.get("HERMES_PROFILE")
+
+
+def _has_active_grant(profile: Optional[str], skill: str) -> bool:
+    """True if ``profile`` holds a live temporary grant for ``skill``.
+
+    A grant is a ``skill.borrowed`` event with no matching ``skill.revoked``
+    (revoke carries ``payload.borrow_event_id``). Best-effort: any ledger error
+    means "no grant" so a broken ledger never silently unblocks access.
+    """
+    if not profile:
+        return False
+    try:
+        from hermes_cli.profile_activity_ledger import query_events
+
+        borrows = query_events(
+            event_types=["skill.borrowed"], target_profile=profile, object_id=skill
+        )
+        if not borrows:
+            return False
+        revoked = {
+            (e.get("payload") or {}).get("borrow_event_id")
+            for e in query_events(event_types=["skill.revoked"], target_profile=profile, object_id=skill)
+        }
+        return any(b.get("event_id") not in revoked for b in borrows)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _skill_access_decision(resolved_name: str) -> str:
+    """Allowlist decision for loading ``resolved_name``.
+
+    Returns ``"allow"``, ``"shadow_block"`` (load proceeds, log a would-block),
+    or ``"block"`` (deny the load). Honours the per-profile enforcement mode,
+    the enabled_skills allowlist (always_skills included), and active grants.
+    """
+    from agent.skill_utils import (
+        get_enabled_skill_names,
+        get_skill_enforcement_mode,
+    )
+
+    mode = get_skill_enforcement_mode()
+    if mode == "off":
+        return "allow"
+    enabled = get_enabled_skill_names()
+    if enabled is None:  # no allowlist configured yet → unrestricted (pre-seed)
+        return "allow"
+    profile = _current_profile()
+    if resolved_name in enabled or _has_active_grant(profile, resolved_name):
+        return "allow"
+    return "shadow_block" if mode == "shadow" else "block"
+
+
 def _is_skill_disabled(name: str, platform: str = None) -> bool:
     """Check if a skill is disabled in config.
 
@@ -1076,6 +1137,39 @@ def skill_view(
                 ensure_ascii=False,
             )
 
+        # Allowlist enforcement (Skill Access & Lifecycle Manager, Phase 2).
+        # off → no gating; shadow → log a would-block but still load;
+        # enforce → block and tell the agent to request access.
+        _access = _skill_access_decision(resolved_name)
+        if _access != "allow":
+            _profile = _current_profile()
+            record_event_if_enabled(
+                source="skill.loader",
+                actor_profile=_profile,
+                target_profile=_profile,
+                event_type="skill.access.would_block"
+                if _access == "shadow_block"
+                else "skill.access.blocked",
+                object_type="skill",
+                object_id=resolved_name,
+                summary=f"{_access} load of {resolved_name} (not in enabled_skills, no grant)",
+                payload={"requested_name": name, "task_id": task_id},
+            )
+            if _access == "block":
+                return json.dumps(
+                    {
+                        "success": False,
+                        "error": (
+                            f"Skill '{resolved_name}' is not enabled for this profile. "
+                            "Request temporary access for your task with "
+                            "skill_request(skill, task_id, reason), or ask the relevant "
+                            "lead/Denji to enable or create it."
+                        ),
+                        "readiness_status": "not_enabled",
+                    },
+                    ensure_ascii=False,
+                )
+
         # If a specific file path is requested, read that instead
         if file_path and skill_dir:
             from tools.path_security import validate_within_dir, has_traversal_component
@@ -1391,10 +1485,11 @@ def skill_view(
         if isinstance(metadata, dict):
             result["metadata"] = metadata
 
+        _loaded_profile = _current_profile()
         record_event_if_enabled(
             source="skill.loader",
-            actor_profile=os.environ.get("HERMES_PROFILE"),
-            target_profile=os.environ.get("HERMES_PROFILE"),
+            actor_profile=_loaded_profile,
+            target_profile=_loaded_profile,
             event_type="skill.loaded",
             object_type="skill",
             object_id=skill_name,

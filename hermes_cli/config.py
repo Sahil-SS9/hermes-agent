@@ -1629,6 +1629,13 @@ DEFAULT_CONFIG = {
     # Each path is expanded (~, ${VAR}) and resolved.  Read-only — skill creation
     # always goes to ~/.hermes/skills/.
     "skills": {
+        # Skill Access & Lifecycle Manager allowlist enforcement (Phase 2):
+        #   off     — no gating (full progressive disclosure)
+        #   shadow  — load proceeds, out-of-allowlist loads logged as would-block
+        #   enforce — out-of-allowlist loads blocked; agent must use skill_request
+        # Per-profile skills.enabled_skills is the allowlist (always_skills
+        # included). Default off until profiles are seeded from observed usage.
+        "enforcement_mode": "off",
         "external_dirs": [],   # e.g. ["~/.agents/skills", "/shared/team-skills"]
         # Substitute ${HERMES_SKILL_DIR} and ${HERMES_SESSION_ID} in SKILL.md
         # content with the absolute skill directory and the active session id
