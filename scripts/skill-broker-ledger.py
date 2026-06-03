@@ -2,26 +2,48 @@
 """
 Skill Borrow Ledger Management Script
 
-Append-only JSONL at /home/kensei/.hermes/governance/skill-broker-ledger.jsonl
+Backed by the central append-only profile activity ledger
+(~/.hermes/governance/profile-activity-ledger.sqlite, mirrored to JSONL) — the
+single source of truth for skill borrows/grants. Revocation is a separate
+skill.revoked event referencing the borrow (the ledger forbids UPDATE/DELETE).
 
 Usage:
   python3 skill-broker-ledger.py borrow <profile> <skill> <task_id> [board]
-  python3 skill-broker-ledger.py revoke <event_id> <task_result> [recommendation]
+  python3 skill-broker-ledger.py revoke <event_id> [task_result]
   python3 skill-broker-ledger.py count <profile> <skill> [months]
   python3 skill-broker-ledger.py deny <profile> <skill> <task_id> <reason> [board]
   python3 skill-broker-ledger.py list [--profile <p>] [--skill <s>] [--limit <n>]
   python3 skill-broker-ledger.py review [--months <n>]
-  python3 skill-broker-ledger.py status  # Quick summary of recent activity
+  python3 skill-broker-ledger.py status        # Quick summary of recent activity
+  python3 skill-broker-ledger.py import-legacy  # One-time import of the old JSONL
 """
 
 import json
 import os
 import sys
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-LEDGER_PATH = Path("/home/kensei/.hermes/governance/skill-broker-ledger.jsonl")
+# Unified ledger: the skill broker is now backed by the central append-only
+# profile activity ledger (one source of truth), not a private JSONL.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from hermes_cli.profile_activity_ledger import (  # noqa: E402
+    append_event,
+    query_events,
+    ledger_db_path,
+)
+
+# Skill-broker event types in the unified ledger.
+EV_BORROW = "skill.borrowed"
+EV_DENY = "skill.denied"
+EV_REVOKE = "skill.revoked"
+BROKER_SOURCE = "skill.broker"
+
+# Legacy private ledger — retained only for one-time import (see `import-legacy`).
+LEGACY_JSONL = Path("/home/kensei/.hermes/governance/skill-broker-ledger.jsonl")
+LEDGER_PATH = ledger_db_path()
 
 # ---- Safety Lists ----
 
@@ -54,164 +76,158 @@ SAFE_TO_GRANT = {
 
 # ---- Ledger Operations ----
 
-def _read_ledger():
-    """Read all entries from the ledger."""
-    if not LEDGER_PATH.exists():
-        return []
-    entries = []
-    with open(LEDGER_PATH, encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                entries.append(json.loads(line))
-    return entries
-
-
-def _append_to_ledger(entry):
-    """Append one entry to the ledger."""
-    LEDGER_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with open(LEDGER_PATH, "a", encoding="utf-8") as f:
-        f.write(json.dumps(entry, sort_keys=True) + "\n")
-    return entry
-
-
-def _next_event_id():
-    """Generate a sequential event ID based on today's date."""
-    today = datetime.now(timezone.utc).strftime("%Y%m%d")
-    existing = _read_ledger()
-    today_events = [e for e in existing if e.get("event_id", "").startswith(f"borrow-{today}")]
-    seq = len(today_events) + 1
-    return f"borrow-{today}-{seq:03d}"
-
-
 def _now_ts():
     return int(time.time())
 
 
-def cmd_borrow(profile, skill, task_id, board="ops"):
-    """Record a temporary skill grant."""
-    now_ts = _now_ts()
-    
-    # First, create the borrow entry
-    event_id = _next_event_id()
-    entry = {
-        "event_id": event_id,
-        "ts": now_ts,
-        "task_id": task_id,
-        "board": board,
-        "worker_profile": profile,
-        "skill_borrowed": skill,
-        "grant_type": "temporary",
-        "grant_expiry": "task_completion",
-        "success": True,
-        "task_result": None,
-        "revoked_at": None,
-        "recommendation": None,
+def _to_entry(ev):
+    """Project a unified ledger event back into the broker's legacy entry shape,
+    so CLI consumers (skill-broker-core skill) see a stable schema."""
+    p = ev.get("payload") or {}
+    et = ev.get("event_type")
+    return {
+        "event_id": ev.get("event_id"),
+        "ts": ev.get("occurred_at"),
+        "task_id": p.get("task_id"),
+        "board": ev.get("board"),
+        "worker_profile": ev.get("target_profile"),
+        "skill_borrowed": ev.get("object_id"),
+        "grant_type": p.get("grant_type", "temporary"),
+        "grant_expiry": p.get("grant_expiry", "task_completion"),
+        "success": et == EV_BORROW,
+        "task_result": p.get("task_result"),
+        "revoked_at": p.get("revoked_at"),
+        "recommendation": p.get("recommendation"),
+        "event_type": et,
     }
-    _append_to_ledger(entry)
-    print(json.dumps({"event_id": event_id, "status": "granted", "entry": entry}))
+
+
+def _revoked_borrow_ids():
+    """Set of borrow event_ids that have a matching revoke event."""
+    return {
+        (e.get("payload") or {}).get("borrow_event_id")
+        for e in query_events(event_types=[EV_REVOKE])
+    }
+
+
+def _next_event_id():
+    """Human-readable, collision-proof id: borrow-YYYYMMDD-NNN-<rand>.
+
+    The date+sequence stays readable for operators; the random suffix guarantees
+    uniqueness so two borrows in the same instant can never mint the same id (an
+    id collision would otherwise be silently dropped by the ledger's
+    INSERT OR IGNORE and lose a grant)."""
+    today = datetime.now(timezone.utc).strftime("%Y%m%d")
+    existing = query_events(event_types=[EV_BORROW, EV_DENY])
+    seq = sum(1 for e in existing if str(e.get("event_id", "")).startswith(f"borrow-{today}")) + 1
+    return f"borrow-{today}-{seq:03d}-{uuid.uuid4().hex[:6]}"
+
+
+def cmd_borrow(profile, skill, task_id, board="ops"):
+    """Record a temporary skill grant in the unified ledger."""
+    event_id = _next_event_id()
+    append_event(
+        source=BROKER_SOURCE,
+        event_type=EV_BORROW,
+        event_id=event_id,
+        actor_profile="skill-broker",
+        target_profile=profile,
+        object_type="skill",
+        object_id=skill,
+        board=board,
+        summary=f"{profile} borrowed {skill} for {task_id}",
+        payload={
+            "task_id": task_id,
+            "grant_type": "temporary",
+            "grant_expiry": "task_completion",
+        },
+    )
+    print(json.dumps({"event_id": event_id, "status": "granted"}))
     return event_id
 
 
 def cmd_revoke(event_id, task_result="completed"):
-    """Mark a borrow event as revoked upon task completion."""
-    entries = _read_ledger()
-    now_ts = _now_ts()
-    found = False
-    
-    new_entries = []
-    for entry in entries:
-        if entry.get("event_id") == event_id and entry.get("revoked_at") is None:
-            entry["task_result"] = task_result
-            entry["revoked_at"] = now_ts
-            found = True
-        new_entries.append(entry)
-    
-    if not found:
-        print(json.dumps({"error": f"event_id {event_id} not found or already revoked"}))
+    """Revoke a borrow by appending a revoke event referencing it."""
+    borrows = {e.get("event_id"): e for e in query_events(event_types=[EV_BORROW])}
+    borrow = borrows.get(event_id)
+    if borrow is None:
+        print(json.dumps({"error": f"borrow event_id {event_id} not found"}))
         return 1
-    
-    # Rewrite the entire ledger
-    LEDGER_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with open(LEDGER_PATH, "w", encoding="utf-8") as f:
-        for entry in new_entries:
-            f.write(json.dumps(entry, sort_keys=True) + "\n")
-    
+    if event_id in _revoked_borrow_ids():
+        print(json.dumps({"error": f"event_id {event_id} already revoked"}))
+        return 1
+    now_ts = _now_ts()
+    append_event(
+        source=BROKER_SOURCE,
+        event_type=EV_REVOKE,
+        event_id=f"{event_id}-revoke",
+        actor_profile="skill-broker",
+        target_profile=borrow.get("target_profile"),
+        object_type="skill",
+        object_id=borrow.get("object_id"),
+        board=borrow.get("board"),
+        summary=f"Revoked {borrow.get('object_id')} grant {event_id} ({task_result})",
+        payload={"borrow_event_id": event_id, "task_result": task_result, "revoked_at": now_ts},
+    )
     print(json.dumps({"event_id": event_id, "status": "revoked", "revoked_at": now_ts}))
     return 0
 
 
 def cmd_count(profile, skill, months=1):
-    """Count borrows of a skill by a profile in the last N months."""
-    entries = _read_ledger()
-    cutoff = time.time() - (months * 30 * 24 * 3600)
-    
-    count = 0
-    for entry in entries:
-        if (entry.get("worker_profile") == profile
-                and entry.get("skill_borrowed") == skill
-                and entry.get("ts", 0) >= cutoff
-                and entry.get("grant_type") == "temporary"):
-            count += 1
-    
-    print(json.dumps({"profile": profile, "skill": skill, "months": months, "borrows": count}))
+    """Count temporary borrows of a skill by a profile in the last N months."""
+    cutoff = int(time.time() - (months * 30 * 24 * 3600))
+    rows = query_events(
+        event_types=[EV_BORROW], target_profile=profile, object_id=skill, since=cutoff
+    )
+    print(json.dumps({"profile": profile, "skill": skill, "months": months, "borrows": len(rows)}))
     return 0
 
 
 def cmd_deny(profile, skill, task_id, reason, board="ops"):
-    """Log a denied borrow request."""
-    now_ts = _now_ts()
+    """Log a denied borrow request in the unified ledger."""
     event_id = _next_event_id()
-    entry = {
-        "event_id": event_id,
-        "ts": now_ts,
-        "task_id": task_id,
-        "board": board,
-        "worker_profile": profile,
-        "skill_borrowed": skill,
-        "grant_type": "temporary",
-        "grant_expiry": "task_completion",
-        "success": False,
-        "task_result": "denied",
-        "revoked_at": None,
-        "recommendation": f"denied: {reason}",
-    }
-    _append_to_ledger(entry)
-    print(json.dumps({"event_id": event_id, "status": "denied", "entry": entry}))
+    append_event(
+        source=BROKER_SOURCE,
+        event_type=EV_DENY,
+        event_id=event_id,
+        actor_profile="skill-broker",
+        target_profile=profile,
+        object_type="skill",
+        object_id=skill,
+        board=board,
+        summary=f"Denied {skill} for {profile}: {reason}",
+        payload={"task_id": task_id, "task_result": "denied", "recommendation": f"denied: {reason}"},
+    )
+    print(json.dumps({"event_id": event_id, "status": "denied"}))
     return 0
 
 
 def cmd_list(profile=None, skill=None, limit=20):
-    """List recent ledger entries."""
-    entries = _read_ledger()
-    if profile:
-        entries = [e for e in entries if e.get("worker_profile") == profile]
-    if skill:
-        entries = [e for e in entries if e.get("skill_borrowed") == skill]
-    
-    entries.sort(key=lambda e: e.get("ts", 0), reverse=True)
-    entries = entries[:limit]
-    print(json.dumps(entries, indent=2))
+    """List recent broker events (borrow/deny/revoke)."""
+    rows = query_events(
+        event_types=[EV_BORROW, EV_DENY, EV_REVOKE],
+        target_profile=profile,
+        object_id=skill,
+        limit=limit,
+    )
+    print(json.dumps([_to_entry(e) for e in rows], indent=2))
     return 0
 
 
 def cmd_review(months=3):
-    """Generate skill-borrow analysis summary."""
-    entries = _read_ledger()
-    cutoff = time.time() - (months * 30 * 24 * 3600)
-    recent = [e for e in entries if e.get("ts", 0) >= cutoff]
-    
-    # Group by (profile, skill)
+    """Group borrows by (profile, skill) and flag promotion candidates."""
     from collections import defaultdict
+
+    cutoff = int(time.time() - (months * 30 * 24 * 3600))
+    recent = query_events(event_types=[EV_BORROW, EV_DENY], since=cutoff)
     groups = defaultdict(list)
-    for entry in recent:
-        key = (entry.get("worker_profile"), entry.get("skill_borrowed"))
-        groups[key].append(entry)
-    
+    for ev in recent:
+        groups[(ev.get("target_profile"), ev.get("object_id"))].append(ev)
+
     review = []
     for (profile, skill), group in sorted(groups.items(), key=lambda x: len(x[1]), reverse=True):
         count = len(group)
-        success_count = sum(1 for e in group if e.get("success"))
+        success_count = sum(1 for e in group if e.get("event_type") == EV_BORROW)
         action = "monitor"
         if count >= 6:
             action = "ESCALATE: recommend permanent add"
@@ -224,38 +240,88 @@ def cmd_review(months=3):
             "successes": success_count,
             "action": action,
         })
-    
     print(json.dumps({"period_months": months, "entries_analysed": len(recent), "findings": review}, indent=2))
     return 0
 
 
 def cmd_status():
-    """Quick summary."""
-    entries = _read_ledger()
-    total = len(entries)
-    active = sum(1 for e in entries if e.get("success") and e.get("revoked_at") is None)
-    denied = sum(1 for e in entries if e.get("success") is False)
-    
-    now_ts = _now_ts()
-    month_ago = now_ts - (30 * 24 * 3600)
-    recent = sum(1 for e in entries if e.get("ts", 0) >= month_ago)
-    
+    """Quick summary from the unified ledger."""
+    borrows = query_events(event_types=[EV_BORROW])
+    denies = query_events(event_types=[EV_DENY])
+    revoked = _revoked_borrow_ids()
+    active = sum(1 for e in borrows if e.get("event_id") not in revoked)
+    month_ago = _now_ts() - (30 * 24 * 3600)
+    recent = sum(1 for e in (borrows + denies) if (e.get("occurred_at") or 0) >= month_ago)
+
     top_borrowers = {}
-    for e in entries:
-        if e.get("success"):
-            p = e.get("worker_profile", "?")
-            top_borrowers[p] = top_borrowers.get(p, 0) + 1
-    
+    for e in borrows:
+        p = e.get("target_profile", "?")
+        top_borrowers[p] = top_borrowers.get(p, 0) + 1
     sorted_top = sorted(top_borrowers.items(), key=lambda x: x[1], reverse=True)[:5]
-    
+
     print(json.dumps({
-        "total_entries": total,
+        "total_entries": len(borrows) + len(denies),
         "active_borrows": active,
-        "denied": denied,
+        "denied": len(denies),
         "last_30_days": recent,
         "top_borrower_profiles": [{"profile": p, "count": c} for p, c in sorted_top],
         "ledger_path": str(LEDGER_PATH),
     }, indent=2))
+    return 0
+
+
+def cmd_import_legacy():
+    """One-time: import legacy skill-broker-ledger.jsonl into the unified ledger."""
+    if not LEGACY_JSONL.exists():
+        print(json.dumps({"imported": 0, "note": "no legacy jsonl"}))
+        return 0
+    imported = 0
+    skipped = 0
+    with open(LEGACY_JSONL, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                e = json.loads(line)
+            except json.JSONDecodeError:
+                skipped += 1
+                continue
+            eid = e.get("event_id")
+            skill = e.get("skill_borrowed")
+            profile = e.get("worker_profile")
+            board = e.get("board")
+            ts = e.get("ts")
+            if e.get("success"):
+                append_event(
+                    source=BROKER_SOURCE, event_type=EV_BORROW, event_id=eid,
+                    actor_profile="skill-broker", target_profile=profile,
+                    object_type="skill", object_id=skill, board=board, occurred_at=ts,
+                    summary=f"[import] {profile} borrowed {skill}",
+                    payload={"task_id": e.get("task_id"), "grant_type": e.get("grant_type", "temporary"),
+                             "grant_expiry": e.get("grant_expiry", "task_completion")},
+                )
+                imported += 1
+                if e.get("revoked_at"):
+                    append_event(
+                        source=BROKER_SOURCE, event_type=EV_REVOKE, event_id=f"{eid}-revoke",
+                        actor_profile="skill-broker", target_profile=profile,
+                        object_type="skill", object_id=skill, board=board, occurred_at=e.get("revoked_at"),
+                        summary=f"[import] revoked {skill} grant {eid}",
+                        payload={"borrow_event_id": eid, "task_result": e.get("task_result"),
+                                 "revoked_at": e.get("revoked_at")},
+                    )
+            else:
+                append_event(
+                    source=BROKER_SOURCE, event_type=EV_DENY, event_id=eid,
+                    actor_profile="skill-broker", target_profile=profile,
+                    object_type="skill", object_id=skill, board=board, occurred_at=ts,
+                    summary=f"[import] denied {skill} for {profile}",
+                    payload={"task_id": e.get("task_id"), "task_result": "denied",
+                             "recommendation": e.get("recommendation")},
+                )
+                imported += 1
+    print(json.dumps({"imported": imported, "skipped": skipped, "from": str(LEGACY_JSONL)}))
     return 0
 
 
@@ -282,13 +348,11 @@ def main():
             cmd_deny(profile, skill, task_id, f"skill '{skill}' is on the NEVER_GRANT list", board)
             return 0
         
-        # Check frequency
-        count_entries = _read_ledger()
-        cutoff = time.time() - (30 * 24 * 3600)
-        freq_count = sum(1 for e in count_entries
-                         if e.get("worker_profile") == profile
-                         and e.get("skill_borrowed") == skill
-                         and e.get("ts", 0) >= cutoff)
+        # Check frequency (last 30 days, this profile + skill)
+        cutoff = int(time.time() - (30 * 24 * 3600))
+        freq_count = len(query_events(
+            event_types=[EV_BORROW], target_profile=profile, object_id=skill, since=cutoff
+        ))
         
         if freq_count >= 6:
             cmd_deny(profile, skill, task_id,
@@ -355,7 +419,10 @@ def main():
     
     elif cmd == "status":
         return cmd_status()
-    
+
+    elif cmd == "import-legacy":
+        return cmd_import_legacy()
+
     else:
         print(f"Unknown command: {cmd}")
         print(__doc__.strip())

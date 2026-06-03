@@ -232,6 +232,72 @@ def append_event(
     return resolved_event_id
 
 
+def query_events(
+    *,
+    event_types: Optional[list[str]] = None,
+    target_profile: Optional[str] = None,
+    actor_profile: Optional[str] = None,
+    object_type: Optional[str] = None,
+    object_id: Optional[str] = None,
+    board: Optional[str] = None,
+    since: Optional[int] = None,
+    until: Optional[int] = None,
+    limit: Optional[int] = None,
+) -> list[dict[str, Any]]:
+    """Read events from the ledger with optional filters.
+
+    Shared read primitive for the skill broker (count/review), Denji's
+    promotion audit, and the dashboard Skills page. Returns rows newest-first
+    as plain dicts with ``payload`` decoded from ``payload_json``. Never raises
+    on a missing/empty ledger — returns an empty list.
+    """
+    if not ledger_db_path().exists():
+        return []
+    clauses: list[str] = []
+    params: list[Any] = []
+    if event_types:
+        clauses.append("event_type IN (%s)" % ",".join("?" for _ in event_types))
+        params.extend(event_types)
+    for col, val in (
+        ("target_profile", target_profile),
+        ("actor_profile", actor_profile),
+        ("object_type", object_type),
+        ("object_id", object_id),
+        ("board", board),
+    ):
+        if val is not None:
+            clauses.append(f"{col} = ?")
+            params.append(val)
+    if since is not None:
+        clauses.append("occurred_at >= ?")
+        params.append(int(since))
+    if until is not None:
+        clauses.append("occurred_at <= ?")
+        params.append(int(until))
+    where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    sql = f"SELECT * FROM activity_events{where} ORDER BY occurred_at DESC, id DESC"
+    if limit is not None:
+        sql += " LIMIT ?"
+        params.append(int(limit))
+    try:
+        with _connect() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(sql, params).fetchall()
+    except sqlite3.Error as exc:  # never break a read path on a ledger hiccup
+        logger.warning("profile activity ledger query failed: %s", exc, exc_info=True)
+        return []
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        d = dict(r)
+        raw = d.pop("payload_json", None) or "{}"
+        try:
+            d["payload"] = json.loads(raw)
+        except (ValueError, TypeError):
+            d["payload"] = {}
+        out.append(d)
+    return out
+
+
 def record_event_if_enabled(*, cfg: Optional[dict[str, Any]] = None, **kwargs: Any) -> Optional[str]:
     if not is_enabled(cfg):
         return None

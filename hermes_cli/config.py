@@ -743,8 +743,11 @@ DEFAULT_CONFIG = {
     'governance': {
         'profile_activity_ledger': {
             # Append-only SQLite + JSONL audit ledger for profile/worker activity.
-            # Default false: inline hooks are passive until explicitly enabled.
-            'enabled': False,
+            # Enabled 2026-06-03: single source of truth for the Skill Access &
+            # Lifecycle Manager (skill borrows/grants/loads + task events). The
+            # ledger is central (one store under ~/.hermes/governance) and the
+            # inline hooks are best-effort, so enabling fleet-wide is safe.
+            'enabled': True,
         },
     },
     'toolsets': ['hermes-cli'],
