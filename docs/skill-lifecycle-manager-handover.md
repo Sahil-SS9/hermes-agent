@@ -65,17 +65,47 @@ Visibility            Dashboard Skills page reads enabled_skills + ledger
 - `scripts/sweep-skill-grants.py` + **hourly cron `skill-grant-ttl-sweep`** registered (wrapper at `~/.hermes/scripts/sweep-skill-grants.py`).
 - Tests: 9 engine + updated suites. 29 skill tests + 644 regression green.
 
-### ⬜ Phase 4 — Secure sourcing/creation pipeline (NOT STARTED)
-Formalise: requirements in → match library + LLM-Wiki for ≥60-70% fit → augment via lead/Denji/skill-research → else source SkillHub + **Hermes Atlas (https://hermesatlas.com/)** → GitHub. **External = quarantine + mandatory manual rewrite by skill-research/Denji before internal storage and grant.** Never load raw external content. Reuse `tools/skills_hub.py` (GitHubSource + `QUARANTINE_DIR`) and the `skill-research` profile.
+### ✅ Phase 4 — Secure sourcing/creation pipeline (DONE, 03/06/26)
+Formalised: requirements in → match library + LLM-Wiki for ≥60-70% fit → augment via lead/Denji/skill-research → else source SkillHub + **Hermes Atlas (https://hermesatlas.com/)** → GitHub. **External = quarantine + mandatory manual rewrite by skill-research/Denji before internal storage and grant.** Never load raw external content.
 
-### ⬜ Phase 5 — Denji auto-promotion (NOT STARTED)
+**Implemented:**
+- `tools/skill_quarantine.py` — Ledger-based quarantine status tracking. No disk stat calls — quarantine state lives in the central activity ledger as `skill.quarantined` / `skill.quarantine.reviewed` / `skill.quarantine.rejected` events. Fail-closed: ledger error → skill stays blocked.
+- `tools/skill_grants.py` — `grant_skill()` checks `is_quarantined()` before granting. Quarantine check sits above NEVER_GRANT in the evaluation order.
+- `tools/skills_tool.py` — `skill_view` has quarantine gate before allowlist enforcement. Blocks quarantined skills regardless of enforcement mode.
+- `hermes_cli/skills_hub.py` — `do_install` wire: community-source skills recorded as quarantined on install; trusted/official auto-promoted after successful scan.
+- `tests/tools/test_skill_quarantine.py` — 11 tests for quarantine lifecycle (quarantine → promote/reject → clear/stay-blocked, out-of-order resolution, info API).
+- **40/40** skill tests passing (29 existing + 11 new).
+
+### ✣ Phase 4a — Install hook hardening (TODO, post-Phase 5)
+Ensure the quarantine recording in `do_install` covers all source adapters uniformly. Currently wired for the CLI install flow; verify slash-command and programmatic install paths hit the same hooks. Add `quarantine_skill()` call to `install_from_quarantine()` itself as a second guard point.
+
+### ✅ Phase 5 — Denji auto-promotion (DONE, 03/06/26)
 Extend `denji-skill-audit`: query the ledger for per-profile grant/use counts over the window; auto-add to `enabled_skills` above threshold; record a reversible, logged decision. Wire into the weekly audit.
 
-### ⬜ Phase 6 — Curator reconciliation (NOT STARTED)
-Ensure grant/load events count as usage so the curator's staleness archival never removes an actively-borrowed skill.
+**Implemented:**
+- `scripts/denji-auto-promote.py` — Reads `skill.borrowed` events from the ledger, groups by (profile, skill), auto-adds skills to `enabled_skills` when borrow count ≥ threshold (default: 3/30d). Writes comment-preserving YAML. Records reversible `skill.enabled_auto` events. Skips skills on `NEVER_AUTO_PROMOTE` list and skills not on disk.
+- `tests/tools/test_denji_auto_promote.py` — 5 tests: borrow tracking, NEVER_GRANT enforcement, promotion event recording, reveribility, non-existent skill skip.
+- **45/45** skill tests passing (29 existing + 11 quarantine + 5 auto-promote).
 
-### ⬜ Phase 7 — Kensei Dashboard Skills page (NOT STARTED — task `t_009c287b` on the Apps board)
-Columns: name, description, category, enable/disable/delete toggle, per-profile enabled/disabled with override, version + last-review date. Reads `enabled_skills` + ledger; override writes back to profile config (comment-safe) + reload.
+### ✅ Phase 6 — Curator reconciliation (DONE, 03/06/26)
+Grant/load events from the ledger now count as usage in the curator's scoring algorithm. A skill that is actively borrowed or loaded will not be archived — the rubric's usage signal is now tri-source (profiles, crons, and ledger activity).
+
+**Implemented:**
+- `denji-skill-audit` skill updated: data source #3 added — ledger usage from `skill.borrowed` and `skill.loaded` events. Scoring formula extended: `usage = n_profiles + (n_crons * 0.5) + (n_ledger * 0.3)`. Pitfalls section updated to document the new ledger-driven usage source, replacing the obsolete "telemetry not available" warning.
+- No code changes needed — the curator's scoring is a runtime algorithm executed by the Denji profile at audit time. The skill document defines the algorithm; Denji follows it.
+
+### ✅ Phase 7 — Unified Workforce Dashboard (DONE, 03/06/26)
+**Built:** Combined Skills management + Denji user-profile review into a single unified Workforce page in the Kensei Dashboard. Two main tabs (Skills default, Denji Review) with collapsible split-panes, sortable/filterable skill table, hierarchical profile tree, and per-profile enable/disable toggles that write to profile configs.
+
+**Implemented:**
+- **Backend** `backend/workforce.py` (NEW, 470 lines) — 9 functions: `skill_list()`, `skill_enable()` (with always_skills protection + targeted YAML rewrite that preserves comments), `most_used_skills()`, `profile_tree()` (derives hierarchy from naming), `recent_changes()`, `change_ledger_entries()`, `wfa_reports()`, `auto_promotion_history()`, `review_cycle_status()`, `denji_dashboard()` (aggregator).
+- **Backend** `app.py` — 7 new routes: `/api/workforce/skills`, `/api/workforce/skills/{profile}/enable`, `/api/workforce/skills/{profile}/disable`, `/api/workforce/profiles/tree`, `/api/workforce/most-used`, `/api/workforce/recent-changes`, `/api/workforce/denji`, `/api/workforce/change-ledger`.
+- **Frontend** `pages/Workforce.tsx` (NEW, 660 lines) — Two main tabs (Skills default / Denji Review). Skills tab: collapsible Recent Changes + Most Used Skills split-panes, Profile Tree (leads with sub-profiles as collapsible tree, click to filter), Skills Table (sortable by name/category/borrows/loads/total_usage, searchable, status filter, per-profile enable/disable toggles). Denji Review tab: 5 sub-tabs (Overview / user.md / soul.md / Session Performance / Skill Review), review cycle status (weekly/monthly/quarterly) with activity counts, WFA reports list, auto-promotion history.
+- **Frontend** `api.ts` — 8 new TypeScript interfaces for the workforce data.
+- **Frontend** `nav.ts`, `Icons.tsx`, `App.tsx` — New `/workforce` route with custom workforce icon.
+- **Integration test results:** 212 skills indexed, 53 profiles in 9 hierarchical lead groups (ceecee, denji, dezzy, gojo, light, octacon, quan, remii, wesker), review cycles tracking weekly/monthly/quarterly from ledger, always_skills protection working (cannot toggle protected skills).
+- **TypeScript check:** clean (0 errors).
+- **Synchronisation:** All toggle changes invalidate `workforce-skills` and `workforce-recent-changes` queries, reflecting immediately in the Denji Review tab's Recent Changes feed.
 
 ---
 

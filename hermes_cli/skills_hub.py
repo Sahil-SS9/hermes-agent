@@ -595,6 +595,21 @@ def do_install(identifier: str, category: str = "", force: bool = False,
         return
     c.print(f"[dim]Quarantined to {q_path.relative_to(q_path.parent.parent.parent)}[/]")
 
+    # Record quarantine in the ledger (Phase 4 — grant engine gate).
+    # Official/trusted sources get auto-promoted after scan+customer confirmation.
+    # Community sources remain quarantined until manual review by Denji/skill-research.
+    try:
+        from tools.skill_quarantine import quarantine_skill as _ledger_quarantine
+        _ledger_quarantine(
+            bundle.name,
+            source=bundle.source,
+            identifier=bundle.identifier,
+            review_required_by="skill-research",
+            metadata={"trust_level": bundle.trust_level, "repo": getattr(meta, "repo", None) if meta else None},
+        )
+    except Exception:
+        pass  # ledger recording is non-fatal to install
+
     # Scan
     c.print("[bold]Running security scan...[/]")
     if bundle.source == "official":
@@ -671,6 +686,16 @@ def do_install(identifier: str, category: str = "", force: bool = False,
     from tools.skills_hub import SKILLS_DIR
     c.print(f"[bold green]Installed:[/] {install_dir.relative_to(SKILLS_DIR)}")
     c.print(f"[dim]Files: {', '.join(bundle.files.keys())}[/]\n")
+
+    # Auto-promote trusted/official skills (Phase 4).
+    # Community-source skills stay quarantined — they require manual review.
+    try:
+        from tools.skill_quarantine import promote_skill as _ledger_promote
+        if bundle.source in ("official",) or bundle.trust_level in ("builtin", "trusted"):
+            _ledger_promote(bundle.name, "skill-broker",
+                            f"Auto-promoted — source={bundle.source}, trust={bundle.trust_level}")
+    except Exception:
+        pass  # promotion recording is non-fatal
 
     if invalidate_cache:
         # Invalidate the skills prompt cache so the new skill appears immediately

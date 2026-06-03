@@ -1186,7 +1186,36 @@ def skill_view(
                 ensure_ascii=False,
             )
 
-        # Allowlist enforcement (Skill Access & Lifecycle Manager, Phase 2).
+        # Quarantine gate (Skill Access & Lifecycle Manager, Phase 4).
+        # External skills must be manually reviewed before they can be loaded.
+        # This gate fires regardless of enforcement mode or access policy.
+        from tools.skill_quarantine import is_quarantined as _is_quarantined
+        if _is_quarantined(resolved_name):
+            _profile = _current_profile()
+            record_event_if_enabled(
+                source="skill.loader",
+                actor_profile=_profile,
+                target_profile=_profile,
+                event_type="skill.access.blocked",
+                object_type="skill",
+                object_id=resolved_name,
+                summary=f"Blocked load of {resolved_name} — quarantined (requires review)",
+                payload={"requested_name": name, "task_id": task_id, "block_reason": "quarantined"},
+            )
+            return json.dumps(
+                {
+                    "success": False,
+                    "error": (
+                        f"Skill '{resolved_name}' is quarantined — it was sourced externally "
+                        "and requires manual review by Denji/skill-research before use. "
+                        "Contact the relevant lead to request review."
+                    ),
+                    "readiness_status": "quarantined",
+                },
+                ensure_ascii=False,
+            )
+
+        # Allowlist enforcement (Skill Access & Lifecycle Manager, Phase 2-3).
         # off → no gating; shadow → log a would-block but still load;
         # enforce → block and tell the agent to request access.
         _access = _skill_access_decision(resolved_name)

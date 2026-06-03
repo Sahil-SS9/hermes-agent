@@ -119,6 +119,12 @@ def grant_skill(profile: str, skill: str, task_id: str, reason: str = "", board:
     if not task_id:
         return {"decision": "deny", "granted": False, "event_id": None,
                 "reason": "a task_id is required — grants are scoped to a task"}
+    # Quarantine gate: external skills must be manually reviewed before granting.
+    from tools.skill_quarantine import is_quarantined as _is_quarantined
+    if _is_quarantined(skill):
+        return record_deny(profile, skill, task_id,
+                           f"'{skill}' is quarantined — requires manual review by Denji/skill-research before use",
+                           board)
     if skill in NEVER_GRANT:
         return record_deny(profile, skill, task_id,
                            f"'{skill}' is on the NEVER_GRANT list (requires KENSEI/Denji)", board)
