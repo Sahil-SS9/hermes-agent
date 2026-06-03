@@ -12,13 +12,17 @@ from pathlib import Path
 
 HERMES = Path("/home/kensei/.hermes")
 
-# MCP servers to check (name, check method)
-# We check if the MCP process is running and responsive
+# MCP servers to check (name, pgrep -f pattern matching real process cmdline)
+# v2 — fix 03/06/26: previous patterns ("outlook-mcp-server",
+# "google-workspace-mcp-server", "mailbox-cleaner-mcp") did not match the
+# actual node command lines spawned by the gateway. They returned 0 hits
+# every run and produced false "process not found" alerts whenever a real
+# tool error appeared in the journal. Use the real cmdline substrings.
 MCP_CHECKS = [
     ("gitnexus", "gitnexus"),
-    ("google_workspace", "google-workspace-mcp-server"),
-    ("outlook", "outlook-mcp-server"),
-    ("mailbox_cleaner", "mailbox-cleaner-mcp"),
+    ("google_workspace", "workspace-mcp"),       # actually @isaacphi/workspace-mcp
+    ("outlook", "ms-365-mcp-server"),            # actually @softeria/ms-365-mcp-server
+    ("mailbox_cleaner", "mailbox_cleaner"),      # matches the Python module path
     ("nanobanana", "nanobanana"),
 ]
 
