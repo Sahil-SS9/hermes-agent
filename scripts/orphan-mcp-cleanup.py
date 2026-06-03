@@ -1,0 +1,1 @@
+/home/kensei/.hermes/profiles/wesker-ops/scripts/orphan-mcp-cleanup.py

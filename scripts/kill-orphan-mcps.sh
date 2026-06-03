@@ -32,10 +32,11 @@ GATEWAY_PIDS=$(ps -eo pid,ppid,tty,comm,args --no-headers \
     | tr '\n' ' ')
 
 # Find all MCP processes — match on comm/name, NOT full args (avoid earlyoom match)
+# Covers: workspace-mcp, ms-365-mcp, gitnexus, github-mcp, mailbox_cleaner, adaptive_rate_limiter
 MCP_PIDS=$(ps -eo pid,comm --no-headers \
-    | grep -iE 'workspace-mcp|ms-365-mcp' \
+    | grep -iE 'workspace-mcp|ms-365-mcp|gitnexus|github-mcp|mailbox_cleaner|adaptive_rate_limiter' \
     | grep -v grep \
-    | awk '{print $1}')
+    | awk '{print $1}' || true)
 
 # nanobanana runs under npm exec or sh wrappers, so also catch child nodes.
 # Grep no-match is a healthy state here, so never let it trip set -e/pipefail.

@@ -26,6 +26,14 @@ IMAGE_MODELS = {
     "flux_pro": "fal-ai/flux-2-pro",             # £0.024/img, quality
     "ideogram": "fal-ai/ideogram/v3",            # £0.024/img, typography
     "nano_banana": "fal-ai/nano-banana-pro",     # £0.12/img, text+reasoning
+    "gpt_image_2": "fal-ai/gpt-image-2",         # ~£0.04/img, SOTA text/layout (hero fallback)
+}
+
+# Approx GBP per image, for budget gating of paid hero models.
+MODEL_COST_GBP = {
+    "z_image": 0.004, "flux_klein": 0.004, "krea_medium": 0.016,
+    "krea_large": 0.024, "flux_pro": 0.024, "ideogram": 0.024,
+    "gpt_image_2": 0.04, "nano_banana": 0.12,
 }
 
 VIDEO_MODELS = {
@@ -71,6 +79,7 @@ def generate_image(
     aspect: str = "square",
     output_dir: str = "/home/kensei/repos/KenseiAgent/content_engine/output",
     filename: Optional[str] = None,
+    negative_prompt: str = "",
 ) -> Optional[str]:
     """Generate image via fal.ai. Returns file path or None."""
     if not FAL_KEY or requests is None:
@@ -95,6 +104,8 @@ def generate_image(
         "num_images": 1,
         "enable_safety_checker": False,
     }
+    if negative_prompt:
+        payload["negative_prompt"] = negative_prompt
 
     try:
         r = requests.post(sync_url, json=payload, headers=_headers(), timeout=60)
@@ -223,6 +234,14 @@ def generate_image_from_text_card(
     body_text: str,
     output_dir: str = "/home/kensei/repos/KenseiAgent/content_engine/output",
 ) -> Optional[str]:
-    """Generate a stylised image from a text card description. Uses flux_klein for speed."""
-    prompt = f"Social media card, dark background, {brand} branding, text: {body_text[:120]}. Minimal, modern, high contrast, no watermark."
-    return generate_image(prompt, model="flux_klein", aspect="square", output_dir=output_dir)
+    """DEPRECATED. Never embed literal post text in a diffusion prompt -- the
+    model renders it as gibberish. Use draft_media.generate_post_image(), which
+    generates a textless branded base and overlays the headline with Pillow.
+    Kept as a thin shim so any stray caller still produces a usable image.
+    """
+    from draft_media import generate_post_image
+
+    return generate_post_image(
+        {"brand": brand, "body_text": body_text, "platform": "twitter", "id": ""},
+        output_dir=output_dir,
+    )

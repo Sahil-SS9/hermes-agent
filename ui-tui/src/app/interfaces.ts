@@ -99,6 +99,7 @@ export interface TranscriptRow {
 }
 
 export interface UiState {
+  agentMode: AgentMode
   bgTasks: Set<string>
   busy: boolean
   busyInputMode: BusyInputMode

@@ -34,9 +34,80 @@ BAD_VISIBLE_DATE = re.compile(
 
 FIRST_LINE_TS = re.compile(r'^.+ · \d{2}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}$')
 
+# Evidence Gate (see cron-output-contract skill). Strong causal/state assertions in
+# DELIVERED output must be backed by a nearby evidence citation. Applied to visible
+# output only — never to prompts/scripts, which legitimately quote these as examples.
+STRONG_CLAIM = re.compile(
+    r'\bnot registered\b'
+    r'|\bno scheduled jobs\b'
+    r'|\b(?:does|did)\s*n[o\']?t\s+exist\b|\bdoesn\'?t exist\b'
+    r'|\bnon-existent\b|\bnonexistent\b'
+    r'|\b(?:tests?|ci|lint|build)\s+(?:are |is )?failing\b'
+    r'|\bis down\b|\bservice down\b'
+    r'|\bprocess not found\b|\bnot running\b'
+    r'|\bzero\s+\w+\s+today\b'
+    r'|\bpoints? to (?:a |the )?(?:wrong|non-existent|nonexistent)\b',
+    re.I,
+)
+# An evidence citation is: the explicit Evidence: marker, an inline-code span (a command),
+# an exit/conclusion token, a path with a verb, or the "cause unconfirmed" escape hatch.
+EVIDENCE_TOKEN = re.compile(
+    r'Evidence:'
+    r'|`[^`]+`'
+    r'|\bexit code\b|\bexit=\b|\bconclusion\b|\breturned\b|->'
+    r'|\bcause unconfirmed\b|\bUNCONFIRMED\b'
+    r'|\bhermes cron list\b|\bgh run\b|\bsystemctl\b|\bls -',
+    re.I,
+)
+
+
+def find_unbacked_claims(text: str) -> bool:
+    """True if any strong causal claim lacks an evidence citation within +/-2 lines."""
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        if not STRONG_CLAIM.search(line):
+            continue
+        window = '\n'.join(lines[max(0, i - 2):i + 3])
+        if not EVIDENCE_TOKEN.search(window):
+            return True
+    return False
+
 
 def scan_text(text: str) -> list[str]:
     return [name for name, rx in BAD_PATTERNS.items() if rx.search(text or '')]
+
+
+# Context-aware scanning. The format patterns describe what may appear in the
+# DELIVERED Discord message. Two legitimate cases must not be flagged:
+#   - a script that builds an HTML *file* (the message itself uses a MEDIA: tag)
+#   - a prompt that quotes a forbidden pattern as a prohibition/example
+PRINT_LINE = re.compile(r'\b(?:print|sys\.stdout\.write)\s*\(')
+NEGATION_CTX = re.compile(
+    r"\b(?:no|not|never|avoid|without|don'?t|do not|e\.g\.|example|instead of|rather than)\b",
+    re.I,
+)
+
+
+def scan_script(text: str) -> list[str]:
+    """Only stdout-reachable lines can become the delivered message. HTML written
+    to a file (rows.append("<html>...") -> write_text) is not delivered, so it is
+    excluded; literal HTML inside a print() still flags."""
+    printed = '\n'.join(l for l in (text or '').splitlines() if PRINT_LINE.search(l))
+    return scan_text(printed)
+
+
+def scan_prompt(text: str) -> list[str]:
+    """Prompts legitimately quote forbidden patterns as examples/prohibitions
+    ("No Telegram HTML tags (<b>...)"). Flag a pattern only when the match is NOT
+    in a negation/example context."""
+    hits: list[str] = []
+    for name, rx in BAD_PATTERNS.items():
+        for mobj in rx.finditer(text or ''):
+            ctx = (text or '')[max(0, mobj.start() - 50):mobj.start()]
+            if not NEGATION_CTX.search(ctx):
+                hits.append(name)
+                break
+    return hits
 
 
 def latest_response(job_id: str) -> str:
@@ -65,6 +136,8 @@ def scan_visible_output(text: str) -> list[str]:
     hits = scan_text(text)
     if BAD_VISIBLE_DATE.search(text):
         hits.append('non_uk_visible_date')
+    if find_unbacked_claims(text):
+        hits.append('unbacked_causal_claim')
     first = next((line.strip() for line in text.splitlines() if line.strip()), '')
     if first and not first.startswith('#') and not FIRST_LINE_TS.match(first):
         # Allow local-only / failure metadata logs to pass; this linter targets delivered summaries.
@@ -91,9 +164,9 @@ def main() -> int:
         if script:
             script_path = SCRIPTS / script
             if script_path.exists():
-                script_hits = scan_text(script_path.read_text(errors='ignore'))
+                script_hits = scan_script(script_path.read_text(errors='ignore'))
 
-        prompt_hits = scan_text(job.get('prompt') or '')
+        prompt_hits = scan_prompt(job.get('prompt') or '')
         latest_hits = scan_visible_output(latest_response(job.get('id', ''))) if args.latest else []
         if prompt_hits or script_hits or latest_hits:
             rows.append({

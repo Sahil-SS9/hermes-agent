@@ -47,28 +47,37 @@ def build_prompt(brand: str, body_text: str, visual_description: str = "") -> st
     )
 
 
+# Cheapest competent textless base. z-image (~£0.004/MP) is great for
+# photographic scenes; the brand treatment + Pillow headline do the rest.
+BASE_MODEL = os.getenv("CONTENT_BASE_MODEL", "z_image").strip()
+
+
 def generate_draft_image(
     prompt: str,
     brand: str = "",
     platform: str = "",
     draft_id: str = "",
     model: Optional[str] = None,
+    negative_prompt: str = "",
 ) -> Optional[str]:
-    """Generate an image down the degrading chain. Returns a local PNG path or None.
+    """Generate a raw (textless) base image down the degrading chain.
 
-    The caller passes a finished prompt (use ``build_prompt`` if none supplied).
-    ``model`` overrides the primary for a single call (e.g. a one-off hero post).
+    Returns a local PNG path or None. The caller passes a finished prompt
+    (use ``build_scene_prompt``). ``model`` overrides the primary for one call.
     """
-    chain = ([model] + [m for m in FAL_CHAIN if m != model]) if model else FAL_CHAIN
+    primary = model or BASE_MODEL
+    chain = [primary] + [m for m in FAL_CHAIN if m != primary]
 
-    # 1. FAL tiers, quality-first, degrading on failure/rate-limit.
+    # 1. FAL tiers, degrading on failure/rate-limit.
     for tier in chain:
         try:
             import fal_client
 
-            path = fal_client.generate_image(prompt, model=tier, aspect="square")
+            path = fal_client.generate_image(
+                prompt, model=tier, aspect="square", negative_prompt=negative_prompt
+            )
             if path and os.path.exists(path):
-                print(f"[draft_media] generated via {tier}: {path}")
+                print(f"[draft_media] base generated via {tier}: {path}")
                 return path
         except Exception as exc:  # noqa: BLE001 (provider failures must fall through)
             print(f"[draft_media] FAL {tier} failed: {exc}")
@@ -80,7 +89,7 @@ def generate_draft_image(
         img_bytes = _pollinations_generate(prompt)
         out_dir = OUTPUT_ROOT / (brand or "misc") / (platform or "x")
         out_dir.mkdir(parents=True, exist_ok=True)
-        fpath = out_dir / f"{draft_id or uuid.uuid4().hex[:8]}.png"
+        fpath = out_dir / f"{draft_id or uuid.uuid4().hex[:8]}_base.png"
         fpath.write_bytes(img_bytes)
         print(f"[draft_media] pollinations (free) saved: {fpath} ({len(img_bytes)} bytes)")
         return str(fpath)
@@ -88,6 +97,85 @@ def generate_draft_image(
         print(f"[draft_media] pollinations failed: {exc}")
 
     return None
+
+
+def _headline_from(draft: dict) -> str:
+    """Pick a short, punchy headline from the draft for the image overlay."""
+    title = (draft.get("title") or "").strip()
+    if 8 <= len(title) <= 70:
+        return title
+    body = (draft.get("body_text") or "").strip()
+    # first sentence / line, trimmed
+    for sep in ("\n", ". ", "! ", "? "):
+        if sep in body:
+            body = body.split(sep)[0]
+            break
+    body = body.lstrip("#@ ").strip()
+    return (body[:68].rsplit(" ", 1)[0] if len(body) > 68 else body) or (title or "")
+
+
+def generate_post_image(
+    draft: dict,
+    model: Optional[str] = None,
+    output_dir: Optional[str] = None,
+    scene_prompt: Optional[str] = None,
+) -> Optional[str]:
+    """Full branded pipeline: textless base -> brand treatment -> headline overlay.
+
+    Returns the path to the finished, publish-ready PNG (or None).
+    ``scene_prompt`` overrides the auto-built base prompt (e.g. repurpose cron).
+    """
+    import postprocess
+    import text_overlay
+    from brand_style import for_brand
+    from prompt_templates import build_scene_prompt, negative_prompt
+
+    brand = (draft.get("brand") or "").lower()
+    platform = draft.get("platform") or "twitter"
+    draft_id = draft.get("id") or uuid.uuid4().hex[:8]
+
+    prompt = scene_prompt or build_scene_prompt(
+        brand,
+        visual_brief=draft.get("visual_description", ""),
+        pillar=draft.get("pillar", ""),
+        body_text=draft.get("body_text", ""),
+    )
+
+    # Budget gate: a paid hero model (e.g. gpt_image_2) only runs if the month's
+    # £10 cap allows it -- otherwise degrade silently to the cheap base model.
+    chosen = model
+    if chosen and chosen != BASE_MODEL:
+        import budget
+        from fal_client import MODEL_COST_GBP
+
+        cost = MODEL_COST_GBP.get(chosen, 0.04)
+        if cost > 0.01:
+            if budget.can_spend(cost):
+                budget.record(cost, label=f"{chosen}:{draft_id}")
+            else:
+                print(f"[draft_media] budget cap hit; {chosen} -> {BASE_MODEL}")
+                chosen = None  # fall back to cheap base
+
+    base = generate_draft_image(
+        prompt, brand=brand, platform=platform, draft_id=draft_id,
+        model=chosen, negative_prompt=negative_prompt(),
+    )
+    if not base or not os.path.exists(base):
+        return None
+
+    try:
+        treated = postprocess.process_file(base, base.replace(".png", "_t.png"), brand)
+        headline = _headline_from(draft)
+        sub = draft.get("visual_sub", "") or ""
+        final = text_overlay.compose(
+            treated, brand, headline, platform=platform,
+            badge=for_brand(brand).get("badge"), sub=sub,
+        )
+        print(f"[draft_media] branded image: {final}")
+        return final
+    except Exception as exc:  # noqa: BLE001 (finishing must not lose the base)
+        print(f"[draft_media] finishing failed ({exc}); returning raw base")
+        return base
 
 
 def generate_draft_video(

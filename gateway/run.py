@@ -1870,6 +1870,10 @@ class GatewayRunner:
         self._agent_cache: "OrderedDict[str, tuple]" = OrderedDict()
         self._agent_cache_lock = _threading.Lock()
 
+        # Cron ticker stop signal, set early during shutdown so no new cron ticks fire
+        # while the event loop and adapters are being torn down.
+        self._cron_stop_event: "threading.Event | None" = None
+
         # Per-session model overrides from /model command.
         # Key: session_key, Value: dict with model/provider/api_key/base_url/api_mode
         self._session_model_overrides: Dict[str, Dict[str, str]] = {}
@@ -6251,6 +6255,13 @@ class GatewayRunner:
 
             self._running = False
             self._draining = True
+
+            # Stop the cron ticker immediately so no new cron ticks fire during
+            # the drain/shutdown window — delivery via a closing event loop causes
+            # "cannot schedule new futures after interpreter shutdown" errors.
+            if self._cron_stop_event is not None:
+                self._cron_stop_event.set()
+                logger.info("Cron ticker signalled to stop early")
 
             # Notify all chats with active agents BEFORE draining.
             # Adapters are still connected here, so messages can be sent.
@@ -19594,6 +19605,7 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
     # - cron.ticker_enabled: false in the active profile config.
     # Root Kensei remains the scheduler of record.
     cron_stop = threading.Event()
+    runner._cron_stop_event = cron_stop
     cron_thread = None
     cron_ticker_disabled = os.environ.get("HERMES_CRON_TICKER_DISABLED", "").strip().lower() in {
         "1", "true", "yes", "on"

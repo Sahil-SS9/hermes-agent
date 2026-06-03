@@ -43,10 +43,15 @@ export ORT_USE_CUDA="0"
 
 export PYTHONPATH="$REPO:${PYTHONPATH:-}"
 
+# Use the repo venv: it has ARM-native numpy/Pillow that the image post-process
+# (postprocess.py) needs. Bare python3 resolves to an x86 numpy build that fails
+# to import on this aarch64 box.
+VENV_PY=/home/kensei/repos/KenseiAgent/.venv/bin/python
+
 echo "$(date -Iseconds) — Approving draft $DRAFT_ID..."
-python3 content_engine.py approve "$DRAFT_ID"
+"$VENV_PY" content_engine.py approve "$DRAFT_ID"
 
 echo "$(date -Iseconds) — Running Stage 2 (AI enrichment for all approved drafts)..."
-python3 content_engine.py stage2
+"$VENV_PY" content_engine.py stage2
 
 echo "$(date -Iseconds) — Done. Draft queued to Postiz (if integration is wired for brand/platform)."

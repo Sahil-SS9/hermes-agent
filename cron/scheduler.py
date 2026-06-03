@@ -224,6 +224,141 @@ from cron.jobs import get_due_jobs, mark_job_run, save_job_output, advance_next_
 # locally for audit.
 SILENT_MARKER = "[SILENT]"
 
+# Delivery retry queue: persists failed deliveries to disk so they can be
+# replayed on the next tick when the gateway is back up. Stored as a JSON
+# list under ~/.hermes/cron/delivery_retry_queue.json. Each entry records
+# the job metadata and the content that failed to deliver, plus a retry
+# counter to prevent infinite loops.
+_DELIVERY_RETRY_QUEUE_FILE: Path | None = None
+_MAX_DELIVERY_RETRIES = 3
+
+
+def _get_delivery_retry_queue_path() -> Path:
+    global _DELIVERY_RETRY_QUEUE_FILE
+    if _DELIVERY_RETRY_QUEUE_FILE is None:
+        _DELIVERY_RETRY_QUEUE_FILE = _get_hermes_home() / "cron" / "delivery_retry_queue.json"
+    return _DELIVERY_RETRY_QUEUE_FILE
+
+
+def _load_retry_queue() -> list[dict]:
+    """Load the persisted delivery retry queue."""
+    path = _get_delivery_retry_queue_path()
+    if not path.exists():
+        return []
+    try:
+        raw = path.read_text(encoding="utf-8").strip()
+        return json.loads(raw) if raw else []
+    except (json.JSONDecodeError, OSError) as e:
+        logger.warning("Failed to load delivery retry queue: %s", e)
+        return []
+
+
+def _save_retry_queue(entries: list[dict]) -> None:
+    """Persist the delivery retry queue to disk."""
+    path = _get_delivery_retry_queue_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(entries, indent=2, default=str), encoding="utf-8")
+    except OSError as e:
+        logger.warning("Failed to save delivery retry queue: %s", e)
+
+
+def _prune_retry_queue(job_id: str) -> None:
+    """Remove all retry entries for a given job_id (successful delivery)."""
+    entries = _load_retry_queue()
+    before = len(entries)
+    entries = [e for e in entries if e.get("job_id") != job_id]
+    if len(entries) < before:
+        _save_retry_queue(entries)
+
+
+def _enqueue_delivery_retry(job: dict, content: str, error: str) -> None:
+    """Save a failed delivery for retry on the next tick."""
+    entries = _load_retry_queue()
+    # Remove any stale entries for this job first (dedup)
+    entries = [e for e in entries if e.get("job_id") != job["id"]]
+    entries.append({
+        "job_id": job["id"],
+        "content": content,
+        "deliver_target": job.get("deliver", "local"),
+        "created_at": _hermes_now().isoformat(),
+        "retry_count": 0,
+        "last_error": str(error)[:500],
+    })
+    _save_retry_queue(entries)
+    logger.info("Job '%s': enqueued delivery for retry (error: %s)", job["id"], error)
+
+
+def _replay_retry_queue(adapters=None, loop=None) -> int:
+    """Try to deliver queued retry entries. Returns number successfully delivered.
+
+    Called at the start of each tick(). Entries that succeed are removed from
+    the queue; entries that fail again are updated with incremented retry_count.
+    Entries that exceed _MAX_DELIVERY_RETRIES are dropped with a warning.
+    """
+    entries = _load_retry_queue()
+    if not entries:
+        return 0
+
+    logger.info("Delivery retry queue: %d pending entries", len(entries))
+    remaining = []
+    delivered_count = 0
+
+    for entry in entries:
+        job_id = entry.get("job_id", "?")
+        retry_count = entry.get("retry_count", 0)
+
+        if retry_count >= _MAX_DELIVERY_RETRIES:
+            logger.warning(
+                "Delivery retry exhausted for job '%s' after %d attempts — dropping",
+                job_id, retry_count,
+            )
+            continue
+
+        # Look up the job from the main jobs list so we get current delivery targets
+        from cron.jobs import load_jobs
+        try:
+            jobs = load_jobs()
+            job = next((j for j in jobs if j["id"] == job_id), None)
+            if job is None:
+                logger.warning("Delivery retry: job '%s' not found in jobs list — dropping", job_id)
+                continue
+        except Exception as e:
+            logger.warning("Delivery retry: failed to load jobs for '%s': %s", job_id, e)
+            entry["retry_count"] = retry_count + 1
+            entry["last_error"] = str(e)[:500]
+            remaining.append(entry)
+            continue
+
+        content = entry.get("content", "")
+        if not content.strip():
+            continue
+
+        try:
+            error = _deliver_result(job, content, adapters=adapters, loop=loop)
+            if error is None:
+                delivered_count += 1
+                logger.info("Delivery retry succeeded for job '%s'", job_id)
+            else:
+                entry["retry_count"] = retry_count + 1
+                entry["last_error"] = str(error)[:500]
+                remaining.append(entry)
+                logger.warning(
+                    "Delivery retry %d/%d failed for job '%s': %s",
+                    retry_count + 1, _MAX_DELIVERY_RETRIES, job_id, error,
+                )
+        except Exception as e:
+            entry["retry_count"] = retry_count + 1
+            entry["last_error"] = str(e)[:500]
+            remaining.append(entry)
+            logger.warning(
+                "Delivery retry %d/%d exception for job '%s': %s",
+                retry_count + 1, _MAX_DELIVERY_RETRIES, job_id, e,
+            )
+
+    _save_retry_queue(remaining)
+    return delivered_count
+
 # Backward-compatible module override used by tests and emergency monkeypatches.
 _hermes_home: Path | None = None
 
@@ -2080,6 +2215,13 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
     try:
         due_jobs = get_due_jobs()
 
+        # Replay any failed deliveries from the retry queue before processing
+        # new jobs. This recovers messages that failed during a gateway shutdown
+        # race window. Live adapters and loop are forwarded so the retry can use
+        # the same delivery path as new jobs.
+        if due_jobs or _load_retry_queue():
+            _replay_retry_queue(adapters=adapters, loop=loop)
+
         if verbose and not due_jobs:
             logger.info("%s - No jobs due", _hermes_now().strftime('%H:%M:%S'))
             return 0
@@ -2147,6 +2289,15 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
                     except Exception as de:
                         delivery_error = str(de)
                         logger.error("Delivery failed for job %s: %s", job["id"], de)
+
+                    # On delivery failure, queue the output for retry on the
+                    # next tick so messages lost during gateway shutdown races
+                    # are recovered automatically.
+                    if delivery_error:
+                        _enqueue_delivery_retry(job, deliver_content, delivery_error)
+                    else:
+                        # Successful delivery — prune any stale retry entries
+                        _prune_retry_queue(job["id"])
 
                 # Treat empty final_response as a soft failure so last_status
                 # is not "ok" — the agent ran but produced nothing useful.

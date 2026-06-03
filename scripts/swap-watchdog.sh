@@ -9,7 +9,7 @@ total=$(awk '/SwapTotal/{print $2}' /proc/meminfo)
 free=$(awk '/SwapFree/{print $2}' /proc/meminfo)
 
 if [ -z "$total" ] || [ "$total" -eq 0 ]; then
-  echo "[OK] No swap configured"
+  # Silent when healthy — no swap means no pressure
   exit 0
 fi
 

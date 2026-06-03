@@ -130,7 +130,7 @@ def run_stage_2(dry_run: bool = False) -> List[dict]:
 
     # Unified media path: the same degrading FAL chain + free fallbacks used by
     # the review digest and the approve flow.
-    from draft_media import generate_draft_image, generate_draft_video, build_prompt
+    from draft_media import generate_post_image, generate_draft_video
 
     enriched = []
     for d in approved:
@@ -144,10 +144,7 @@ def run_stage_2(dry_run: bool = False) -> List[dict]:
         needs_media = "image" in content_type or "video" in content_type
 
         if needs_media and not d.get("ai_image_path"):
-            img = generate_draft_image(
-                build_prompt(brand, body_text, d.get("visual_description", "")),
-                brand=brand, platform=d.get("platform", ""), draft_id=draft_id,
-            )
+            img = generate_post_image(d)
             if img:
                 update_draft_ai_image_path(draft_id, img)
                 d["ai_image_path"] = img
@@ -425,7 +422,7 @@ def main() -> int:
         return 0
 
     elif args.cmd == "gen-image":
-        from draft_media import generate_draft_image, build_prompt
+        from draft_media import generate_post_image
         d = get_draft(args.draft_id)
         if not d:
             print(f"Draft not found: {args.draft_id}")
@@ -433,11 +430,7 @@ def main() -> int:
         if d.get("ai_image_path") and not args.force:
             print(f"Already has image: {d['ai_image_path']} (use --force to regenerate)")
             return 0
-        prompt = args.prompt or build_prompt(d["brand"], d.get("body_text", ""), d.get("visual_description", ""))
-        path = generate_draft_image(
-            prompt, brand=d["brand"], platform=d.get("platform", ""),
-            draft_id=d["id"], model=args.model,
-        )
+        path = generate_post_image(d, model=args.model, scene_prompt=args.prompt)
         if not path:
             print(f"Image generation failed for {args.draft_id}")
             return 1
@@ -483,7 +476,7 @@ def main() -> int:
         # text+image draft (cheapest-first, free fallback), then deliver the whole
         # batch to Discord grouped by brand. text+video shows copy only here;
         # the video is generated on approval (Phase 2).
-        from draft_media import generate_draft_image, build_prompt
+        from draft_media import generate_post_image
         from discord_digest import deliver_discord_digest
 
         drafts = list_recent_drafts(args.since_minutes)
@@ -498,10 +491,7 @@ def main() -> int:
             ct = d.get("content_type", "text")
             if "image" not in ct or d.get("ai_image_path"):
                 continue
-            prompt = build_prompt(d["brand"], d.get("body_text", ""), d.get("visual_description", ""))
-            path = generate_draft_image(
-                prompt, brand=d["brand"], platform=d.get("platform", ""), draft_id=d["id"],
-            )
+            path = generate_post_image(d)
             if path:
                 update_draft_ai_image_path(d["id"], path)
                 d["ai_image_path"] = path
@@ -520,14 +510,11 @@ def main() -> int:
             brand = d["brand"]
             platform = d["platform"]
             ct = d.get("content_type", "text")
-            from draft_media import generate_draft_image, generate_draft_video, build_prompt
+            from draft_media import generate_post_image, generate_draft_video
 
             # Ensure a base image exists for any visual post.
             if ("image" in ct or "video" in ct) and not d.get("ai_image_path"):
-                img = generate_draft_image(
-                    build_prompt(brand, d.get("body_text", ""), d.get("visual_description", "")),
-                    brand=brand, platform=platform, draft_id=d["id"],
-                )
+                img = generate_post_image(d)
                 if img:
                     update_draft_ai_image_path(d["id"], img)
                     d["ai_image_path"] = img

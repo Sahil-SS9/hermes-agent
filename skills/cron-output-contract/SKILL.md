@@ -622,3 +622,60 @@ Base: `/home/kensei/.hermes/templates/cron-digest-template.html`. Content digest
 ## Legacy Delivery Mapping
 
 Older Telegram topic mappings may still exist in historical files such as `references/delivery-mapping.txt` or `/home/kensei/.hermes/cron-delivery-mapping.txt`. Treat them as migration evidence, not current truth. For live routing, inspect active cron `deliver` fields and gateway defaults, then produce the Notification Delivery Audit table above.
+
+## Evidence Gate — claims must be backed by verification (MANDATORY)
+
+This applies to EVERY cron that reports system, pipeline, service, or task state: triage, content review, mailbox, ops/system health, kanban reconciliation, fork-integrity, and any monitor that posts a "what's wrong" message to Discord.
+
+### The rule
+
+Any **state or causal assertion** in delivered output MUST be backed by a cited observation made in this run. A state/causal assertion is any claim that something is broken, missing, stale, failing, unregistered, not running, or that names a cause. Examples that trigger the gate:
+
+- "X is not registered" / "no scheduled jobs"
+- "file/path/script does not exist"
+- "CI is failing" / "tests failing"
+- "service is down" / "process not found"
+- "zero drafts today" / "pipeline produced nothing"
+- "cron points to the wrong path"
+
+For each such claim you must have actually run the check and you must show its provenance. Acceptable evidence is one of:
+
+- the exact command run and a literal snippet of its output (e.g. `hermes cron list | grep content-engine` produced `content-engine-daily ... ok`)
+- a file stat or listing (e.g. `ls -la /path` shows it exists, or `ls: No such file` shows it does not)
+- an exit code (e.g. `gh run view <id> --json conclusion` returned `failure`)
+- a query result against the authoritative datastore (e.g. a row count from the canonical DB)
+
+### How to phrase it
+
+Add an `Evidence:` marker to the finding carrying the proof. Pattern:
+
+```
+**What's happening:** content-engine cron is unregistered, zero drafts today.
+Evidence: `hermes cron list` (base store) shows no content-engine job; `SELECT count(*) FROM drafts WHERE date(created_at)=date('now')` returned 0
+```
+
+### When you cannot verify
+
+If you did not run the check, or the check was inconclusive, you MUST NOT assert a root cause. Phrase the line as:
+
+```
+**Symptom observed — cause unconfirmed:** <the raw symptom>. Not verified: <what you would need to check>.
+```
+
+Never present an inferred or plausible-sounding cause as fact. A guessed file path, a presumed "not registered", or a cause carried over from an upstream alert without re-checking is a contract violation.
+
+### No action on unconfirmed findings
+
+Do not auto-close, auto-escalate, file a fix task, or recommend a destructive/config/spend action on a finding that is `cause unconfirmed`. Unconfirmed findings may only be surfaced for human review, clearly labelled as unconfirmed.
+
+### Authoritative sources (check these, not proxies)
+
+- cron registration: `hermes cron list` in the **base store** (no `--profile`); a profile-scoped list is not authoritative and routinely shows "No scheduled jobs".
+- CI status: `gh run list` / `gh run view` conclusion plus exit code, not an email notification. `action_required` means approval-gated, NOT failing.
+- content freshness: row count in the canonical `content_engine.db`, not a stale in-prompt snapshot.
+- file/script existence: an actual `ls`/stat of the path, not an assumed convention.
+- service/process state: `ps`/`systemctl`/a health probe, not a single past error line.
+
+### Regression guard
+
+`/home/kensei/.hermes/scripts/cron-output-lint.py` flags strong causal assertions in visible output that lack a nearby evidence citation. Run it after any prompt/script change; it must return zero issues before a fix is called done.

@@ -10,6 +10,7 @@ Uses correct CLI: promote (triage→todo), block (triage→blocked).
 import subprocess
 import json
 import os
+import sys
 import time
 import sqlite3
 from datetime import datetime, timedelta
@@ -118,6 +119,7 @@ def main():
                 auto_promoted.append({'id': task_id, 'board': board, 'title': title})
             else:
                 errors.append({'id': task_id, 'board': board, 'title': title, 'error': 'promote failed'})
+                print(f"[ERROR] promote failed for {task_id} ({board}): {title[:80]}", file=sys.stderr)
         else:
             reason = f"Needs Sahil's decision: {title[:120]}"
             if block_task(task_id, board, reason):
@@ -132,6 +134,7 @@ def main():
                 })
             else:
                 errors.append({'id': task_id, 'board': board, 'title': title, 'error': 'block failed'})
+                print(f"[ERROR] block failed for {task_id} ({board}): {title[:80]}", file=sys.stderr)
 
     # Pipeline bypass check
     bypass_found = []

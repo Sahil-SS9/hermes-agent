@@ -764,9 +764,11 @@ def _generate_activity_draft(brand: str, topic: dict, platform: str, content_typ
         body = _fill_variables(candidate, variables) or candidate
         audit_result = _audit_slop(body)
 
+    # Textless scene briefs only (no text/typography/UI -- the headline is a
+    # Pillow overlay added later; see prompt_templates.build_scene_prompt).
     visual_descs = {
-        "sahil_twitter": "Dark terminal aesthetic. Code overlay, monospace font, build-in-public style.",
-        "sahil_linkedin": "Professional graphic with clean typography. Quote-style layout, grey tones with red accent.",
+        "sahil_twitter": "a moody developer desk at night, warm screen glow, minimal",
+        "sahil_linkedin": "a clean modern professional workspace, soft neutral light",
     }
 
     return {
@@ -834,12 +836,14 @@ def generate_drafts(brand, topics, platform=None, count_per_topic=1):
                         body = body2
                         audit_result = audit2
 
+                # Textless scene briefs only (no text/typography/UI/branding --
+                # the headline is added later as a crisp Pillow overlay).
                 visual_descs = {
-                    "matchdaymaestro": "Dark background with neon red accents. Bold typography, game-style UI, MatchdayMaestro branding.",
-                    "plenishd": "Warm kitchen scene, natural lighting. Plenishd Yellow on dark background. Split-screen lifestyle aesthetic.",
-                    "sahil_twitter": "Dark terminal aesthetic. Code overlay, monospace font, build-in-public style.",
-                    "sahil_linkedin": "Professional graphic with clean typography. Quote-style layout, grey tones with red accent.",
-                    "coachos": "Coach on sidelines, clipboard overlay. Natural grass tones, green accent on dark.",
+                    "matchdaymaestro": "a floodlit football stadium at night, dramatic atmosphere",
+                    "plenishd": "a warm sunlit kitchen scene, fresh ingredients, appetising",
+                    "sahil_twitter": "a moody developer desk at night, warm screen glow, minimal",
+                    "sahil_linkedin": "a clean modern professional workspace, soft neutral light",
+                    "coachos": "a grassroots football pitch on an overcast morning, players training",
                 }
 
                 draft = {
