@@ -5,9 +5,15 @@
 # that don't properly die — they get reparented to PID 1 (init) and accumulate
 # as orphans, wasting ~30MB each.
 #
-# v3 — 03/06/26: silent-by-default with delta detection.
-# The previous version printed a 600-byte report to Discord on every run
-# (every 15m) which flooded the channel. New contract:
+# v4 — 03/06/26: fix false-positive kills of systemd-managed specialist gateways.
+# v3 introduced delta detection but still classified ALL PPID=1 processes as orphans,
+# which killed 11 legitimate per-profile systemd gateway services every 15 minutes.
+# 
+# v4 fix: any PID that belongs to a hermes-gateway*.service systemd unit is NEVER
+# classified as an orphan, regardless of PPID. Only truly orphaned processes
+# (PPID=1 and NOT tracked by any systemd service) are killed.
+#
+# Silent-by-default contract (unchanged from v3):
 #   - 0 orphans            -> completely silent (no stdout, no Discord)
 #   - 1+ orphans, count    ->  silent (cleanup is working as expected)
 #     not worse than last
@@ -20,8 +26,6 @@
 # Usage:
 #   ./kill-orphan-gateways.sh          # dry-run (print what would be killed)
 #   ./kill-orphan-gateways.sh --apply  # actually kill (default when non-tty)
-#
-# State: ~/.hermes/state/gateway-orphan-watchdog.json
 set -euo pipefail
 
 DRY_RUN=true
@@ -38,6 +42,16 @@ STATE_DIR="${HOME}/.hermes/state"
 STATE_FILE="${STATE_DIR}/gateway-orphan-watchdog.json"
 
 mkdir -p "$STATE_DIR"
+
+# Build a set of PIDs tracked by ANY hermes-gateway systemd service.
+# These are legitimate processes, NOT orphans, regardless of their PPID.
+declare -A SYSTEMD_PIDS
+for svc in $(systemctl list-units --type=service --state=running --no-legend 2>/dev/null | grep -oP 'hermes-gateway\S*\.service' || true); do
+    main_pid=$(systemctl show -p MainPID --value "$svc" 2>/dev/null || true)
+    if [[ -n "$main_pid" && "$main_pid" != "0" ]]; then
+        SYSTEMD_PIDS[$main_pid]=1
+    fi
+done
 
 # Find all gateway --replace processes
 mapfile -t GATEWAY_PIDS < <(ps -eo pid,ppid,lstart,args --no-headers \
@@ -71,14 +85,19 @@ if [[ -z "$PRIMARY" ]] && (( GATEWAY_TOTAL > 0 )); then
 fi
 PRIMARY_PPID=$(ps -o ppid= -p "$PRIMARY" 2>/dev/null | tr -d ' ' || echo "?")
 
-# Classify: orphans are PPID=1, anything else is "kept".
-# CRITICAL: the keeper PRIMARY (resolved above) is ALWAYS excluded from
-# KILL_LIST even if its PPID is 1. systemd-tracked services can have a
-# real MainPID with PPID=1 after the original parent wrapper exits.
+# Classify: orphans are processes that are PPID=1 AND NOT tracked by any
+# systemd hermes-gateway service. Systemd-managed services always have PPID=1
+# (because systemd IS PID 1) but they are legitimate, NOT orphans.
 KILL_LIST=()
 KEPT_LIST=()
 for pid in "${GATEWAY_PIDS[@]}"; do
+    # Always protect the PRIMARY keeper
     if [[ -n "$PRIMARY" && "$pid" == "$PRIMARY" ]]; then
+        KEPT_LIST+=("$pid")
+        continue
+    fi
+    # Protect ANY PID tracked by a hermes-gateway systemd service
+    if [[ -n "${SYSTEMD_PIDS[$pid]+_}" ]]; then
         KEPT_LIST+=("$pid")
         continue
     fi
@@ -97,6 +116,11 @@ if ! $DRY_RUN; then
         # Triple-check: never kill the keeper, even if classification slipped.
         if [[ -n "$PRIMARY" && "$pid" == "$PRIMARY" ]]; then
             echo "  [SKIP] $pid is PRIMARY — refusing to kill" >&2
+            continue
+        fi
+        # Quadruple-check: never kill a systemd-tracked PID.
+        if [[ -n "${SYSTEMD_PIDS[$pid]+_}" ]]; then
+            echo "  [SKIP] $pid is tracked by a systemd service — refusing to kill" >&2
             continue
         fi
         rss_kb=$(ps -o rss= -p "$pid" 2>/dev/null | tr -d ' ' || echo 0)
@@ -165,7 +189,7 @@ if $SHOULD_ALERT; then
     echo "🟡 Gateway Orphan Watchdog — ${ts}"
     echo "Reason: ${ALERT_REASON}"
     echo "Primary: PID ${PRIMARY:-?} (PPID=${PRIMARY_PPID:-?})"
-    echo "Total gateway --replace: ${TOTAL}  |  Orphans (PPID=1): ${ORPHAN_COUNT}  |  Kept: ${KEPT_COUNT}"
+    echo "Total gateway --replace: ${TOTAL}  |  Orphans (PPID=1, not systemd): ${ORPHAN_COUNT}  |  Systemd-kept: ${KEPT_COUNT}"
     if (( KILLED > 0 )); then
         echo "Killed this run: ${KILLED}  (~${KILLED_RAM_MB}MB RAM reclaimed)"
     fi
@@ -175,10 +199,7 @@ if $SHOULD_ALERT; then
         printf '  - %s\n' "${KILL_LIST[@]}"
     fi
     echo ""
-    echo "Investigate: hermes-gateway --replace restart cascade. Likely cause:"
-    echo "  - KillMode=mixed in hermes-gateway.service does not propagate SIGTERM"
-    echo "    to children → they reparent to PID 1 when the wrapper exits."
-    echo "  - Fix candidate: change KillMode to 'process' or 'cgroup' in the unit."
+    echo "Investigate: true orphan gateway processes with PPID=1 not tracked by systemd."
 fi
 # Silent when healthy. Exit 0 always.
 exit 0
