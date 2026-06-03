@@ -52,10 +52,10 @@ def test_borrow_then_count(broker, temp_ledger):
 
 def test_revoke_appends_event_and_reduces_active(broker, temp_ledger):
     eid = broker.cmd_borrow("remii", "maps", "t_9", "ops")
-    assert eid not in broker._revoked_borrow_ids()
+    assert eid not in broker.revoked_borrow_ids()
     rc = broker.cmd_revoke(eid, "completed")
     assert rc == 0
-    assert eid in broker._revoked_borrow_ids()
+    assert eid in broker.revoked_borrow_ids()
     # append-only: a revoke event exists, the borrow row is untouched
     revokes = pal.query_events(event_types=["skill.revoked"])
     assert any((e["payload"] or {}).get("borrow_event_id") == eid for e in revokes)
@@ -85,8 +85,10 @@ def test_revoke_unknown_id_is_rejected(broker, temp_ledger):
 
 
 def test_unique_event_ids_no_grant_loss(broker, temp_ledger):
-    ids = {broker.cmd_borrow("octacon", "arxiv", f"t_{i}", "ops") for i in range(20)}
-    assert len(ids) == 20  # no collisions -> no silently-dropped grants
+    # Distinct skills so the per-skill frequency cap does not deny any borrow;
+    # this isolates the id-uniqueness property (no collision -> no dropped grant).
+    ids = {broker.cmd_borrow("octacon", f"skill-{i}", f"t_{i}", "ops") for i in range(20)}
+    assert len(ids) == 20  # no collisions
     assert len(pal.query_events(event_types=["skill.borrowed"])) == 20
 
 

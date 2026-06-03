@@ -70,7 +70,7 @@ def test_enabled_includes_always_skills(monkeypatch, tmp_path):
 
 def test_active_grant_reconciles_borrow_and_revoke(monkeypatch):
     """borrow with a matching revoke = no live grant; an unrevoked borrow = grant."""
-    from hermes_cli import profile_activity_ledger as pal
+    import tools.skill_grants as _sg
 
     def fake_query(*, event_types, target_profile=None, object_id=None, **_):
         if "skill.borrowed" in event_types:
@@ -79,13 +79,13 @@ def test_active_grant_reconciles_borrow_and_revoke(monkeypatch):
             return [{"payload": {"borrow_event_id": "b1"}}]  # only b1 revoked
         return []
 
-    monkeypatch.setattr(pal, "query_events", fake_query)
+    monkeypatch.setattr(_sg, "query_events", fake_query)
     # b2 is still live → grant active
     assert st._has_active_grant("octacon", "comfyui") is True
 
 
 def test_active_grant_false_when_all_revoked(monkeypatch):
-    from hermes_cli import profile_activity_ledger as pal
+    import tools.skill_grants as _sg
 
     def fake_query(*, event_types, **_):
         if "skill.borrowed" in event_types:
@@ -94,15 +94,15 @@ def test_active_grant_false_when_all_revoked(monkeypatch):
             return [{"payload": {"borrow_event_id": "b1"}}]
         return []
 
-    monkeypatch.setattr(pal, "query_events", fake_query)
+    monkeypatch.setattr(_sg, "query_events", fake_query)
     assert st._has_active_grant("octacon", "comfyui") is False
 
 
 def test_active_grant_fails_closed_on_error(monkeypatch):
-    from hermes_cli import profile_activity_ledger as pal
+    import tools.skill_grants as _sg
 
     def boom(**_):
         raise RuntimeError("ledger down")
 
-    monkeypatch.setattr(pal, "query_events", boom)
+    monkeypatch.setattr(_sg, "query_events", boom)
     assert st._has_active_grant("octacon", "comfyui") is False

@@ -3805,6 +3805,14 @@ def complete_task(
         summary=summary or result or f"Completed kanban task {task_id}",
         payload={"run_id": run_id, "created_cards": verified_cards},
     )
+    # Auto-revoke any temporary skill grants scoped to this task (Phase 3).
+    # Best-effort: a grant-revocation hiccup must never fail task completion.
+    try:
+        from tools.skill_grants import revoke_grants_for_task
+
+        revoke_grants_for_task(task_id, "completed")
+    except Exception:  # noqa: BLE001
+        logger.debug("skill grant auto-revoke failed for %s", task_id, exc_info=True)
     # Clean up the scratch workspace and any stale tmux session for the worker.
     _cleanup_workspace(conn, task_id)
     return True
@@ -4120,7 +4128,7 @@ def block_task(
     reason: Optional[str] = None,
     expected_run_id: Optional[int] = None,
 ) -> bool:
-    """Transition ``running -> blocked``."""
+    """Transition ``running/ready/triage -> blocked``."""
     with write_txn(conn):
         if expected_run_id is None:
             cur = conn.execute(
@@ -4131,7 +4139,7 @@ def block_task(
                        claim_expires= NULL,
                        worker_pid   = NULL
                  WHERE id = ?
-                   AND status IN ('running', 'ready')
+                   AND status IN ('running', 'ready', 'triage')
                 """,
                 (task_id,),
             )
@@ -4144,7 +4152,7 @@ def block_task(
                        claim_expires= NULL,
                        worker_pid   = NULL
                  WHERE id = ?
-                   AND status IN ('running', 'ready')
+                   AND status IN ('running', 'ready', 'triage')
                    AND current_run_id = ?
                 """,
                 (task_id, int(expected_run_id)),
@@ -6278,7 +6286,7 @@ def _record_task_failure(
                     "UPDATE tasks SET status = 'blocked', claim_lock = NULL, "
                     "claim_expires = NULL, worker_pid = NULL, "
                     "consecutive_failures = ?, last_failure_error = ? "
-                    "WHERE id = ? AND status IN ('running', 'ready')",
+                    "WHERE id = ? AND status IN ('running', 'ready', 'triage')",
                     (failures, error[:500], task_id),
                 )
             else:

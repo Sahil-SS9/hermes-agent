@@ -526,6 +526,25 @@ def _get_session_platform() -> str:
         return ""
 
 
+def _skill_exists(name: str) -> bool:
+    """True if a skill named ``name`` exists anywhere in the resolvable skill
+    dirs (local + external). Used to refuse grants for non-existent skills."""
+    try:
+        from agent.skill_utils import get_all_skills_dirs, is_excluded_skill_path
+
+        for d in get_all_skills_dirs():
+            if not d.exists():
+                continue
+            for md in d.rglob("SKILL.md"):
+                if is_excluded_skill_path(md):
+                    continue
+                if md.parent.name == name:
+                    return True
+        return False
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _current_profile() -> Optional[str]:
     """Resolve the active profile name from HERMES_HOME (gateways set HERMES_HOME,
     not HERMES_PROFILE). Falls back to the HERMES_PROFILE env if present."""
@@ -540,25 +559,13 @@ def _current_profile() -> Optional[str]:
 def _has_active_grant(profile: Optional[str], skill: str) -> bool:
     """True if ``profile`` holds a live temporary grant for ``skill``.
 
-    A grant is a ``skill.borrowed`` event with no matching ``skill.revoked``
-    (revoke carries ``payload.borrow_event_id``). Best-effort: any ledger error
-    means "no grant" so a broken ledger never silently unblocks access.
+    Delegates to the single grant engine (tools.skill_grants) so the
+    borrow/revoke reconciliation lives in exactly one place. Fails closed.
     """
-    if not profile:
-        return False
     try:
-        from hermes_cli.profile_activity_ledger import query_events
+        from tools.skill_grants import has_active_grant
 
-        borrows = query_events(
-            event_types=["skill.borrowed"], target_profile=profile, object_id=skill
-        )
-        if not borrows:
-            return False
-        revoked = {
-            (e.get("payload") or {}).get("borrow_event_id")
-            for e in query_events(event_types=["skill.revoked"], target_profile=profile, object_id=skill)
-        }
-        return any(b.get("event_id") not in revoked for b in borrows)
+        return has_active_grant(profile, skill)
     except Exception:  # noqa: BLE001
         return False
 
@@ -585,6 +592,48 @@ def _skill_access_decision(resolved_name: str) -> str:
     if resolved_name in enabled or _has_active_grant(profile, resolved_name):
         return "allow"
     return "shadow_block" if mode == "shadow" else "block"
+
+
+def skill_request(skill: str, task_id: str, reason: str = "", **kwargs) -> str:
+    """Request a temporary, task-scoped grant for a skill not in your enabled set.
+
+    The skill broker evaluates the request against the NEVER_GRANT safety list
+    and a per-skill frequency cap. A granted skill becomes loadable with
+    skill_view for the duration of the task and is auto-revoked when the task
+    completes (or after a TTL). Repeated grants are tracked so Denji can decide
+    whether to enable the skill permanently for this profile.
+
+    Args:
+        skill: The skill name to borrow (must already exist in the library;
+            raw external skills are refused until rewritten — ask a lead/Denji).
+        task_id: The kanban task this grant is scoped to.
+        reason: Why the skill is needed for this task.
+    """
+    profile = _current_profile() or "default"
+    try:
+        from tools.skill_grants import grant_skill
+
+        # A grant only makes sense for a skill that exists in the library.
+        if not _skill_exists(skill):
+            return json.dumps(
+                {
+                    "success": False,
+                    "granted": False,
+                    "error": (
+                        f"Skill '{skill}' is not in the library. Ask the relevant lead "
+                        "or Denji to source/create it (external skills must be rewritten "
+                        "internally before use)."
+                    ),
+                },
+                ensure_ascii=False,
+            )
+        decision = grant_skill(profile, skill, task_id, reason)
+        decision["success"] = True
+        decision["profile"] = profile
+        decision["skill"] = skill
+        return json.dumps(decision, ensure_ascii=False)
+    except Exception as e:  # noqa: BLE001
+        return json.dumps({"success": False, "granted": False, "error": str(e)}, ensure_ascii=False)
 
 
 def _is_skill_disabled(name: str, platform: str = None) -> bool:
@@ -1634,4 +1683,40 @@ registry.register(
     handler=_skill_view_with_bump,
     check_fn=check_skills_requirements,
     emoji="📚",
+)
+
+
+SKILL_REQUEST_SCHEMA = {
+    "name": "skill_request",
+    "description": (
+        "Request temporary, task-scoped access to a skill that is not in your "
+        "enabled set. Use this when, mid-task, you need a skill you cannot load. "
+        "The broker checks safety (some capabilities are never granted) and a "
+        "frequency cap, then grants the skill for this task only; it is "
+        "auto-revoked when the task completes. If the skill does not exist, ask "
+        "the relevant lead or Denji to source/create it. Repeated requests are "
+        "tracked so the skill can be enabled permanently if you use it often."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "skill": {"type": "string", "description": "The skill name to borrow."},
+            "task_id": {"type": "string", "description": "The kanban task this grant is scoped to."},
+            "reason": {"type": "string", "description": "Why the skill is needed for this task."},
+        },
+        "required": ["skill", "task_id"],
+    },
+}
+
+registry.register(
+    name="skill_request",
+    toolset="skills",
+    schema=SKILL_REQUEST_SCHEMA,
+    handler=lambda args, **kw: skill_request(
+        skill=args.get("skill"),
+        task_id=args.get("task_id") or kw.get("task_id"),
+        reason=args.get("reason", ""),
+    ),
+    check_fn=check_skills_requirements,
+    emoji="🙋",
 )
