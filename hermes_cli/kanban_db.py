@@ -2606,6 +2606,37 @@ def parent_results(conn: sqlite3.Connection, task_id: str) -> list[tuple[str, Op
     return [(r["id"], r["result"]) for r in rows]
 
 
+def collate_children(
+    conn: sqlite3.Connection, task_id: str,
+) -> list[dict]:
+    """Return done child results for a parent task (WS-5 collation).
+
+    Returns a list of dicts with keys: id, title, result, assignee.
+    Used by integrator/parent tasks to produce a rolled-up deliverable
+    from completed child work before calling kanban_complete.
+    """
+    rows = conn.execute(
+        """
+        SELECT t.id AS id, t.title AS title, t.result AS result,
+               t.assignee AS assignee
+        FROM tasks t
+        JOIN task_links l ON l.child_id = t.id
+        WHERE l.parent_id = ? AND t.status = 'done'
+        ORDER BY t.completed_at ASC
+        """,
+        (task_id,),
+    ).fetchall()
+    return [
+        {
+            "id": r["id"],
+            "title": r["title"],
+            "result": r["result"],
+            "assignee": r["assignee"],
+        }
+        for r in rows
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Comments & events
 # ---------------------------------------------------------------------------
