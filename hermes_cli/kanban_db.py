@@ -4338,6 +4338,36 @@ def edit_completed_task_result(
     return True
 
 
+# ---------------------------------------------------------------------------
+# Block / unblock
+# ---------------------------------------------------------------------------
+
+# WS-8 human-approval prefix — used by block_task when a full-tier task
+# needs explicit human go/no-go before proceeding.
+_HUMAN_APPROVAL_PREFIX = "needs_human_approval"
+
+
+def request_human_approval(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    detail: str,
+    expected_run_id: Optional[int] = None,
+) -> bool:
+    """Block a task awaiting explicit human approval (WS-8).
+
+    Used for full-tier go/no-go decisions. The task is blocked with
+    reason ``needs_human_approval: <detail>`` and must be explicitly
+    unblocked by a human before the dispatcher will touch it.
+    """
+    reason = f"{_HUMAN_APPROVAL_PREFIX}: {detail}" if detail else _HUMAN_APPROVAL_PREFIX
+    return block_task(
+        conn, task_id,
+        reason=reason,
+        expected_run_id=expected_run_id,
+    )
+
+
 def block_task(
     conn: sqlite3.Connection,
     task_id: str,
