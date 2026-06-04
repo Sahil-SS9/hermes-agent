@@ -7083,7 +7083,11 @@ def dispatch_once(
                 )
                 return result
     except Exception:
-        pass
+        _log.debug(
+            "dispatch_once: OOM backpressure probe failed — "
+            "skipping check (fails open)",
+            exc_info=True,
+        )
     # Same-profile stagger: when consecutive ready tasks share an assignee,
     # add 1-5s random delay between spawns to prevent PID race conditions on
     # shared profile state (temp files, lock files, state.db). (#t_b3aa7761)
