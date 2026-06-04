@@ -1981,6 +1981,17 @@ def _agent_cbs(sid: str) -> dict:
         "clarify_callback": lambda q, c: _block(
             "clarify.request", sid, {"question": q, "choices": c}
         ),
+        # ── KENSEI CUSTOM: ask_user_questions callback (plan/UltraPlan/recon) ──
+        # Per spec (2026-06-04): the new mode system uses a multi-question
+        # batched prompt instead of single ClarifyPrompt.  The callback
+        # emits a request event with the cleaned question list; the TUI
+        # renders the AskUserQuestionsTool overlay and sends back
+        # ask_user_questions.respond with a {index: label} dict.  See
+        # skill `agent-modes`.  Must survive upstream merges.
+        "ask_user_questions_callback": lambda questions: _block(        # KENSEI CUSTOM
+            "ask_user_questions.request", sid,                          # KENSEI CUSTOM
+            {"questions": questions},                                    # KENSEI CUSTOM
+        ),                                                              # KENSEI CUSTOM
     }
 
 
@@ -4994,6 +5005,29 @@ def _(rid, params: dict) -> dict:
     return _respond(rid, params, "answer")
 
 
+# ── KENSEI CUSTOM: ask_user_questions.respond handler ────────────────
+# Per spec (2026-06-04): the new mode system uses a multi-question
+# batched prompt.  The TUI's AskUserQuestionsTool calls this RPC with
+# {answers: {index: label}, request_id: ...}.  Unlike the other
+# ``*.respond`` handlers, the answer is a *dict* (one entry per
+# question), not a string, so we store it directly in ``_answers``
+# rather than going through ``_respond`` (which would coerce to str).
+# See skill `agent-modes`.  Must survive upstream merges.
+@method("ask_user_questions.respond")                              # KENSEI CUSTOM
+def _(rid, params: dict) -> dict:                                  # KENSEI CUSTOM
+    r = params.get("request_id", "")                                # KENSEI CUSTOM
+    entry = _pending.get(r)                                         # KENSEI CUSTOM
+    if not entry:                                                   # KENSEI CUSTOM
+        return _err(rid, 4009, "no pending ask_user_questions request")  # KENSEI CUSTOM
+    _, ev = entry                                                    # KENSEI CUSTOM
+    answers = params.get("answers", {})                             # KENSEI CUSTOM
+    if not isinstance(answers, dict):                               # KENSEI CUSTOM
+        return _err(rid, 4002, "answers must be a dict[index, str]")  # KENSEI CUSTOM
+    _answers[r] = answers                                           # KENSEI CUSTOM
+    ev.set()                                                         # KENSEI CUSTOM
+    return _ok(rid, {"status": "ok"})                               # KENSEI CUSTOM
+
+
 @method("sudo.respond")
 def _(rid, params: dict) -> dict:
     return _respond(rid, params, "password")
@@ -5029,54 +5063,16 @@ def _(rid, params: dict) -> dict:
 # ── Methods: config ──────────────────────────────────────────────────
 
 
-_MODE_PROMPTS = {
-    "plan": (
-        "You are in plan mode.\n\n"
-        "Your workflow is:\n"
-        "1. Analyse the user's request.\n"
-        "2. Use the CLARIFY tool to ask structured questions with selection\n"
-        "   options where the request is ambiguous or needs decisions.\n"
-        "   Mark one choice as the preferred option by appending\n"
-        "   the text '(Recommended)' to it so the user can make a quick decision.\n"
-        "   Ask one question at a time — gather requirements iteratively.\n"
-        "3. After all clarifications are answered, collate the user's responses\n"
-        "   and produce a detailed implementation plan with steps, file paths,\n"
-        "   architecture decisions, and ordering.\n"
-        "4. Do NOT execute any tool calls that modify files or run code.\n"
-        "   You may read files to understand the codebase.\n"
-        "5. Stop after the plan is complete and await user confirmation."
-    ),
-    "gods_plan": (
-        "You are in ultra-plan mode.\n\n"
-        "Your workflow is:\n"
-        "1. Analyse the user's request.\n"
-        "2. Use the CLARIFY tool to ask structured questions with selection\n"
-        "   options for every meaningful decision point — architecture,\n"
-        "   dependencies, edge cases, trade-offs.\n"
-        "   Mark one choice as the preferred option by appending\n"
-        "   the text '(Recommended)' to it so the user can make a quick decision.\n"
-        "   Ask one question at a time.\n"
-        "3. After all clarifications are answered, produce a comprehensive\n"
-        "   plan with architecture decisions, file-by-file breakdown,\n"
-        "   dependencies, risks, estimated effort, edge cases, and ordering.\n"
-        "4. Do NOT execute any tool calls that modify files or run code.\n"
-        "   You may read files to understand the codebase.\n"
-        "5. Stop after the plan is complete and await user confirmation."
-    ),
-    "recon": (
-        "You are in reconnaissance mode. Your job is to research, search, "
-        "analyse, and summarise. Use web search and file reading tools to "
-        "gather information, then return a structured analysis with findings "
-        "and recommendations. Do not modify files or execute code."
-    ),
-}
-
-
-def _mode_prompt(mode: str) -> str | None:
-    """Return ephemeral_system_prompt for a mode, or None for auto."""
-    if mode == "auto":
-        return None
-    return _MODE_PROMPTS.get(mode)
+# ── KENSEI CUSTOM: agent mode prompts (plan / UltraPlan / recon / auto) ──
+# Per spec (2026-06-04): Plan mirrors Claude Code (0-3 ad-hoc Qs). UltraPlan
+# expands to 10-15 Qs in batches plus Mermaid/HTML diagrams. Recon asks 4
+# upfront Qs and dispatches to specialised agent profiles sequentially.
+# Prompts live in hermes_cli/mode_prompts.py (single source of truth).
+# See skill `agent-modes` for full spec.  Must survive upstream merges.
+from hermes_cli.mode_prompts import (  # KENSEI CUSTOM
+    get_mode_prompt as _mode_prompt,    # KENSEI CUSTOM
+    mode_label as _mode_label,           # KENSEI CUSTOM
+)                                        # KENSEI CUSTOM
 
 
 @method("config.set")

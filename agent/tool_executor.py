@@ -938,6 +938,19 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
             tool_duration = time.time() - tool_start_time
             if agent._should_emit_quiet_tool_messages():
                 agent._vprint(f"  {_get_cute_tool_message_impl('clarify', function_args, tool_duration, result=function_result)}")
+        elif function_name == "ask_user_questions":                                # KENSEI CUSTOM
+            # ── KENSEI CUSTOM: dispatch to new multi-question batched tool ──
+            # Per spec (2026-06-04).  See skill `agent-modes`.
+            from tools.ask_user_questions_tool import ask_user_questions_tool as _auq_tool  # KENSEI CUSTOM
+            function_result = _auq_tool(                                                # KENSEI CUSTOM
+                questions=function_args.get("questions", []),                          # KENSEI CUSTOM
+                callback=getattr(agent, "ask_user_questions_callback", None),          # KENSEI CUSTOM
+            )                                                                          # KENSEI CUSTOM
+            tool_duration = time.time() - tool_start_time                              # KENSEI CUSTOM
+            if agent._should_emit_quiet_tool_messages():                               # KENSEI CUSTOM
+                agent._vprint(                                                        # KENSEI CUSTOM
+                    f"  {_get_cute_tool_message_impl('ask_user_questions', function_args, tool_duration, result=function_result)}"  # KENSEI CUSTOM
+                )                                                                     # KENSEI CUSTOM
         elif function_name == "delegate_task":
             tasks_arg = function_args.get("tasks")
             if tasks_arg and isinstance(tasks_arg, list):

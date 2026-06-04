@@ -144,7 +144,7 @@ COMMAND_REGISTRY: list[CommandDef] = [
                subcommands=("on", "off", "status")),
     CommandDef("yolo", "Toggle YOLO mode (skip all dangerous command approvals)",
                "Configuration"),
-    CommandDef("mode", "Agent execution mode: plan, gods_plan, recon, auto",
+    CommandDef("mode", "Agent execution mode: plan, UltraPlan, recon, auto",
                "Configuration", args_hint="[auto|plan|gods_plan|recon]",
                subcommands=("auto", "plan", "gods_plan", "recon")),
     CommandDef("reasoning", "Manage reasoning effort and display", "Configuration",

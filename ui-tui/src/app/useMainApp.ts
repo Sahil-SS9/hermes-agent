@@ -617,6 +617,61 @@ export function useMainApp(gw: GatewayClient) {
     [appendMessage, overlay.clarify, rpc, sys]
   )
 
+  // ── KENSEI CUSTOM: AskUserQuestionsTool answer handler ─────────────
+  // Per spec (2026-06-04): new mode system uses multi-question batched
+  // prompt.  Sends answers back to the gateway via a dedicated RPC.
+  // See skill `agent-modes`.  Must survive upstream merges.
+  const answerAskUserQuestions = useCallback(
+    (answers: Record<number, string>, requestId: string) => {
+      const req = overlay.askUserQuestions
+
+      if (!req || !req.requestId) {
+        return
+      }
+
+      const label = toolTrailLabel('ask_user_questions')
+      turnController.turnTools = turnController.turnTools.filter(line => !sameToolTrailGroup(label, line))
+      patchTurnState({ turnTrail: turnController.turnTools })
+
+      void requestId
+      const hasAnswers = Object.keys(answers).length > 0
+      if (hasAnswers) {
+        // Render each question/answer as a user-style trail so the transcript
+        // shows what was selected, even before the agent sees the response.
+        const lines = req.questions.map((q, i) => {
+          const answer = answers[i]
+          if (answer === undefined) return null
+          return `Q${i + 1}: ${q.question}\n   → ${answer}`
+        }).filter(Boolean).join('\n')
+
+        turnController.persistedToolLabels.add(label)
+        appendMessage({
+          kind: 'trail',
+          role: 'system',
+          text: '',
+          tools: [buildToolTrailLine('ask_user_questions', `${req.questions.length} question${req.questions.length === 1 ? '' : 's'}`)]
+        })
+        appendMessage({ role: 'user', text: lines })
+        patchUiState({ status: 'running…' })
+      } else {
+        sys('AskUserQuestions cancelled')
+      }
+
+      // Clear overlay immediately for snappy UX
+      patchOverlayState({ askUserQuestions: null })
+
+      // Forward to the gateway so the agent tool thread unblocks
+      // (matches the clarify.respond pattern).
+      rpc('ask_user_questions.respond', {
+        answers,
+        request_id: req.requestId
+      }).catch(() => {
+        // Best-effort — the trail message above already updated the user-visible state.
+      })
+    },
+    [appendMessage, overlay.askUserQuestions, rpc, sys]
+  )
+
   const paste = useCallback(
     (quiet = false) =>
       rpc<ClipboardPasteResponse>('clipboard.paste', { session_id: getUiState().sid }).then(r => {
@@ -1015,6 +1070,7 @@ export function useMainApp(gw: GatewayClient) {
       activateLiveSession: session.activateLiveSession,
       closeLiveSession,
       answerApproval,
+      answerAskUserQuestions,
       answerClarify,
       answerPromptOptimization,
       answerSecret,

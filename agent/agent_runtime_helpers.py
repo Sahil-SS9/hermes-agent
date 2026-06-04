@@ -1747,6 +1747,17 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
                 callback=agent.clarify_callback,
             )
         )
+    elif function_name == "ask_user_questions":                                # KENSEI CUSTOM
+        # ── KENSEI CUSTOM: dispatch to new multi-question batched tool ──────
+        # Per spec (2026-06-04): plan/UltraPlan/recon modes use this tool
+        # instead of single-question clarify.  See skill `agent-modes`.
+        from tools.ask_user_questions_tool import ask_user_questions_tool as _auq_tool  # KENSEI CUSTOM
+        return _finish_agent_tool(                                              # KENSEI CUSTOM
+            _auq_tool(                                                         # KENSEI CUSTOM
+                questions=function_args.get("questions", []),                  # KENSEI CUSTOM
+                callback=getattr(agent, "ask_user_questions_callback", None),  # KENSEI CUSTOM
+            )                                                                  # KENSEI CUSTOM
+        )                                                                      # KENSEI CUSTOM
     elif function_name == "delegate_task":
         return _finish_agent_tool(agent._dispatch_delegate_task(function_args))
     else:

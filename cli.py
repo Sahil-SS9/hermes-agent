@@ -5234,6 +5234,7 @@ class HermesCLI:
                 platform="cli",
                 session_db=self._session_db,
                 clarify_callback=self._clarify_callback,
+                ask_user_questions_callback=self._ask_user_questions_callback,  # KENSEI CUSTOM
                 reasoning_callback=self._current_reasoning_callback(),
 
                 fallback_model=self._fallback_model,
@@ -10233,7 +10234,18 @@ class HermesCLI:
     # ── KENSEI CUSTOM: /mode command (plan / gods_plan / recon / auto) ──
     # See skill `agent-modes` for full spec.  Must survive upstream merges.
     def _handle_mode_command(self, cmd: str):
-        """Handle /mode — set agent execution mode."""
+        """Handle /mode — set agent execution mode.
+
+        Prompts live in hermes_cli/mode_prompts.py (single source of
+        truth — cli.py and tui_gateway/server.py both import from
+        there).  See skill `agent-modes`.  Must survive upstream merges.
+        """
+        # ── KENSEI CUSTOM: shared mode prompts (plan/UltraPlan/recon/auto) ──
+        from hermes_cli.mode_prompts import (                    # KENSEI CUSTOM
+            get_mode_prompt, detect_mode, mode_label,           # KENSEI CUSTOM
+        )                                                       # KENSEI CUSTOM
+        # ── END KENSEI CUSTOM ──
+
         VALID_MODES = {
             "auto": None,
             "plan": "plan",
@@ -10245,14 +10257,8 @@ class HermesCLI:
 
         if not arg or arg == "status":
             current = getattr(self.agent, "ephemeral_system_prompt", "") or ""
-            mode = "auto"
-            if "plan mode" in current:
-                mode = "plan"
-            elif "ultra-plan mode" in current:
-                mode = "gods_plan"
-            elif "reconnaissance mode" in current:
-                mode = "recon"
-            _cprint(f"  mode: {mode}")
+            mode = detect_mode(current)
+            _cprint(f"  mode: {mode_label(mode)}")
             if mode != "auto":
                 _cprint(f"  {_DIM}Shift+Tab to cycle, /mode auto to reset{_RST}")
             return
@@ -10263,53 +10269,10 @@ class HermesCLI:
             return
 
         mode = arg
-        prompt = None
-        if mode == "plan":
-            prompt = (
-                "You are in plan mode.\n\n"
-                "Your workflow is:\n"
-                "1. Analyse the user's request.\n"
-                "2. Use the CLARIFY tool to ask structured questions with selection\n"
-                "   options where the request is ambiguous or needs decisions.\n"
-                "   Mark one choice as the preferred option by appending\n"
-                "   the text '(Recommended)' to it so the user can make a quick decision.\n"
-                "   Ask one question at a time — gather requirements iteratively.\n"
-                "3. After all clarifications are answered, collate the user's responses\n"
-                "   and produce a detailed implementation plan with steps, file paths,\n"
-                "   architecture decisions, and ordering.\n"
-                "4. Do NOT execute any tool calls that modify files or run code.\n"
-                "   You may read files to understand the codebase.\n"
-                "5. Stop after the plan is complete and await user confirmation."
-            )
-        elif mode == "gods_plan":
-            prompt = (
-                "You are in ultra-plan mode.\n\n"
-                "Your workflow is:\n"
-                "1. Analyse the user's request.\n"
-                "2. Use the CLARIFY tool to ask structured questions with selection\n"
-                "   options for every meaningful decision point — architecture,\n"
-                "   dependencies, edge cases, trade-offs.\n"
-                "   Mark one choice as the preferred option by appending\n"
-                "   the text '(Recommended)' to it so the user can make a quick decision.\n"
-                "   Ask one question at a time.\n"
-                "3. After all clarifications are answered, produce a comprehensive\n"
-                "   plan with architecture decisions, file-by-file breakdown,\n"
-                "   dependencies, risks, estimated effort, edge cases, and ordering.\n"
-                "4. Do NOT execute any tool calls that modify files or run code.\n"
-                "   You may read files to understand the codebase.\n"
-                "5. Stop after the plan is complete and await user confirmation."
-            )
-        elif mode == "recon":
-            prompt = (
-                "You are in reconnaissance mode. Your job is to research, search, "
-                "analyse, and summarise. Use web search and file reading tools to "
-                "gather information, then return a structured analysis with findings "
-                "and recommendations. Do not modify files or execute code."
-            )
-
+        prompt = get_mode_prompt(mode)
         if hasattr(self, "agent") and self.agent:
             self.agent.ephemeral_system_prompt = prompt
-        _cprint(f"  mode → {mode}")
+        _cprint(f"  mode → {mode_label(mode)}")
         if mode != "auto":
             _cprint(f"  {_DIM}Shift+Tab to cycle, /mode auto to reset{_RST}")
 
@@ -11890,6 +11853,75 @@ class HermesCLI:
             "The user did not provide a response within the time limit. "
             "Use your best judgement to make the choice and proceed."
         )
+
+    def _ask_user_questions_callback(self, questions):
+        """
+        Platform callback for the ask_user_questions tool (plan / UltraPlan
+        / recon modes).  Called from the agent thread.
+
+        Per spec (2026-06-04): the new mode system uses a multi-question
+        batched prompt instead of single ClarifyPrompt.  The TUI renders a
+        proper boxed overlay; the CLI falls back to a numbered list with
+        per-question input.  This is intentionally simpler than the TUI —
+        the spec puts the polished UI in the TUI, the CLI is a flat
+        numbered interface that respects the same wire contract.
+
+        Sends "__other__" for the synthetic "Other" option; the Python
+        tool's ``_coerce_answer`` translates that into a structured
+        ``needs_followup`` response so the model can call ``clarify``
+        (the legacy tool with inline text capture) for free-form text.
+        """
+        # ── KENSEI CUSTOM: ask_user_questions callback (plan/UltraPlan/recon) ──
+        # See skill `agent-modes`.  Must survive upstream merges.
+        from tools.ask_user_questions_tool import OTHER_SENTINEL  # KENSEI CUSTOM
+        # ── END KENSEI CUSTOM ──
+        import time as _time
+
+        answers = {}
+        for i, q in enumerate(questions):
+            text = q.get("question", "").strip()
+            opts = q.get("options", [])
+            recommended_idx = next(
+                (j for j, o in enumerate(opts) if o.get("recommended")),
+                None,
+            )
+
+            _cprint(f"\n  {_BOLD}Q{i + 1}/{len(questions)}:{_RST} {text}")
+            for j, opt in enumerate(opts):
+                marker = "  (Recommended)" if j == recommended_idx else ""
+                desc = opt.get("description") or ""
+                _cprint(f"    {j + 1}. {opt.get('label', '')}{marker}")
+                if desc:
+                    _cprint(f"       {_DIM}{desc}{_RST}")
+            other_n = len(opts) + 1
+            _cprint(f"    {other_n}. Other (free-form follow-up)")
+
+            deadline = _time.monotonic() + 60
+            while True:
+                remaining = deadline - _time.monotonic()
+                if remaining <= 0:
+                    _cprint(f"  {_DIM}(timed out — question skipped){_RST}")
+                    break
+                try:
+                    raw = input(f"  {_DIM}Pick 1-{other_n}: {_RST}").strip()
+                except EOFError:
+                    raw = ""
+                if not raw:
+                    continue
+                try:
+                    n = int(raw)
+                except ValueError:
+                    _cprint(f"  {_DIM}Enter a number 1-{other_n}.{_RST}")
+                    continue
+                if n < 1 or n > other_n:
+                    _cprint(f"  {_DIM}Enter a number 1-{other_n}.{_RST}")
+                    continue
+                if n == other_n:
+                    answers[i] = OTHER_SENTINEL
+                else:
+                    answers[i] = opts[n - 1].get("label", "")
+                break
+        return answers
 
     def _sudo_password_callback(self) -> str:
         """

@@ -109,6 +109,28 @@ export interface ClarifyReq {
   requestId: string
 }
 
+// ── KENSEI CUSTOM: AskUserQuestionsTool overlay types ────────────────
+// Per spec (2026-06-04): the new mode system (plan / UltraPlan / recon)
+// uses a multi-question batched prompt instead of single ClarifyPrompt.
+// Mirrors Claude Code's AskUserQuestion tool.  Must survive upstream merges.
+export interface AskUserQuestionOption {
+  description?: string
+  label: string
+  recommended?: boolean
+}
+
+export interface AskUserQuestion {
+  header?: string
+  multiSelect?: boolean
+  options: AskUserQuestionOption[]
+  question: string
+}
+
+export interface AskUserQuestionsReq {
+  questions: AskUserQuestion[]
+  requestId: string
+}
+
 export interface Msg {
   info?: SessionInfo
   kind?: 'diff' | 'intro' | 'panel' | 'slash' | 'trail'

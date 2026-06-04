@@ -180,10 +180,11 @@ const ComposerPane = memo(function ComposerPane({
 
   // ── KENSEI CUSTOM: mode badge in prompt prefix ──
   // See skill `agent-modes` for full spec.  Must survive upstream merges.
+  // NOTE: 'gods_plan' is the internal AgentMode value; user-facing label is "UltraPlan".
   const MODE_BADGE: Record<string, string> = {
-    plan:       '📋 ',
-    gods_plan:  '👑 ',
-    recon:      '🔍 ',
+    plan:       '📋 Plan ',
+    gods_plan:  '👑 UltraPlan ',
+    recon:      '🔍 Recon ',
   }
   const modeBadge = MODE_BADGE[ui.agentMode] || ''
   const displayPrompt = modeBadge + promptText
@@ -433,6 +434,7 @@ export const AppLayout = memo(function AppLayout({
               <PromptZone
                 cols={composer.cols}
                 onApprovalChoice={actions.answerApproval}
+                onAskUserQuestionsAnswer={actions.answerAskUserQuestions}
                 onClarifyAnswer={actions.answerClarify}
                 onPromptOptimizationChoice={actions.answerPromptOptimization}
                 onSecretSubmit={actions.answerSecret}

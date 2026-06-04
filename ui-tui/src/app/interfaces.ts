@@ -9,6 +9,7 @@ import type { RpcResult } from '../lib/rpc.js'
 import type { Theme } from '../theme.js'
 import type {
   ApprovalReq,
+  AskUserQuestionsReq,
   ClarifyReq,
   ConfirmReq,
   DetailsMode,
@@ -76,6 +77,7 @@ export interface OverlayState {
   agents: boolean
   agentsInitialHistoryIndex: number
   approval: ApprovalReq | null
+  askUserQuestions: AskUserQuestionsReq | null
   clarify: ClarifyReq | null
   confirm: ConfirmReq | null
   modelPicker: boolean
@@ -317,6 +319,7 @@ export interface SlashHandlerContext {
 
 export interface AppLayoutActions {
   answerApproval: (choice: string) => void
+  answerAskUserQuestions: (answers: Record<number, string>, requestId: string) => void
   answerClarify: (answer: string) => void
   answerSecret: (value: string) => void
   answerSudo: (pw: string) => void
@@ -382,6 +385,7 @@ export interface AppOverlaysProps {
   compIdx: number
   completions: CompletionItem[]
   onApprovalChoice: (choice: string) => void
+  onAskUserQuestionsAnswer: (answers: Record<number, string>, requestId: string) => void
   onClarifyAnswer: (value: string) => void
   onActiveSessionSelect: (sessionId: string) => void
   onActiveSessionClose: (sessionId: string) => Promise<null | SessionCloseResponse>

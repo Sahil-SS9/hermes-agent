@@ -660,6 +660,41 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
         setStatus('waiting for input…')
 
         return
+      // ── KENSEI CUSTOM: ask_user_questions.request ─────────────────
+      // Per spec (2026-06-04): new mode system (plan / UltraPlan / recon)
+      // sends a multi-question batched payload.  The TUI renders the
+      // AskUserQuestionsTool overlay, user answers, we send
+      // ask_user_questions.respond back.  See skill `agent-modes`.
+      case 'ask_user_questions.request': {                           // KENSEI CUSTOM
+        const raw = Array.isArray(ev.payload.questions)             // KENSEI CUSTOM
+          ? ev.payload.questions                                    // KENSEI CUSTOM
+          : []                                                      // KENSEI CUSTOM
+        // Normalise: gateway may send raw {question,options,header,...}
+        // or already-cleaned list.  Tolerate both to keep the wire
+        // contract forgiving.                                            # KENSEI CUSTOM
+        const questions = raw.map((q: any) => ({                    // KENSEI CUSTOM
+          question: String(q.question ?? ''),                        // KENSEI CUSTOM
+          header: q.header != null ? String(q.header) : undefined,   // KENSEI CUSTOM
+          options: Array.isArray(q.options)                          // KENSEI CUSTOM
+            ? q.options.map((o: any) => ({                           // KENSEI CUSTOM
+                label: String(o.label ?? ''),                        // KENSEI CUSTOM
+                description: o.description != null                    // KENSEI CUSTOM
+                  ? String(o.description)                            // KENSEI CUSTOM
+                  : undefined,                                       // KENSEI CUSTOM
+                recommended: Boolean(o.recommended),                 // KENSEI CUSTOM
+              }))                                                    // KENSEI CUSTOM
+            : [],                                                    // KENSEI CUSTOM
+          multiSelect: Boolean(q.multiSelect),                       // KENSEI CUSTOM
+        }))                                                          // KENSEI CUSTOM
+        patchOverlayState({                                         // KENSEI CUSTOM
+          askUserQuestions: {                                       // KENSEI CUSTOM
+            questions,                                               // KENSEI CUSTOM
+            requestId: String(ev.payload.request_id ?? ''),          // KENSEI CUSTOM
+          },                                                         // KENSEI CUSTOM
+        })                                                           // KENSEI CUSTOM
+        setStatus('waiting for input…')                              // KENSEI CUSTOM
+        return                                                       // KENSEI CUSTOM
+      }                                                             // KENSEI CUSTOM
       case 'approval.request': {
         const description = String(ev.payload.description ?? 'dangerous command')
 

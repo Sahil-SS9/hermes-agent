@@ -168,6 +168,12 @@ def init_agent(
     thinking_callback: callable = None,
     reasoning_callback: callable = None,
     clarify_callback: callable = None,
+    # ── KENSEI CUSTOM: ask_user_questions callback (plan/UltraPlan/recon) ──
+    # Per spec (2026-06-04): the new mode system uses a multi-question
+    # batched prompt.  Provided by the platform layer (CLI or gateway).
+    # Signature: callback(questions: list[dict]) -> dict[index, str].
+    # If None, the ask_user_questions tool returns an error.
+    ask_user_questions_callback: callable = None,  # KENSEI CUSTOM
     step_callback: callable = None,
     stream_delta_callback: callable = None,
     interim_assistant_callback: callable = None,
@@ -395,6 +401,7 @@ def init_agent(
     agent.thinking_callback = thinking_callback
     agent.reasoning_callback = reasoning_callback
     agent.clarify_callback = clarify_callback
+    agent.ask_user_questions_callback = ask_user_questions_callback  # KENSEI CUSTOM
     agent.step_callback = step_callback
     agent.stream_delta_callback = stream_delta_callback
     agent.interim_assistant_callback = interim_assistant_callback

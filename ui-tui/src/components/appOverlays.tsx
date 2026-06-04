@@ -7,6 +7,7 @@ import { $overlayState, patchOverlayState } from '../app/overlayStore.js'
 import { $uiSessionId, $uiTheme } from '../app/uiStore.js'
 
 import { ActiveSessionSwitcher } from './activeSessionSwitcher.js'
+import { AskUserQuestionsTool } from './askUserQuestionsTool.js'
 import { FloatBox } from './appChrome.js'
 import { MaskedPrompt } from './maskedPrompt.js'
 import { ModelPicker } from './modelPicker.js'
@@ -20,11 +21,12 @@ const COMPLETION_WINDOW = 16
 export function PromptZone({
   cols,
   onApprovalChoice,
+  onAskUserQuestionsAnswer,
   onClarifyAnswer,
   onPromptOptimizationChoice,
   onSecretSubmit,
   onSudoSubmit
-}: Pick<AppOverlaysProps, 'cols' | 'onApprovalChoice' | 'onClarifyAnswer' | 'onPromptOptimizationChoice' | 'onSecretSubmit' | 'onSudoSubmit'>) {
+}: Pick<AppOverlaysProps, 'cols' | 'onApprovalChoice' | 'onAskUserQuestionsAnswer' | 'onClarifyAnswer' | 'onPromptOptimizationChoice' | 'onSecretSubmit' | 'onSudoSubmit'>) {
   const overlay = useStore($overlayState)
   const theme = useStore($uiTheme)
 
@@ -57,6 +59,23 @@ export function PromptZone({
     return (
       <Box flexDirection="column" flexShrink={0} paddingX={1} paddingY={1}>
         <ConfirmPrompt onCancel={onCancel} onConfirm={onConfirm} req={req} t={theme} />
+      </Box>
+    )
+  }
+
+  // ── KENSEI CUSTOM: AskUserQuestionsTool (new mode system overlay) ──
+  // Per spec (2026-06-04): plan / UltraPlan / recon modes use this batched
+  // multi-question prompt instead of single ClarifyPrompt.  See skill
+  // `agent-modes`.  Must survive upstream merges.
+  if (overlay.askUserQuestions) {
+    return (
+      <Box flexDirection="column" flexShrink={0} paddingX={1} paddingY={1}>
+        <AskUserQuestionsTool
+          onAnswer={onAskUserQuestionsAnswer}
+          onCancel={() => onAskUserQuestionsAnswer({}, overlay.askUserQuestions!.requestId)}
+          req={overlay.askUserQuestions}
+          t={theme}
+        />
       </Box>
     )
   }

@@ -519,8 +519,9 @@ export const sessionCommands: SlashCommand[] = [
 
   // ── KENSEI CUSTOM: agent mode slash command ──
   // See skill `agent-modes` for full spec.  Must survive upstream merges.
+  // NOTE: 'gods_plan' is the internal name; user-facing label is "UltraPlan".
   {
-    help: 'agent mode: plan, gods_plan, recon, auto [status]',
+    help: 'agent mode: plan, UltraPlan, recon, auto [status]',
     name: 'mode',
     usage: `/mode [${AGENT_MODES.join('|')}]`,
     run: (arg, ctx) => {
