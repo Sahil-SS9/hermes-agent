@@ -419,6 +419,13 @@ class SessionDB:
             )
             self._conn.row_factory = sqlite3.Row
             apply_wal_with_fallback(self._conn, db_label="state.db")
+            # Aggressive wal_autocheckpoint: checkpoint every ~400KB instead
+            # of SQLite's default 1000 pages (~4MB).  Combined with the
+            # _try_wal_checkpoint / _CHECKPOINT_EVERY_N_WRITES path below,
+            # this keeps the WAL file small even when PASSIVE checkpoints
+            # are blocked by concurrent read transactions from the gateway
+            # or other agents sharing state.db.  Same value as kanban_db.py.
+            self._conn.execute("PRAGMA wal_autocheckpoint=100")
             self._conn.execute("PRAGMA foreign_keys=ON")
 
             self._init_schema()

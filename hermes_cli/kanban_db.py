@@ -74,6 +74,7 @@ import contextlib
 import hashlib
 import json
 import os
+import random
 import re
 import secrets
 import shutil
@@ -6683,6 +6684,10 @@ def dispatch_once(
             # bucket it as nonspawnable if the profile genuinely isn't
             # there, with the existing diagnostic.
             _default_assignee_resolved = True
+    # Same-profile stagger: when consecutive ready tasks share an assignee,
+    # add 1-5s random delay between spawns to prevent PID race conditions on
+    # shared profile state (temp files, lock files, state.db). (#t_b3aa7761)
+    _last_stagger_assignee: Optional[str] = None
     for row in ready_rows:
         if max_spawn is not None and running_count + spawned >= max_spawn:
             break
@@ -6867,6 +6872,18 @@ def dispatch_once(
             # complete_task).
             result.spawned.append((claimed.id, claimed.assignee or "", str(workspace)))
             spawned += 1
+            # Same-profile stagger: if this task's assignee matches the
+            # previous spawn's assignee, sleep 1-5s to spread profile state
+            # access across the tick. Prevents race conditions when two
+            # workers share temp files, lock files, and state.db. (#t_b3aa7761)
+            if _last_stagger_assignee is not None and claimed.assignee == _last_stagger_assignee:
+                delay = random.uniform(1.0, 5.0)
+                _log.debug(
+                    "kanban dispatch: staggering %s by %.1fs (same profile %s)",
+                    claimed.id, delay, claimed.assignee,
+                )
+                time.sleep(delay)
+            _last_stagger_assignee = claimed.assignee
             # Track the new in-flight count for this profile so later
             # iterations in this same tick respect the per-profile cap
             # (#21582). Subsequent ticks re-query from the DB.
