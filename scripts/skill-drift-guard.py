@@ -53,6 +53,27 @@ def main() -> int:
         if BASE_STR not in [str(x) for x in ext]:
             link_findings.append(f"{pdir.name}: external_dirs missing base link")
 
+    # H1 guard: profiles that declare always_skills but resolve NO
+    # external_dirs cannot load those skills — fail as drift.
+    for pdir in sorted(PROF.iterdir()):
+        if any(x in pdir.parts for x in EXCLUDE):
+            continue
+        cfg = pdir / 'config.yaml'
+        if not cfg.exists():
+            continue
+        try:
+            c = yaml.safe_load(cfg.read_text()) or {}
+            skills_block = c.get('skills') or {}
+            always = skills_block.get('always_skills') or []
+            ext = skills_block.get('external_dirs') or []
+        except Exception:
+            continue
+        if always and not ext:
+            link_findings.append(
+                f"{pdir.name}: declares always_skills ({', '.join(always[:5])}{'...' if len(always) > 5 else ''}) "
+                f"but has no external_dirs — skills will not load"
+            )
+
     if not dup_findings and not link_findings:
         # Zero-signal: contract says stay silent.
         return 0

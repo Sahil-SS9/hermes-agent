@@ -6869,6 +6869,27 @@ def dispatch_once(
             # bucket it as nonspawnable if the profile genuinely isn't
             # there, with the existing diagnostic.
             _default_assignee_resolved = True
+    # OOM-aware spawn backpressure: skip new spawns when system free RAM
+    # drops below the configured threshold. The threshold defaults to
+    # 512 MB if not set in config (kanban.min_free_ram_mb). This prevents
+    # the dispatcher from compounding memory pressure when the VPS is
+    # already under memory stress (#Audit-H4a).
+    try:
+        from gateway.memory_monitor import get_system_free_ram_mb
+        from hermes_cli.config import get_kanban_config
+        _kanban_cfg = get_kanban_config()
+        _min_free_ram_mb = _kanban_cfg.get("min_free_ram_mb", 512)
+        if _min_free_ram_mb and _min_free_ram_mb > 0:
+            _free_mb = get_system_free_ram_mb()
+            if _free_mb is not None and _free_mb < _min_free_ram_mb:
+                _log.warning(
+                    "dispatch_once: free RAM %dMB below threshold %dMB — "
+                    "skipping spawns this tick",
+                    _free_mb, _min_free_ram_mb,
+                )
+                return result
+    except Exception:
+        pass
     # Same-profile stagger: when consecutive ready tasks share an assignee,
     # add 1-5s random delay between spawns to prevent PID race conditions on
     # shared profile state (temp files, lock files, state.db). (#t_b3aa7761)
