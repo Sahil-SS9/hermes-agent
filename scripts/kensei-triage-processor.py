@@ -22,6 +22,27 @@ PENDING_FILE = '/home/kensei/.hermes/data/pending-investigation.json'
 DB_PATH_BASE = '/home/kensei/.hermes/kanban/boards/'
 DEFAULT_DB = '/home/kensei/.hermes/kanban.db'
 
+def _get_board_db(board):
+    """Get the db_path for a board slug."""
+    if board == 'default':
+        return DEFAULT_DB
+    return os.path.join(DB_PATH_BASE, board, 'kanban.db')
+
+
+def _set_task_tier(board, task_id, tier):
+    """Persist the tier classification on a task."""
+    db_path = _get_board_db(board)
+    if not os.path.exists(db_path):
+        return
+    try:
+        conn = sqlite3.connect(db_path)
+        conn.execute("UPDATE tasks SET tier = ? WHERE id = ?", (tier, task_id))
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+
 def run_hermes_list(board, status):
     """Run hermes kanban list --status <status> --json for a board."""
     cmd = ['hermes', 'kanban', '--board', board, 'list', '--status', status, '--json']
@@ -69,18 +90,43 @@ def save_json(path, data):
         pass
 
 def classify_task(title, body):
+    """Classify triage task: AUTO-PROMOTE vs NEEDS HUMAN, and tier (fast/full)."""
     title_lower = title.lower() if title else ''
+    body_lower = (body or '').lower()
+
+    # Tier classification: fast vs full
+    # Full-tier keywords: product, feature, research, multi-step, build, implement
+    full_keywords = [
+        'product', 'feature', 'research', 'multi-step', 'build',
+        'implement', 'refactor', 'migrate', 'redesign', 'architecture',
+        'pipeline', 'workflow', 'end-to-end', 'deploy app',
+    ]
+    # Fast-tier keywords: ops, infra, config, cron, quick fix
+    fast_keywords = [
+        'config', 'cron', 'restart', 'health check', 'fix typo',
+        'update doc', 'add column', 'bump version', 'cleanup',
+        'orphan', 'stale', 'disk', 'lock', 'skill activation',
+    ]
+
+    tier = 'full'  # default: most triage tasks need full pipeline
+    for kw in fast_keywords:
+        if kw in title_lower or kw in body_lower:
+            tier = 'fast'
+            break
+
     needs_human_prefixes = ['fork/product:', 'adopt:', 'extract:', 'plugin/skill:']
     for prefix in needs_human_prefixes:
         if title_lower.startswith(prefix):
-            return 'NEEDS HUMAN'
+            return 'NEEDS HUMAN', tier
+
     auto_promote_keywords = ['orphan process', 'disk alert', 'lock file', 'stale config',
                              'uncommitted changes', 'missing-but-trivial files',
                              'skills tracking', 'usage data']
     for keyword in auto_promote_keywords:
         if keyword in title_lower:
-            return 'AUTO-PROMOTE'
-    return 'NEEDS HUMAN'
+            return 'AUTO-PROMOTE', tier
+
+    return 'NEEDS HUMAN', tier
 
 def main():
     all_triage = []
@@ -113,16 +159,18 @@ def main():
     errors = []
 
     for task_id, board, title, body, assignee in all_triage:
-        classification = classify_task(title, body)
+        classification, tier = classify_task(title, body)
         if classification == 'AUTO-PROMOTE':
             if promote_task(task_id, board):
-                auto_promoted.append({'id': task_id, 'board': board, 'title': title})
+                _set_task_tier(board, task_id, tier)
+                auto_promoted.append({'id': task_id, 'board': board, 'title': title, 'tier': tier})
             else:
                 errors.append({'id': task_id, 'board': board, 'title': title, 'error': 'promote failed'})
                 print(f"[ERROR] promote failed for {task_id} ({board}): {title[:80]}", file=sys.stderr)
         else:
             reason = f"Needs Sahil's decision: {title[:120]}"
             if block_task(task_id, board, reason):
+                _set_task_tier(board, task_id, tier)
                 pending_tasks.append({
                     'id': task_id,
                     'board': board,

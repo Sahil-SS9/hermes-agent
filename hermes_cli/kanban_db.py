@@ -1048,7 +1048,12 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- "compliance-q2"). Not a hierarchy; not validated against an
     -- allow-list. Set at create-time or via CLI; ``kanban_edit`` does
     -- not mutate this in v1 (scope-locked to ``skills``).
-    theme                TEXT
+    theme                TEXT,
+    -- Tier classification set at triage: 'fast' (routine ops/infra/config)
+    -- or 'full' (product/feature/research/multi-step). NULL = unclassified,
+    -- treated as 'fast' for backward compatibility. The contract validator
+    -- (validate_task_contract) gates full-tier tasks on AC + test plan.
+    tier                 TEXT
 );
 
 CREATE TABLE IF NOT EXISTS task_links (
@@ -1709,6 +1714,12 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
         # (e.g. project codename, milestone shorthand). Set at create-time
         # or via CLI; kanban_edit does not mutate this in v1.
         _add_column_if_missing(conn, "tasks", "theme", "theme TEXT")
+
+    if "tier" not in cols:
+        # WS-1: tier classification set at triage — 'fast' (routine
+        # ops/infra/config) or 'full' (product/feature/research/multi-step).
+        # NULL = unclassified, treated as 'fast' for backward compat.
+        _add_column_if_missing(conn, "tasks", "tier", "tier TEXT")
 
     # Indexes over additive ``tasks`` columns must be created after the
     # columns exist. Keeping them in SCHEMA_SQL breaks legacy boards: SQLite
@@ -3054,6 +3065,59 @@ def recompute_ready(
 # Claim / complete / block
 # ---------------------------------------------------------------------------
 
+def validate_task_contract(
+    conn: sqlite3.Connection, task_id: str
+) -> Optional[str]:
+    """Check that a task meets its tier's contract before dispatch.
+
+    Full-tier tasks MUST carry Acceptance Criteria and a Test Plan in
+    their body.  Fast-tier (or unclassified) tasks are exempt.
+
+    Returns ``None`` if the contract is satisfied, or a human-readable
+    reason string when the task should not be dispatched.
+    """
+    row = conn.execute(
+        "SELECT tier, body FROM tasks WHERE id = ?", (task_id,)
+    ).fetchone()
+    if row is None:
+        return None  # task doesn't exist — let claim_task handle it
+
+    tier = (row["tier"] or "").lower()
+    if tier != "full":
+        return None  # fast-tier or unclassified — no contract required
+
+    body = (row["body"] or "").lower()
+
+    # Check for Acceptance Criteria section
+    has_ac = any(
+        marker in body
+        for marker in ("## acceptance criteria", "# acceptance criteria",
+                       "acceptance criteria:", "**acceptance criteria**")
+    )
+
+    # Check for Test Plan section
+    has_test_plan = any(
+        marker in body
+        for marker in ("## test plan", "# test plan",
+                       "test plan:", "**test plan**")
+    )
+
+    missing = []
+    if not has_ac:
+        missing.append("Acceptance Criteria")
+    if not has_test_plan:
+        missing.append("Test Plan")
+
+    if missing:
+        return (
+            f"Full-tier task missing required contract sections: "
+            f"{', '.join(missing)}. "
+            f"Full-tier tasks must carry ## Acceptance Criteria and ## Test Plan "
+            f"in the body before they can be dispatched."
+        )
+    return None
+
+
 def claim_task(
     conn: sqlite3.Connection,
     task_id: str,
@@ -3093,6 +3157,25 @@ def claim_task(
             _append_event(
                 conn, task_id, "claim_rejected",
                 {"reason": "parents_not_done"},
+            )
+            return None
+        # Contract gate: full-tier tasks must carry AC + Test Plan
+        # before they can be dispatched. This is the WS-1 enforcement
+        # point — blocks ready→running for incomplete full-tier tasks.
+        contract_violation = validate_task_contract(conn, task_id)
+        if contract_violation:
+            conn.execute(
+                "UPDATE tasks SET status = 'blocked', status_reason = ? "
+                "WHERE id = ? AND status = 'ready'",
+                (contract_violation, task_id),
+            )
+            _append_event(
+                conn, task_id, "claim_rejected",
+                {"reason": "contract_violation", "detail": contract_violation},
+            )
+            _append_event(
+                conn, task_id, "blocked",
+                {"reason": contract_violation},
             )
             return None
         # Defensive: if a prior run somehow leaked (invariant violation from
