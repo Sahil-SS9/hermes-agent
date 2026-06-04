@@ -3883,15 +3883,15 @@ def complete_task(
         verified_cards = []
 
     # WS-4 review gate: full-tier tasks auto-route running→review on
-    # completion instead of going straight to done. Fast-tier tasks and
-    # tasks that already carry a reviewer go to done as before.
+    # completion instead of going straight to done. Fast-tier tasks
+    # go to done as before. Reviewer assignment happens at review
+    # dispatch time via the preferred_reviewer / sticky-reviewer flow.
     # The dispatcher picks up review tasks and loads sdlc-review.
     tier_row = conn.execute(
-        "SELECT tier, reviewer FROM tasks WHERE id = ?", (task_id,)
+        "SELECT tier FROM tasks WHERE id = ?", (task_id,)
     ).fetchone()
     task_tier = (tier_row["tier"] or "").lower() if tier_row else ""
-    task_reviewer = tier_row["reviewer"] if tier_row else None
-    if task_tier == "full" and not task_reviewer:
+    if task_tier == "full":
         return request_review(
             conn, task_id,
             summary=(summary or result or "complete"),
