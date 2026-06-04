@@ -3960,6 +3960,11 @@ def complete_task(
         completed_payload: dict = {
             "result_len": len(result) if result else 0,
             "summary": ev_summary or None,
+            # WS-7 Denji loop: signal that a completion event is available
+            # for governance review. Denji's review-cycle scripts scan
+            # for completed tasks with this flag and create review tasks
+            # for failures, protocol violations, and sampled successes.
+            "denji_review_signal": True,
         }
         if verified_cards:
             completed_payload["verified_cards"] = verified_cards
