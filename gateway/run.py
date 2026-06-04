@@ -6029,6 +6029,24 @@ class GatewayRunner:
                         if attempted >= auto_decompose_per_tick:
                             break
                         attempted += 1
+                        # WS-3: tier gating — skip fast-tier tasks from auto-decompose.
+                        # Fast-tier tasks (ops/infra/config) don't need fan-out;
+                        # they go straight to a worker. Only full-tier tasks
+                        # (product/feature/research) get the decompose → spec →
+                        # child-graph treatment.
+                        try:
+                            tconn = _kb.connect(board=slug)
+                            row = tconn.execute(
+                                "SELECT tier FROM tasks WHERE id = ?", (tid,)
+                            ).fetchone()
+                            tconn.close()
+                            if row and (row["tier"] or "").lower() == "fast":
+                                logger.debug(
+                                    "kanban auto-decompose: %s is fast-tier, skipping decompose", tid
+                                )
+                                continue
+                        except Exception:
+                            pass
                         try:
                             outcome = _decomp.decompose_task(
                                 tid, author="auto-decomposer",
