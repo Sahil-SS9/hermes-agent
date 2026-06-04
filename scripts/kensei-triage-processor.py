@@ -22,6 +22,49 @@ PENDING_FILE = '/home/kensei/.hermes/data/pending-investigation.json'
 DB_PATH_BASE = '/home/kensei/.hermes/kanban/boards/'
 DEFAULT_DB = '/home/kensei/.hermes/kanban.db'
 
+# WS-2 board routing: keyword → board + assignee mapping derived
+# from governance/routing/goal-subgoal-routing-map.md
+ROUTING_MAP = {
+    # code/backend → apps board, octacon
+    'apps': {
+        'keywords': ['code', 'implement', 'build', 'refactor', 'migrate', 'debug',
+                     'api', 'backend', 'frontend', 'component', 'database', 'schema',
+                     'test', 'fix bug', 'pr ', 'pull request', 'deploy'],
+        'default_assignee': 'octacon',
+    },
+    # content → content-lead board, ceecee
+    'content-lead': {
+        'keywords': ['content', 'post', 'draft', 'article', 'brand', 'voice',
+                     'social', 'copy', 'tweet', 'linkedin', 'blog'],
+        'default_assignee': 'ceecee',
+    },
+    # ops/infra → ops board, wesker
+    'ops': {
+        'keywords': ['ops', 'infra', 'docker', 'deploy', 'vps', 'nginx', 'backup',
+                     'security', 'cron', 'gateway', 'restart', 'health', 'disk',
+                     'memory', 'service', 'systemctl'],
+        'default_assignee': 'wesker',
+    },
+    # research → research board, remii
+    'research': {
+        'keywords': ['research', 'analysis', 'report', 'market', 'scan',
+                     'digest', 'signal', 'trend', 'survey', 'benchmark',
+                     'evaluate', 'investigate'],
+        'default_assignee': 'remii',
+    },
+}
+
+
+def _route_task(title, body):
+    """Route a task to the right board and assignee based on keyword matching.
+    Returns (board, assignee) or (None, None) if no match."""
+    combined = ((title or '') + ' ' + (body or '')).lower()
+    for board, cfg in ROUTING_MAP.items():
+        for kw in cfg['keywords']:
+            if kw in combined:
+                return board, cfg['default_assignee']
+    return None, None
+
 def _get_board_db(board):
     """Get the db_path for a board slug."""
     if board == 'default':
@@ -88,6 +131,21 @@ def save_json(path, data):
             json.dump(data, f, indent=2)
     except Exception:
         pass
+
+def _set_task_assignee(board, task_id, assignee):
+    """Set the assignee on a task via direct SQL."""
+    db_path = _get_board_db(board)
+    if not os.path.exists(db_path):
+        return False
+    try:
+        conn = sqlite3.connect(db_path)
+        conn.execute("UPDATE tasks SET assignee = ? WHERE id = ? AND (assignee IS NULL OR assignee = '')",
+                     (assignee, task_id))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception:
+        return False
 
 def classify_task(title, body):
     """Classify triage task: AUTO-PROMOTE vs NEEDS HUMAN, and tier (fast/full)."""
@@ -160,9 +218,16 @@ def main():
 
     for task_id, board, title, body, assignee in all_triage:
         classification, tier = classify_task(title, body)
+        # WS-2 board routing: auto-assign unassigned tasks based on keywords
+        routed_board, routed_assignee = None, None
+        if not assignee or not assignee.strip():
+            routed_board, routed_assignee = _route_task(title, body)
+
         if classification == 'AUTO-PROMOTE':
             if promote_task(task_id, board):
                 _set_task_tier(board, task_id, tier)
+                if routed_assignee:
+                    _set_task_assignee(board, task_id, routed_assignee)
                 auto_promoted.append({'id': task_id, 'board': board, 'title': title, 'tier': tier})
             else:
                 errors.append({'id': task_id, 'board': board, 'title': title, 'error': 'promote failed'})

@@ -2104,6 +2104,15 @@ def create_task(
     session_id: Optional[str] = None,
     board: Optional[str] = None,
     theme: Optional[str] = None,
+    # WS-2 universal subscription: auto-subscribe a gateway source
+    # to the new task's terminal events on creation. Accepts the
+    # same args as add_notify_sub(). When set, the subscription
+    # is created atomically with the task in the same transaction.
+    notify_platform: Optional[str] = None,
+    notify_chat_id: Optional[str] = None,
+    notify_thread_id: Optional[str] = None,
+    notify_user_id: Optional[str] = None,
+    notify_profile: Optional[str] = None,
 ) -> str:
     """Create a new task and optionally link it under parent tasks.
 
@@ -2322,6 +2331,24 @@ def create_task(
                         "skills": list(skills_list) if skills_list else None,
                         "goal_mode": bool(goal_mode) or None,
                     },
+                )
+            # WS-2 universal subscription: if the caller passed notify_
+            # params, create the subscription inside the write_txn. This
+            # covers ALL task creation paths — cron scripts, agent tool
+            # calls, voice intake — not just /kanban create slash commands.
+            if notify_platform and notify_chat_id:
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO kanban_notify_subs
+                        (task_id, platform, chat_id, thread_id, user_id,
+                         notifier_profile, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        task_id, notify_platform, notify_chat_id,
+                        notify_thread_id or "", notify_user_id,
+                        notify_profile, now,
+                    ),
                 )
             record_event_if_enabled(
                 source="kanban.db",
