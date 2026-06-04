@@ -1,0 +1,351 @@
+#!/usr/bin/env python3
+"""Kanban reconciliation — detect and auto-fix terminal-status drift.
+
+Scans all board DBs (root + per-board + profile overlays) for:
+1. Tasks marked done/completed with zero successful runs → reopen to triage
+2. Tasks marked done/completed with ALL runs crashed/blocked → reopen to triage
+3. Profile overlay status inconsistency → flag (no auto-fix, architectural)
+
+Designed as a no_agent=True cron. Silent when clean. Alert when drift found
+and fixed.
+
+Schema: kanban_db.py — tasks.status, task_runs.outcome, task_events.kind
+"""
+from __future__ import annotations
+
+import glob
+import json
+import os
+import sqlite3
+import time
+from pathlib import Path
+
+HERMES = Path(os.path.expanduser("~/.hermes"))
+DRIFT_STATE = HERMES / "governance" / "reconcile-drift-state.json"
+SUCCESS_OUTCOMES = {"completed", "done"}
+TERMINAL_STATUSES = {"done", "completed", "archived"}
+# Review-flow tasks may legitimately close without a successful run
+# (the review itself is the deliverable, recorded as a comment).
+REVIEW_PREFIXES = ("review:", "[review]", "clean up:", "investigate:")
+
+
+def now_ts() -> int:
+    return int(time.time())
+
+
+def board_dbs() -> dict[str, Path]:
+    """Discover all kanban DBs with board identity."""
+    dbs: dict[str, Path] = {}
+    # Root DB
+    root = HERMES / "kanban.db"
+    if root.exists():
+        dbs["default"] = root
+    # Per-board DBs
+    boards_dir = HERMES / "kanban" / "boards"
+    if boards_dir.exists():
+        for board_dir in sorted(boards_dir.iterdir()):
+            db = board_dir / "kanban.db"
+            if db.exists():
+                dbs[board_dir.name] = db
+    # Profile overlay DBs
+    profiles_dir = HERMES / "profiles"
+    if profiles_dir.exists():
+        for profile_dir in sorted(profiles_dir.iterdir()):
+            if not profile_dir.is_dir():
+                continue
+            for kanban_db in profile_dir.glob("kanban/boards/*/kanban.db"):
+                board_name = kanban_db.parent.name
+                key = f"profile:{profile_dir.name}/{board_name}"
+                dbs[key] = kanban_db
+            # Profile-level kanban.db (flat)
+            flat_db = profile_dir / "kanban.db"
+            if flat_db.exists():
+                key = f"profile:{profile_dir.name}"
+                dbs[key] = flat_db
+    return dbs
+
+
+def get_runs(conn: sqlite3.Connection, task_id: str) -> list[dict]:
+    rows = conn.execute(
+        "SELECT id, outcome, status, error, started_at, ended_at "
+        "FROM task_runs WHERE task_id = ? ORDER BY started_at",
+        (task_id,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_events(conn: sqlite3.Connection, task_id: str) -> list[dict]:
+    rows = conn.execute(
+        "SELECT kind, payload, created_at FROM task_events "
+        "WHERE task_id = ? ORDER BY created_at",
+        (task_id,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def successful_runs(runs: list[dict]) -> list[dict]:
+    return [r for r in runs if (r.get("outcome") or r.get("status")) in SUCCESS_OUTCOMES]
+
+
+def all_runs_failed(runs: list[dict]) -> bool:
+    if not runs:
+        return False
+    return all(
+        (r.get("outcome") or r.get("status")) not in SUCCESS_OUTCOMES
+        for r in runs
+    )
+
+
+def is_review_task(title: str) -> bool:
+    t = (title or "").lower().strip()
+    return any(t.startswith(p) for p in REVIEW_PREFIXES)
+
+
+def reopen_task(conn: sqlite3.Connection, task_id: str, reason: str) -> bool:
+    """Reopen a drifted task: set status=triage, log event."""
+    now = now_ts()
+    cur = conn.execute(
+        "UPDATE tasks SET status = 'triage', status_reason = ?, "
+        "claim_lock = NULL, claim_expires = NULL, worker_pid = NULL, "
+        "current_run_id = NULL, updated_at = ? "
+        "WHERE id = ? AND status IN ('done', 'completed')",
+        (reason[:500], now, task_id),
+    )
+    if cur.rowcount == 0:
+        return False
+    # Log the reconciliation event
+    conn.execute(
+        "INSERT INTO task_events (task_id, kind, payload, created_at) "
+        "VALUES (?, 'reopened', ?, ?)",
+        (task_id, json.dumps({"reason": reason, "source": "kanban-reconcile"}), now),
+    )
+    conn.commit()
+    return True
+
+
+def scan_board(name: str, db_path: Path) -> list[dict]:
+    """Scan a single board for drift tasks."""
+    findings = []
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+    except Exception:
+        return findings
+
+    tables = {r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'"
+    ).fetchall()}
+    if "tasks" not in tables or "task_runs" not in tables:
+        conn.close()
+        return findings
+
+    rows = conn.execute(
+        "SELECT id, title, status, assignee, result FROM tasks "
+        "WHERE status IN ('done', 'completed')"
+    ).fetchall()
+
+    for row in rows:
+        task = dict(row)
+        tid = task["id"]
+        title = task.get("title") or ""
+        status = task.get("status") or ""
+
+        if is_review_task(title):
+            continue
+
+        runs = get_runs(conn, tid)
+        completed = successful_runs(runs)
+
+        # Drift class 1: terminal but zero successful runs
+        if not completed and runs:
+            findings.append({
+                "task_id": tid,
+                "title": title,
+                "board": name,
+                "status": status,
+                "assignee": task.get("assignee"),
+                "kind": "terminal_no_success",
+                "run_count": len(runs),
+                "run_outcomes": [(r.get("outcome") or r.get("status")) for r in runs],
+            })
+
+        # Drift class 2: terminal but zero runs at all (manual CLI complete?)
+        if not runs and status in ("done", "completed"):
+            findings.append({
+                "task_id": tid,
+                "title": title,
+                "board": name,
+                "status": status,
+                "assignee": task.get("assignee"),
+                "kind": "terminal_no_runs",
+                "run_count": 0,
+                "run_outcomes": [],
+            })
+
+    conn.close()
+    return findings
+
+
+def detect_profile_drift() -> list[dict]:
+    """Detect profile overlay DBs that have tasks in terminal status
+    while the same task in the base board is in a non-terminal status."""
+    findings = []
+    base_tasks: dict[str, str] = {}  # task_id -> status
+
+    # Collect base board statuses
+    for name, path in board_dbs().items():
+        if name.startswith("profile:"):
+            continue
+        try:
+            conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+            tables = {r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()}
+            if "tasks" not in tables:
+                conn.close()
+                continue
+            for row in conn.execute("SELECT id, status FROM tasks"):
+                base_tasks[row[0]] = row[1]
+            conn.close()
+        except Exception:
+            continue
+
+    # Check profile overlays
+    for name, path in board_dbs().items():
+        if not name.startswith("profile:"):
+            continue
+        try:
+            conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+            tables = {r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()}
+            if "tasks" not in tables:
+                conn.close()
+                continue
+            for row in conn.execute(
+                "SELECT id, title, status FROM tasks "
+                "WHERE status IN ('done', 'completed', 'archived')"
+            ):
+                tid, title, prof_status = row[0], row[1], row[2]
+                base_status = base_tasks.get(tid)
+                if base_status and base_status not in ("done", "completed", "archived"):
+                    findings.append({
+                        "task_id": tid,
+                        "title": title,
+                        "board": name,
+                        "status": prof_status,
+                        "base_status": base_status,
+                        "kind": "profile_overlay_drift",
+                    })
+            conn.close()
+        except Exception:
+            continue
+
+    return findings
+
+
+def load_state() -> dict:
+    try:
+        return json.loads(DRIFT_STATE.read_text())
+    except Exception:
+        return {"last_run": 0, "drift_keys": []}
+
+
+def save_state(state: dict) -> None:
+    DRIFT_STATE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = DRIFT_STATE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(state, indent=2, sort_keys=True))
+    tmp.replace(DRIFT_STATE)
+
+
+def main() -> str:
+    """Main entry point. Returns alert text (empty string = clean)."""
+    dbs = board_dbs()
+    all_findings: list[dict] = []
+    fixed: list[dict] = []
+
+    # Phase 1: Detect and fix terminal drift on base boards
+    for name, path in dbs.items():
+        if name.startswith("profile:"):
+            continue  # Handle profiles separately
+        findings = scan_board(name, path)
+        all_findings.extend(findings)
+
+    # Phase 2: Auto-fix drifted tasks (reopen to triage)
+    if all_findings:
+        # Open a writable connection to each affected board
+        fixable = [f for f in all_findings if f["kind"] in ("terminal_no_success", "terminal_no_runs")]
+        by_board: dict[str, list[dict]] = {}
+        for f in fixable:
+            by_board.setdefault(f["board"], []).append(f)
+
+        for board_name, board_findings in by_board.items():
+            db_path = dbs.get(board_name)
+            if not db_path:
+                continue
+            try:
+                conn = sqlite3.connect(str(db_path))
+                for f in board_findings:
+                    reason = (
+                        f"Auto-reopened by kanban-reconcile: {f['kind']}. "
+                        f"Runs: {f['run_count']}, outcomes: {f['run_outcomes']}"
+                    )
+                    if reopen_task(conn, f["task_id"], reason):
+                        fixed.append(f)
+                conn.close()
+            except Exception:
+                continue
+
+    # Phase 3: Detect profile overlay drift (report only)
+    profile_findings = detect_profile_drift()
+    all_findings.extend(profile_findings)
+
+    # Build delta state
+    state = load_state()
+    current_keys = sorted(f["task_id"] + ":" + f["kind"] for f in all_findings)
+    delta = current_keys != state.get("drift_keys", [])
+
+    save_state({
+        "last_run": now_ts(),
+        "drift_keys": current_keys,
+        "fixed_count": len(fixed),
+    })
+
+    # Build output
+    if not all_findings:
+        return ""  # silent = healthy
+
+    lines = []
+
+    if fixed:
+        lines.append(f"🔧 **Kanban reconciliation: {len(fixed)} task(s) reopened to triage**")
+        for f in fixed:
+            lines.append(
+                f"  • `{f['task_id']}` [{f['board']}] — "
+                f"{f['run_count']} runs, outcomes: {f['run_outcomes']}. "
+                f"{f['title'][:60]}"
+            )
+
+    unfixed = [f for f in all_findings if f not in fixed and f["kind"] != "profile_overlay_drift"]
+    if unfixed:
+        lines.append(f"\n⚠️ **{len(unfixed)} drift finding(s) not auto-fixed:**")
+        for f in unfixed:
+            lines.append(
+                f"  • `{f['task_id']}` [{f['board']}] {f['kind']} — "
+                f"{f['title'][:60]}"
+            )
+
+    if profile_findings:
+        lines.append(
+            f"\nℹ️ **{len(profile_findings)} profile overlay drift(s)** — "
+            f"profile DBs show terminal status but base board is non-terminal. "
+            f"Cosmetic (profile DBs are stale snapshots)."
+        )
+
+    return "\n".join(lines)
+
+
+if __name__ == "__main__":
+    output = main()
+    if output:
+        print(output)
