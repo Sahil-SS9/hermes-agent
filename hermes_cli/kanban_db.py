@@ -3851,6 +3851,24 @@ def complete_task(
     else:
         verified_cards = []
 
+    # WS-4 review gate: full-tier tasks auto-route running→review on
+    # completion instead of going straight to done. Fast-tier tasks and
+    # tasks that already carry a reviewer go to done as before.
+    # The dispatcher picks up review tasks and loads sdlc-review.
+    tier_row = conn.execute(
+        "SELECT tier, reviewer FROM tasks WHERE id = ?", (task_id,)
+    ).fetchone()
+    task_tier = (tier_row["tier"] or "").lower() if tier_row else ""
+    task_reviewer = tier_row["reviewer"] if tier_row else None
+    if task_tier == "full" and not task_reviewer:
+        return request_review(
+            conn, task_id,
+            summary=(summary or result or "complete"),
+            artefacts=None,
+            next_steps="Review per sdlc-review skill and multi-gate-qa.md criteria",
+            expected_run_id=expected_run_id,
+        )
+
     with write_txn(conn):
         if expected_run_id is None:
             cur = conn.execute(
