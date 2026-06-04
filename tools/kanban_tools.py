@@ -1374,6 +1374,53 @@ KANBAN_LINK_SCHEMA = {
 
 
 # ---------------------------------------------------------------------------
+# WS-5 + WS-8 handlers
+# ---------------------------------------------------------------------------
+
+def _handle_collate_children(args: dict, **kw) -> str:
+    """Return done child task results for a parent/integrator task."""
+    tid = _default_task_id(args.get("task_id"))
+    if not tid:
+        return tool_error("task_id is required")
+    board = args.get("board")
+    try:
+        kb, conn = _connect(board=board)
+        children = kb.collate_children(conn, tid)
+        return json.dumps({"children": children, "count": len(children)}, indent=2, default=str)
+    except Exception as exc:
+        return tool_error(f"collate_children failed: {exc}")
+
+
+def _handle_request_human_approval(args: dict, **kw) -> str:
+    """Block a full-tier task awaiting explicit human go/no-go."""
+    tid = _default_task_id(args.get("task_id"))
+    if not tid:
+        return tool_error("task_id is required")
+    ownership_err = _enforce_worker_task_ownership(tid)
+    if ownership_err:
+        return ownership_err
+    detail = args.get("detail")
+    if not detail or not str(detail).strip():
+        return tool_error("detail is required")
+    board = args.get("board")
+    try:
+        kb, conn = _connect(board=board)
+        try:
+            ok = kb.request_human_approval(
+                conn, tid, detail=str(detail).strip(),
+                expected_run_id=_worker_run_id(tid),
+            )
+            if not ok:
+                return tool_error(f"could not request approval for {tid}")
+            run = kb.latest_run(conn, tid)
+            return _ok(task_id=tid, run_id=run.id if run else None)
+        finally:
+            conn.close()
+    except Exception as exc:
+        return tool_error(f"request_human_approval failed: {exc}")
+
+
+# ---------------------------------------------------------------------------
 # Registration
 # ---------------------------------------------------------------------------
 
@@ -1456,4 +1503,81 @@ registry.register(
     handler=_handle_link,
     check_fn=_check_kanban_mode,
     emoji="🔗",
+)
+
+# WS-5: collate_children — registers the function as a kanban tool so
+# integrator/parent tasks can read done child results and produce a
+# rolled-up deliverable before calling kanban_complete.
+KANBAN_COLLATE_CHILDREN_SCHEMA = {
+    "name": "kanban_collate_children",
+    "description": (
+        "Read the results of all done child tasks linked to this task. "
+        "Returns a list of {id, title, result, assignee} dicts, ordered "
+        "by completion time. Use this as an integrator/parent task to "
+        "produce a rolled-up summary from completed child work before "
+        "calling kanban_complete."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "task_id": {
+                "type": "string",
+                "description": _DESC_TASK_ID_DEFAULT,
+            },
+            "board": {
+                "type": "string",
+                "description": "Board slug — uses default when omitted",
+            },
+        },
+        "required": [],
+    },
+}
+
+# WS-8: request_human_approval — blocks a full-tier task awaiting
+# explicit human go/no-go via the Discord approval handler.
+KANBAN_REQUEST_HUMAN_APPROVAL_SCHEMA = {
+    "name": "kanban_request_human_approval",
+    "description": (
+        "Block this task and request explicit human approval before it can "
+        "proceed. Use for full-tier go/no-go decisions — the task will be "
+        "blocked with reason 'needs_human_approval: <detail>' and must be "
+        "explicitly unblocked by a human. The Discord approval handler cron "
+        "surfaces these in #governance."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "task_id": {
+                "type": "string",
+                "description": _DESC_TASK_ID_DEFAULT,
+            },
+            "detail": {
+                "type": "string",
+                "description": "What the human needs to decide, in a sentence",
+            },
+            "board": {
+                "type": "string",
+                "description": "Board slug — uses default when omitted",
+            },
+        },
+        "required": ["detail"],
+    },
+}
+
+registry.register(
+    name="kanban_collate_children",
+    toolset="kanban",
+    schema=KANBAN_COLLATE_CHILDREN_SCHEMA,
+    handler=_handle_collate_children,
+    check_fn=_check_kanban_mode,
+    emoji="📊",
+)
+
+registry.register(
+    name="kanban_request_human_approval",
+    toolset="kanban",
+    schema=KANBAN_REQUEST_HUMAN_APPROVAL_SCHEMA,
+    handler=_handle_request_human_approval,
+    check_fn=_check_kanban_mode,
+    emoji="🛑",
 )

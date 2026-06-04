@@ -3892,13 +3892,26 @@ def complete_task(
     ).fetchone()
     task_tier = (tier_row["tier"] or "").lower() if tier_row else ""
     if task_tier == "full":
-        return request_review(
-            conn, task_id,
-            summary=(summary or result or "complete"),
-            artefacts=None,
-            next_steps="Review per sdlc-review skill and multi-gate-qa.md criteria",
-            expected_run_id=expected_run_id,
-        )
+        # Loop guard: if this task has already passed review at least
+        # once, skip re-routing to review — the work has been vetted.
+        # Without this, approve→re-implement→complete would create an
+        # unbounded review loop (max_review_passes only caps chained
+        # approvals inside the review column, not complete→review cycles).
+        passes = review_pass_count(conn, task_id)
+        if passes > 0:
+            _log.debug(
+                "complete_task: %s has %d prior review passes — "
+                "skipping review redirect, going to done",
+                task_id, passes,
+            )
+        else:
+            return request_review(
+                conn, task_id,
+                summary=(summary or result or "complete"),
+                artefacts=None,
+                next_steps="Review per sdlc-review skill and multi-gate-qa.md criteria",
+                expected_run_id=expected_run_id,
+            )
 
     with write_txn(conn):
         if expected_run_id is None:
