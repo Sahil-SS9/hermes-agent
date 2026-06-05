@@ -7208,6 +7208,7 @@ def dispatch_once(
             if not dry_run:
                 if _block_missing_forced_skills(
                     conn, row["id"], row["assignee"], missing_forced_skills,
+                    forced_skills=forced_skills,
                 ):
                     result.auto_blocked.append(row["id"])
             continue
@@ -7252,7 +7253,8 @@ def dispatch_once(
             )
             if missing_skills:
                 if _block_missing_forced_skills(
-                    conn, row["id"], row["assignee"], missing_skills
+                    conn, row["id"], row["assignee"], missing_skills,
+                    forced_skills=task_for_skills.skills if task_for_skills else None,
                 ):
                     result.auto_blocked.append(row["id"])
                 continue
@@ -7372,7 +7374,8 @@ def dispatch_once(
             missing_skills = _missing_worker_forced_skills(row["assignee"], ["sdlc-review"])
             if missing_skills:
                 if _block_missing_forced_skills(
-                    conn, row["id"], row["assignee"], missing_skills
+                    conn, row["id"], row["assignee"], missing_skills,
+                    forced_skills=["sdlc-review"],
                 ):
                     result.auto_blocked.append(row["id"])
                 continue
@@ -7801,6 +7804,7 @@ def _block_missing_forced_skills(
     task_id: str,
     assignee: str,
     missing: list[str],
+    forced_skills: Optional[list[str]] = None,
 ) -> bool:
     missing_display = ", ".join(missing)
     reason = (
@@ -7819,7 +7823,7 @@ def _block_missing_forced_skills(
                     "reason": "missing_forced_skills",
                     "assignee": assignee,
                     "missing_skills": list(missing),
-                    "forced_skills": None,
+                    "forced_skills": list(forced_skills) if forced_skills else None,
                 },
             )
     return blocked
