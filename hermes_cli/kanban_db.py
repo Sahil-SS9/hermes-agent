@@ -2104,6 +2104,10 @@ def create_task(
     session_id: Optional[str] = None,
     board: Optional[str] = None,
     theme: Optional[str] = None,
+    # WS-3 tier inheritance: when children are created from a decomposed
+    # full-tier parent, they inherit the parent's tier so WS-1 (contract
+    # gate) and WS-4 (review gate) both apply to them. NULL = untyped.
+    tier: Optional[str] = None,
     # WS-2 universal subscription: auto-subscribe a gateway source
     # to the new task's terminal events on creation. Accepts the
     # same args as add_notify_sub(). When set, the subscription
@@ -2287,8 +2291,8 @@ def create_task(
                         created_by, created_at, workspace_kind, workspace_path,
                         branch_name, tenant, idempotency_key, max_runtime_seconds,
                         skills, max_retries, goal_mode, goal_max_turns, session_id,
-                        theme
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        theme, tier
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         task_id,
@@ -2311,6 +2315,7 @@ def create_task(
                         int(goal_max_turns) if goal_max_turns is not None else None,
                         session_id,
                         theme.strip() if isinstance(theme, str) and theme.strip() else None,
+                        tier.strip() if isinstance(tier, str) and tier.strip() else None,
                     ),
                 )
                 for pid in parents:
@@ -3898,12 +3903,21 @@ def complete_task(
         # unbounded review loop (max_review_passes only caps chained
         # approvals inside the review column, not complete→review cycles).
         passes = review_pass_count(conn, task_id)
-        if passes > 0:
-            _log.debug(
-                "complete_task: %s has %d prior review passes — "
-                "skipping review redirect, going to done",
-                task_id, passes,
-            )
+        already_routed = _count_events(conn, task_id, "review_requested") > 0
+        if passes > 0 or already_routed:
+            if already_routed and passes == 0:
+                _log.debug(
+                    "complete_task: %s has prior review_requested but no "
+                    "review_passed yet — skipping redirect, going to done "
+                    "(reviewer called kanban_complete instead of approve)",
+                    task_id,
+                )
+            else:
+                _log.debug(
+                    "complete_task: %s has %d prior review passes — "
+                    "skipping review redirect, going to done",
+                    task_id, passes,
+                )
         else:
             return request_review(
                 conn, task_id,
@@ -5383,7 +5397,7 @@ def decompose_triage_task(
     child_ids: list[str] = []
     with write_txn(conn):
         root_row = conn.execute(
-            "SELECT id, status, tenant, workspace_kind, workspace_path "
+            "SELECT id, status, tenant, workspace_kind, workspace_path, tier "
             "FROM tasks WHERE id = ?",
             (task_id,),
         ).fetchone()
@@ -5392,6 +5406,10 @@ def decompose_triage_task(
         if root_row["status"] != "triage":
             return None
         tenant = root_row["tenant"]
+        # WS-3 tier inheritance: children of a full-tier parent inherit
+        # the parent's tier so WS-1 (contract gate) and WS-4 (review gate)
+        # apply to them. Fast-tier or untyped parents leave children untyped.
+        parent_tier = root_row["tier"]
         # Children inherit the root's workspace by default so a fan-out
         # of a code-gen task lands in the parent's project dir/worktree
         # rather than throwaway scratch tmp dirs. A child dict can still
@@ -5423,8 +5441,8 @@ def decompose_triage_task(
             conn.execute(
                 "INSERT INTO tasks "
                 "(id, title, body, assignee, status, workspace_kind, "
-                " workspace_path, tenant, created_at, created_by) "
-                "VALUES (?, ?, ?, ?, 'todo', ?, ?, ?, ?, ?)",
+                " workspace_path, tenant, created_at, created_by, tier) "
+                "VALUES (?, ?, ?, ?, 'todo', ?, ?, ?, ?, ?, ?)",
                 (
                     new_id,
                     title,
@@ -5435,6 +5453,7 @@ def decompose_triage_task(
                     tenant,
                     now,
                     (author or "decomposer"),
+                    parent_tier,
                 ),
             )
             _append_event(
