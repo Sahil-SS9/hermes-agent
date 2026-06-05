@@ -374,6 +374,7 @@ class AIAgent:
         thinking_callback: callable = None,
         reasoning_callback: callable = None,
         clarify_callback: callable = None,
+        ask_user_questions_callback: callable = None,  # KENSEI CUSTOM
         step_callback: callable = None,
         stream_delta_callback: callable = None,
         interim_assistant_callback: callable = None,
@@ -444,6 +445,7 @@ class AIAgent:
             thinking_callback=thinking_callback,
             reasoning_callback=reasoning_callback,
             clarify_callback=clarify_callback,
+            ask_user_questions_callback=ask_user_questions_callback,  # KENSEI CUSTOM
             step_callback=step_callback,
             stream_delta_callback=stream_delta_callback,
             interim_assistant_callback=interim_assistant_callback,
