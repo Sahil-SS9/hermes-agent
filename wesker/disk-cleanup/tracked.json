@@ -1,0 +1,20 @@
+[
+  {
+    "path": "/home/kensei/.hermes/profiles/wesker/cron/jobs.json",
+    "timestamp": "2026-05-26T15:57:36.147530+00:00",
+    "category": "cron-output",
+    "size": 1184
+  },
+  {
+    "path": "/home/kensei/.hermes/profiles/wesker/cron",
+    "timestamp": "2026-05-29T18:32:54.204742+00:00",
+    "category": "cron-output",
+    "size": 0
+  },
+  {
+    "path": "/home/kensei/.hermes/profiles/wesker/cron/output",
+    "timestamp": "2026-06-02T13:05:54.548568+00:00",
+    "category": "cron-output",
+    "size": 0
+  }
+]

@@ -1,0 +1,21 @@
+[
+  {
+    "session_id": "proc_d661a338bf8f",
+    "command": "cd /home/kensei/.hermes/kanban/boards/research/workspaces/t_b5f4aee1 && /home/kensei/.hermes/hermes-agent/venv/bin/python3 -m pytest tests/test_validator.py tests/test_validator_edge.py -v --tb=short --no-header -q 2>&1",
+    "pid": 659458,
+    "pid_scope": "host",
+    "cwd": "/home/kensei",
+    "started_at": 1779231819.9924734,
+    "task_id": "default",
+    "session_key": "",
+    "watcher_platform": "",
+    "watcher_chat_id": "",
+    "watcher_user_id": "",
+    "watcher_user_name": "",
+    "watcher_thread_id": "",
+    "watcher_message_id": "",
+    "watcher_interval": 0,
+    "notify_on_complete": true,
+    "watch_patterns": []
+  }
+]
