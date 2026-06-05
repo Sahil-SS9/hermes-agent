@@ -57,7 +57,7 @@ A decision must satisfy at least 2 of 4 to proceed.
 ## Known strategic decisions (reference for future evaluations)
 
 ### Discord multi-bot architecture (2026-05-22)
-Decision: 7 profile-isolated Discord gateways, not one central bot. Rationale: context isolation per persona (Remii's research context not polluted by Wesker's ops noise), co-working capability (Sahil talks to both simultaneously in the same channel). Trade-offs accepted: +~1GB memory, +6 systemd services, +6 token secrets to manage. Phased rollout: core 4 first (Kensei, Misa-Misa, Remii, Wesker), then 3 more (Gojo, Octacon, CeeCee), then Miyagi. See `discord-gateway-operations` skill for implementation detail.
+Decision: 7 profile-isolated Discord gateways, not one central bot. Rationale: context isolation per persona (Remii's research context not polluted by Wesker's ops noise), co-working capability (Sahil talks to both simultaneously in the same channel). Trade-offs accepted: +~1GB memory, +6 systemd services, +6 token secrets to manage. Phased rollout: core 4 first (Kensei, Misa-Misa, Remii, Wesker), then 3 more (Gojo, Octacon, CeeCee), then MrHermagi. See `discord-gateway-operations` skill for implementation detail.
 
 ### Repository architecture — dual-repo Hermes setup (2026-05-25)
 Decision: KenseiAgent is the SINGLE source of truth for all Hermes customisations. The upstream clone (`hermes-agent` at `~/.hermes/hermes-agent/`) is for vanilla PR work ONLY. All code changes, tweaks, and features go into KenseiAgent. Hermes runs from KenseiAgent's venv. See `references/kensei-repository-architecture.md` for the full architecture, workflows, and pitfall checklist.

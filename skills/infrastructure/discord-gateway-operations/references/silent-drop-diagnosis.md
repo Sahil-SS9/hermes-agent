@@ -79,7 +79,7 @@ sudo systemctl restart hermes-gateway-{profile1,profile2,profile3}
 ### Pitfalls in batch fixes
 
 - **Do not patch after `always_skills:` if a `discord:` section already exists.** You'll create a duplicate, which causes the config parser to merge them, usually keeping the first (empty) one. Always check `grep -c '^discord:'` first. If count > 1, remove the old empty section.
-- **channel_prompts entries on Kensei's root config must be migrated**, not duplicated. If Kensei's root `config.yaml` has a `channel_prompts` entry for `#ai-learning-qa`, that entry forces Kensei to speak as MrHermagi in that channel. Move it to Miyagi's profile config, not copy it.
+- **channel_prompts entries on Kensei's root config must be migrated**, not duplicated. If Kensei's root `config.yaml` has a `channel_prompts` entry for `#ai-learning-qa`, that entry forces Kensei to speak as MrHermagi in that channel. Move it to MrHermagi's profile config, not copy it.
 - **After the fix, restart ALL gateways**, not just the one you edited. The channel directory cache is per-gateway.
 
 ## Incident timeline (2026-05-24)
@@ -91,5 +91,5 @@ sudo systemctl restart hermes-gateway-{profile1,profile2,profile3}
 | 01:00 | Dezzy `discord:` section added + gateway restart |  
 | 01:20 | Remaining 7 specialists checked — all 7 also missing the section. Patched with `free_response_channels` per domain |
 | 01:30 | 6 profiles found with duplicate `discord:` sections (old empty + new populated). Cleaned up |
-| 01:40 | Root Kensei config had `#ai-learning-qa` configured as free_response with MrHermagi prompt — migrated to Miyagi |
+| 01:40 | Root Kensei config had `#ai-learning-qa` configured as free_response with MrHermagi prompt — migrated to MrHermagi |
 | 01:45 | `allow_bots: mentions` added to all 9 profiles |

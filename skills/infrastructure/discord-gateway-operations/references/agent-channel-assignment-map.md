@@ -24,7 +24,7 @@ All channels are in the "Kensei Camp" Discord server (ID: 1506021204363051249).
 | `#build-review` | 1507448572784939151 | build | Octacon, Dezzy | All others |
 | `#design-review` | 1507542104262443192 | build | Dezzy | All others |
 | `#content` | 1506022640035303494 | content | CeeCee | All others |
-| `#ai-learning-qa` | 1507397516642091149 | teaching | Miyagi | All others |
+| `#ai-learning-qa` | 1507397516642091149 | teaching | MrHermagi | All others |
 
 ## Per-bot free_response_channels
 
@@ -38,7 +38,7 @@ All channels are in the "Kensei Camp" Discord server (ID: 1506021204363051249).
 | Gojo | #mailbox__calendar, #job-hunt | 1506022733287391282,1506022690501169295 | mentions |
 | Octacon | #build-log, #build-review | 1507448396015734984,1507448572784939151 | mentions |
 | CeeCee | #content | 1506022640035303494 | mentions |
-| Miyagi | #ai-learning-qa | 1507397516642091149 | mentions |
+| MrHermagi | #ai-learning-qa | 1507397516642091149 | mentions |
 
 ## How messages flow through the stack
 
@@ -85,5 +85,5 @@ This means shutdown/restart messages only appear in `#general`. No flood in doma
 2. **2026-05-24 01:00**: Dezzy silent-drop discovered. `discord:` section added with `free_response_channels: #design-review`.
 3. **2026-05-24 01:20**: Remaining 7 specialists also missing `discord:` sections. Added `free_response_channels` per domain.
 4. **2026-05-24 01:30**: Duplicate `discord:` sections found on 6 profiles (old empty + new populated). Cleaned up.
-5. **2026-05-24 01:40**: Root Kensei config had `#ai-learning-qa` as free_response with MrHermagi prompt — hijacked from Miyagi. Migrated to Miyagi's profile.
+5. **2026-05-24 01:40**: Root Kensei config had `#ai-learning-qa` as free_response with MrHermagi prompt — hijacked from MrHermagi. Migrated to MrHermagi's profile.
 6. **2026-05-24 01:45**: `allow_bots: mentions` added to all 9 profiles for explicit bot-to-bot handoff with @mention.

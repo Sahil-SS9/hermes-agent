@@ -18,7 +18,7 @@ Context: Sahil wants context isolation per lead persona and co-working capabilit
 | Gojo | gojo | `ollama-cloud / gemma4:31b` | Admin, mailbox, calendar, job-hunt | Personal/sensitive data. Privacy isolation. |
 | Octacon | octacon | `ollama-cloud / kimi-k2.6` | Coding, build, debugging, PRs | Deep coding sessions. Co-works with Quan. |
 | CeeCee | ceecee | `ollama-cloud / glm-5.1` | Content drafting, brand, social | Content review with Kensei. |
-| Miyagi | miyagi | `ollama-cloud / deepseek-v4-flash` | Daily AI/ML teaching | Daily lessons with dedicated teaching space. |
+| MrHermagi | mrhermagi | `ollama-cloud / deepseek-v4-flash` | Daily AI/ML teaching | Daily lessons with dedicated teaching space. |
 
 ### Persona modes under Kensei (for now)
 
@@ -41,7 +41,7 @@ Context: Sahil wants context isolation per lead persona and co-working capabilit
 | Gojo | ~143MB |
 | Octacon | ~143MB |
 | CeeCee | ~144MB |
-| Miyagi | ~133MB |
+| MrHermagi | ~133MB |
 | **Total** | **~1.1GB** |
 
 Actual memory is lower than the initial estimate (~130MB/specialist vs ~150-250MB expected). All 8 gateways fit comfortably.
@@ -112,7 +112,7 @@ Each specialist gateway:
 ### Learning
 | Channel | Bots | Purpose |
 |---|---|---|
-| `#miyagi-lessons` / `#ai-learning-qa` | Miyagi | Daily lessons, follow-up Q&A |
+| `#mrhermagi-lessons` / `#ai-learning-qa` | MrHermagi | Daily lessons, follow-up Q&A |
 
 ### Voice
 | Channel | Bot | Purpose |

@@ -2,7 +2,7 @@
 
 ## Problem
 
-KENSEI has multiple personas (Remii, Wesker, Gojo, Octacon, CeeCee, Misa-Misa, Miyagi) that each need:
+KENSEI has multiple personas (Remii, Wesker, Gojo, Octacon, CeeCee, Misa-Misa, MrHermagi) that each need:
 - Independent conversational context and memory (not diluted through Kensei)
 - Ability to co-work in the same Discord channel (Sahil talks to both Remii and Wesker in the same room)
 - Profile isolation for different model/provider/config settings
@@ -33,7 +33,7 @@ Use separate Discord bot + Hermes gateway per persona. NOT a single central bot 
 | Gojo | hermes-gateway-gojo | active | ~130MB | Admin, mailbox, calendar, job-hunt |
 | Octacon | hermes-gateway-octacon | active | ~130MB | Coding, build, debugging, PRs |
 | CeeCee | hermes-gateway-ceecee | active | ~130MB | Content drafting, brand, social |
-| Miyagi | hermes-gateway-miyagi | active | ~130MB | Daily AI/ML teaching |
+| MrHermagi | hermes-gateway-mrhermagi | active | ~130MB | Daily AI/ML teaching |
 
 Total: ~1.1GB across all 8 gateways.
 
@@ -61,7 +61,7 @@ All 20 text channels on the Kensei Camp server (ID: 1506021204363051249):
 | #build-review | 1507448572784939151 | Code review | Octacon | All others | build |
 | #design-review | 1507542104262443192 | UX/design review | Dezzy | All others | build |
 | #content | 1506022640035303494 | Content drafting | CeeCee | All others | content |
-| #ai-learning-qa | 1507397516642091149 | Learning Q&A | Miyagi | All others | teaching |
+| #ai-learning-qa | 1507397516642091149 | Learning Q&A | MrHermagi | All others | teaching |
 
 ### How free_response_channels works
 
@@ -82,11 +82,11 @@ Each specialist's `config.yaml` was updated to include a `discord:` section with
 | Gojo | #mailbox__calendar, #job-hunt | `1506022733287391282,1506022690501169295` | profiles/gojo/config.yaml |
 | Octacon | #build-log, #build-review | `1507448396015734984,1507448572784939151` | profiles/octacon/config.yaml |
 | CeeCee | #content | `1506022640035303494` | profiles/ceecee/config.yaml |
-| Miyagi | #ai-learning-qa | `1507397516642091149` | profiles/miyagi/config.yaml (+ channel_prompt migrated from Kensei) |
+| MrHermagi | #ai-learning-qa | `1507397516642091149` | profiles/mrhermagi/config.yaml (+ channel_prompt migrated from Kensei) |
 
 ### Important: channel_prompts are per-bot
 
-`channel_prompts` entries in the `discord:` section override the bot's SOUL.md for that specific channel. This was the root cause of Kensei hijacking Miyagi's identity — Kensei's root config.yaml had `channel_prompts.1507397516642091149` set to `"You are MrHermagi..."`. Moved to Miyagi's config.yaml on 2026-05-24.
+`channel_prompts` entries in the `discord:` section override the bot's SOUL.md for that specific channel. This was the root cause of Kensei hijacking MrHermagi's identity — Kensei's root config.yaml had `channel_prompts.1507397516642091149` set to `"You are MrHermagi..."`. Moved to MrHermagi's config.yaml on 2026-05-24.
 
 ### Co-working channels
 

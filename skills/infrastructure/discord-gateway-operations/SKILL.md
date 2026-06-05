@@ -19,7 +19,7 @@
     19|
     20|## CRITICAL: Specialist gateways MUST NOT touch Kanban DBs (P0 governance rule, 26/05/26)
     21|
-    22|The ops board DB was corrupted 3 times in one session because 8 specialist gateway processes (Remii, Wesker, Octacon, CeeCee, Gojo, Misa-Misa, Miyagi, Dezzy) were all opening and writing to `/home/kensei/.hermes/kanban/boards/ops/kanban.db` concurrently. Each process cached its own SQLite page state; writes from one invalidated index pointers cached by another; repeated REINDEX operations from different processes created index divergence; eventually the file header was overwritten with garbage.
+    22|The ops board DB was corrupted 3 times in one session because 8 specialist gateway processes (Remii, Wesker, Octacon, CeeCee, Gojo, Misa-Misa, MrHermagi, Dezzy) were all opening and writing to `/home/kensei/.hermes/kanban/boards/ops/kanban.db` concurrently. Each process cached its own SQLite page state; writes from one invalidated index pointers cached by another; repeated REINDEX operations from different processes created index divergence; eventually the file header was overwritten with garbage.
     23|
     24|**Root cause:** The specialist gateways inherited kanban DB access from their parent config or the `--replace` restart cascade. SQLite WAL serialises writes but does NOT sync cached page pointers between independent processes in WAL mode. 8 concurrent writers to one SQLite file = guaranteed corruption.
     25|
@@ -316,7 +316,7 @@
    316|| `#mailbox__calendar`, `#job-hunt` | Gojo | All others |
    317|| `#build-log`, `#build-review` | Octacon | All others |
    318|| `#content` | CeeCee | All others |
-   319|| `#ai-learning-qa` | Miyagi | All others |
+   319|| `#ai-learning-qa` | MrHermagi | All others |
    320|
    321|Recommended multi-bot channels:
    322|- `#war-room` / `#general`: Kensei + all specialists
@@ -336,7 +336,7 @@
    336|| `#plenishd` / `#coachsense` | Octacon, CeeCee |
    337|| `#research-digest` / `#research-ops` | Remii, Wesker |
    338|| `#build-log` / `#build-review` | Octacon |
-   339|| `#miyagi-lessons` | Miyagi |
+   339|| `#mrhermagi-lessons` | MrHermagi |
    340|| `#approvals` | Kensei only (signed decisions) |
    341|
    342|## Privileged intents setup and debugging
@@ -469,7 +469,7 @@
    469|Verification after restart:
    470|
    471|```bash
-   472|for p in ceecee denji gojo light misa-misa miyagi octacon quan remii wesker; do
+   472|for p in ceecee denji gojo light misa-misa mrhermagi octacon quan remii wesker; do
    473|  tail -40 ~/.hermes/profiles/$p/logs/gateway.log | grep -E 'Cron ticker|kanban dispatcher|Connected as'
    474|done
    475|```
