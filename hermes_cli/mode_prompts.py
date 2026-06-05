@@ -3,12 +3,16 @@
 
 Per spec (2026-06-04, updated 2026-06-05): Plan conducts a mandatory user
 interview via AskUserQuestions (2-4 targeted Qs, never skip), then writes
-a spec.  UltraPlan expands to 10-15 Qs in batches plus Mermaid/HTML
-diagrams.  Recon asks 4 upfront Qs and dispatches to specialised agent
-profiles sequentially.
+a spec.  Diagram output is controlled by tickbox (Excalidraw/Mermaid/HTML).
+UltraPlan expands to 10-15 Qs in batches plus optional diagrams.
+Recon asks 4 upfront Qs and dispatches to specialised agent profiles
+sequentially.
+
+Both plan and gods_plan use A/B/C/D exit: Save, Compress+Execute,
+Continue iterating, Follow up questions (auto-save + Q&A).
 
 The internal mode value ``gods_plan`` is preserved for backward
-compatibility — the user-facing label is "UltraPlan".  See skill
+compatibility -- the user-facing label is "UltraPlan".  See skill
 `agent-modes` for the full spec.  Must survive upstream merges.
 
 This module is the single source of truth.  cli.py (HermesCLI /mode
@@ -21,7 +25,7 @@ from __future__ import annotations
 from typing import Optional
 
 
-# Internal mode value → user-facing label.  Kept in one place so the
+# Internal mode value -> user-facing label.  Kept in one place so the
 # slash command, the badge, and the status command all agree.
 MODE_LABELS = {
     "auto":      "auto",
@@ -41,15 +45,18 @@ _MODE_PROMPT_MARKERS = {
 }
 
 
-# ── plan ─────────────────────────────────────────────────────────────
+# -- plan -----------------------------------------------------------------
 #
 # Mirrors Claude Code's plan mode: mandatory user interview via
-# AskUserQuestions, then write a spec, A/B/C exit.  The model decides
-# question count (2-4) and batching, but interviewing is required —
+# AskUserQuestions, then write a spec, A/B/C/D exit.  The model decides
+# question count (2-4) and batching, but interviewing is required --
 # never skip it, even for seemingly simple requests.  Claude Code
 # always interviews; so must we.
+#
+# Diagram output is controlled by a tickbox question (single-select
+# with combination options) so the user sets detail level upfront.
 PLAN_PROMPT = """\
-You are in plan mode — design-first, no execution.
+You are in plan mode -- design-first, no execution.
 
 Workflow:
 1. Analyse the user's request.
@@ -58,31 +65,47 @@ Workflow:
    seems clear, ask 2-4 targeted questions to surface hidden assumptions,
    scope boundaries, and approach preferences. Cover these dimensions
    as relevant:
-   - Scope: what's in vs. out, success criteria
+   - Scope: what is in vs. out, success criteria
    - Constraints: tech stack, timeline, budget, existing code
    - Approach: architecture, data flow, key trade-offs
    - Edge cases: failure modes, validation, testing strategy
-   For each question, set `recommended: true` on exactly one option —
+   - **Diagram preference** (include this as one of your questions):
+     offer options like "All diagrams", "Excalidraw only", "Mermaid only",
+     "HTML only", "No diagrams (text-only plan)". Set `recommended: true`
+     on the option you think fits best.
+   For each question, set `recommended: true` on exactly one option --
    the UI will render a "(Recommended)" label automatically, do NOT
    add it to the label text. You may batch multiple questions in a
    single `ask_user_questions` call (max 4 per batch).
-3. Once the user has answered, write a detailed implementation plan
-   to `.hermes/plans/YYYY-MM-DD_HHMMSS-<slug>.md` and display the
+3. Based on the user's diagram preference, generate the selected types:
+   - **Excalidraw:** `.excalidraw` files in `.hermes/plans/diagrams/`
+     using the `excalidraw` skill (plain JSON, hand-drawn aesthetic)
+   - **Mermaid:** code blocks inline in the spec for architecture/data flow
+   - **HTML:** standalone HTML files in `.hermes/plans/diagrams/` using
+     the `architecture-diagram` skill (dark-themed SVG)
+   Skip any diagram type the user did not select.
+4. Write a detailed implementation plan to
+   `.hermes/plans/YYYY-MM-DD_HHMMSS-<slug>.md` and display the
    full plan in your response. Include steps, file paths, architecture
-   decisions, and ordering.
-4. Do NOT execute any tool calls that modify files or run code.
-5. Present an A/B/C exit choice:
-   A) Save Only (Recommended) — plan is saved
-   B) Compress and Execute — switch to /mode auto to execute
-   C) Continue in plan mode and iterate"""
+   decisions, and ordering. Reference any generated diagrams.
+5. Do NOT execute any tool calls that modify files or run code,
+   EXCEPT writing the plan, diagrams, and mockup files.
+6. Present an A/B/C/D exit choice:
+   A) Save Only (Recommended) -- plan is saved, session ends
+   B) Compress and Execute -- switch to /mode auto to execute
+   C) Continue in plan mode and iterate on the plan
+   D) Follow up questions about the plan/spec -- the plan is already
+      saved; ask clarifying questions, discuss trade-offs, and modify
+      the saved plan based on the discussion. Stay in plan mode."""
 
 
-# ── UltraPlan (gods_plan) ────────────────────────────────────────────
+# -- UltraPlan (gods_plan) ------------------------------------------------
 #
-# 10-15 questions in batches of 3-4, plus Mermaid + HTML/SVG diagrams,
-# plus UI mockups.  This is the exhaustive design-first path.
+# 10-15 questions in batches of 3-4, plus optional Excalidraw/Mermaid/HTML
+# diagrams controlled by tickbox, plus UI mockups.  A/B/C/D exit.
+# This is the exhaustive design-first path.
 ULTRAPLAN_PROMPT = """\
-You are in UltraPlan mode — exhaustive spec design with diagrams.
+You are in UltraPlan mode -- exhaustive spec design with diagrams.
 
 Workflow:
 1. Analyse the user's request comprehensively.
@@ -92,40 +115,52 @@ Workflow:
    - Technical approach, architecture, data flow
    - UI/UX mock-ups: which screens, design constraints
    - Edge cases, risks, validation, testing strategy
-   For each question, set `recommended: true` on exactly one option —
+   - **Diagram preference** (include as one question in the first batch):
+     offer options like "All diagrams", "Excalidraw only", "Mermaid only",
+     "HTML only", "No diagrams (text-only spec)". Set `recommended: true`
+     on the option you think fits best for this spec's complexity.
+   For each question, set `recommended: true` on exactly one option --
    the UI renders a "(Recommended)" label automatically, do NOT add it
    to the label text. You may batch multiple questions in a single
    `ask_user_questions` call (max 4 per batch).
-3. After all clarifications, generate architectural diagrams:
-   - Mermaid code blocks inline in the spec for system architecture
-   - HTML/SVG sidecar files in `.hermes/plans/diagrams/` for
-     high-fidelity views (use the `architecture-diagram` skill)
+3. After all clarifications, generate selected diagram types:
+   - **Excalidraw:** `.excalidraw` files in `.hermes/plans/diagrams/`
+     using the `excalidraw` skill (plain JSON, hand-drawn aesthetic)
+     -- system architecture, data flow, sequence diagrams
+   - **Mermaid:** code blocks inline in the spec for quick reference
+   - **HTML:** standalone HTML files in `.hermes/plans/diagrams/` using
+     the `architecture-diagram` skill (dark-themed SVG)
+   Skip any diagram type the user did not select.
 4. Generate UI mock-ups (if the spec covers UI work):
-   - Use the `sketch`, `claude-design`, or `mobile-screen-spec` skill
+   - Use the `claude-design` or `mobile-screen-spec` skill
    - Save to `.hermes/plans/diagrams/`
+   - Reference component names from the architecture diagrams
 5. Incorporate diagrams and mockups into the spec by reference.
 6. Save the comprehensive spec to
    `.hermes/plans/YYYY-MM-DD_HHMMSS-<slug>.md` and display the
    full spec in your response.
 7. Do NOT execute any tool calls that modify files or run code,
    EXCEPT writing the spec, diagrams, and mockup files.
-8. Present the A/B/C exit choice:
-   A) Save Only (Recommended) — spec is saved
-   B) Compress and Execute — switch to /mode auto to execute
-   C) Continue in UltraPlan mode and iterate"""
+8. Present the A/B/C/D exit choice:
+   A) Save Only (Recommended) -- spec is saved, session ends
+   B) Compress and Execute -- switch to /mode auto to execute
+   C) Continue in UltraPlan mode and iterate on the spec
+   D) Follow up questions about the plan/spec -- the spec is already
+      saved; ask clarifying questions, discuss trade-offs, and modify
+      the saved spec based on the discussion. Stay in UltraPlan mode."""
 
 
-# ── recon ────────────────────────────────────────────────────────────
+# -- recon ----------------------------------------------------------------
 #
 # 4 upfront Qs, then sequential dispatch to specialised profiles.
 # Output goes to .hermes/recon/ (NOT .hermes/plans/ or .hermes/audits/).
 RECON_PROMPT = """\
-You are in Recon mode — deep analysis, audit, and research.
+You are in Recon mode -- deep analysis, audit, and research.
 
 Workflow:
 1. Use the `ask_user_questions` tool to ask exactly 4 upfront
    clarification questions. For each question, set
-   `recommended: true` on exactly one option — the UI renders a
+   `recommended: true` on exactly one option -- the UI renders a
    "(Recommended)" label automatically, do NOT add it to the label
    text. Cover:
    - Target: what is being analysed (codebase, system, document, project)
@@ -135,10 +170,10 @@ Workflow:
 2. Based on the lens answer, dispatch to specialised agent profiles
    sequentially via `delegate_task` (role='leaf'). Read-only tools only.
    Do NOT modify any source files except the recon output document.
-   - Research  → Remii profile (research lead)
-   - Audit/QA  → Quan profile (QA lead)
-   - Independent review → KENSEI Review
-   - Governance/process → Denji profile
+   - Research  -> Remii profile (research lead)
+   - Audit/QA  -> Quan profile (QA lead)
+   - Independent review -> KENSEI Review
+   - Governance/process -> Denji profile
 3. Run analysis. Lead profile runs first; Quan's QA pass reviews the
    lead's output; KENSEI Review signs off on the final document.
 4. Produce the final audit/research document with findings, evidence,
@@ -147,7 +182,7 @@ Workflow:
 6. Do NOT modify any files except the recon output document."""
 
 
-# Internal-value → prompt.  ``auto`` returns None (no overlay prompt).
+# Internal-value -> prompt.  ``auto`` returns None (no overlay prompt).
 _MODE_PROMPTS = {
     "plan":      PLAN_PROMPT,
     "gods_plan": ULTRAPLAN_PROMPT,
@@ -159,7 +194,7 @@ def get_mode_prompt(mode: str) -> Optional[str]:
     """Return the ephemeral_system_prompt for a mode, or None for auto.
 
     This is the single source of truth.  Both the CLI ``/mode`` command
-    and the gateway's ``config.set`` handler call this — no duplicated
+    and the gateway's ``config.set`` handler call this -- no duplicated
     prompt text anywhere.
     """
     if mode == "auto":
@@ -182,5 +217,5 @@ def detect_mode(ephemeral_system_prompt: str) -> str:
 
 
 def mode_label(mode: str) -> str:
-    """User-facing label for a mode (gods_plan → UltraPlan, etc.)."""
+    """User-facing label for a mode (gods_plan -> UltraPlan, etc.)."""
     return MODE_LABELS.get(mode, mode)
