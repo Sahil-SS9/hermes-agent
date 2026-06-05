@@ -1721,6 +1721,21 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
         # NULL = unclassified, treated as 'fast' for backward compat.
         _add_column_if_missing(conn, "tasks", "tier", "tier TEXT")
 
+    if "status_reason" not in cols:
+        # Human/agent-readable reason for the current status (contract
+        # violations, review notes, needs_human_approval). Written by the
+        # claim_task contract gate, block helpers, and the quality-gate
+        # cron; read by dashboards/reconcile. Present on live boards via an
+        # out-of-band ALTER; this migration ensures fresh boards match so
+        # the WS-1/WS-4/WS-8 write paths don't crash on new boards.
+        _add_column_if_missing(conn, "tasks", "status_reason", "status_reason TEXT")
+
+    if "reviewer" not in cols:
+        # Sticky-reviewer pin for the review flow (WS-4): profile that should
+        # pick up the next review pass. NULL until first review. Also present
+        # on live boards via out-of-band ALTER; added here for fresh boards.
+        _add_column_if_missing(conn, "tasks", "reviewer", "reviewer TEXT")
+
     # Indexes over additive ``tasks`` columns must be created after the
     # columns exist. Keeping them in SCHEMA_SQL breaks legacy boards: SQLite
     # parses each statement in ``executescript`` against the live schema, so a
