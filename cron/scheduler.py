@@ -460,8 +460,13 @@ def _job_profile_context(job_id: str, profile: Optional[str]):
         yield None
         return
 
-    global _hermes_home
-    prior_override = _hermes_home
+    # NOTE: We no longer mutate the module-level `_hermes_home` global here.
+    # That variable is shared across all scheduler threads and caused a race
+    # condition where a profile job (sequential pool) would leak its
+    # HERMES_HOME into parallel-pool jobs running concurrently.  Instead we
+    # rely entirely on the ContextVar-based override in hermes_constants
+    # (set_hermes_home_override / get_hermes_home_override), which is
+    # naturally isolated per-context via copy_context().
     env_snapshot = os.environ.copy()
 
     from hermes_cli.profiles import normalize_profile_name, resolve_profile_env
@@ -482,7 +487,6 @@ def _job_profile_context(job_id: str, profile: Optional[str]):
     override_token = None
     try:
         override_token = set_hermes_home_override(profile_home)
-        _hermes_home = profile_home
         logger.info(
             "Job '%s': using Hermes profile '%s' (%s)",
             job_id,
@@ -491,7 +495,6 @@ def _job_profile_context(job_id: str, profile: Optional[str]):
         )
         yield normalized_profile
     finally:
-        _hermes_home = prior_override
         if override_token is not None:
             reset_hermes_home_override(override_token)
         # Delta-based restore: remove added keys, restore changed keys.
@@ -1250,6 +1253,29 @@ def _run_job_script(script_path: str) -> tuple[bool, str]:
             f"Blocked: script path resolves outside the scripts directory "
             f"({scripts_dir_resolved}): {script_path!r}"
         )
+
+    # Defensive fallback: if a ContextVar profile override leaked into this
+    # call (e.g. a sequential-pool profile job's HERMES_HOME bled into a
+    # parallel-pool no-profile job), the resolved scripts_dir may point at
+    # the profile's (empty) scripts/ directory instead of the global one.
+    # For relative paths, fall back to the global HERMES_HOME/scripts/ when
+    # the script isn't found in the profile dir.  The global dir is read
+    # directly from the env var to bypass any ContextVar contamination.
+    if not path.exists() and not raw.is_absolute():
+        global_hermes_home = Path(os.environ.get("HERMES_HOME", "").strip() or str(Path.home() / ".hermes"))
+        global_scripts = (global_hermes_home / "scripts").resolve()
+        global_path = (global_scripts / raw).resolve()
+        if global_path.exists() and global_path.is_file():
+            try:
+                global_path.relative_to(global_scripts)
+            except ValueError:
+                return False, f"Script not found: {path}"
+            logger.info(
+                "Job script '%s' not found at %s — falling back to global scripts dir %s",
+                script_path, path, global_path,
+            )
+            path = global_path
+            scripts_dir_resolved = global_scripts
 
     if not path.exists():
         return False, f"Script not found: {path}"
