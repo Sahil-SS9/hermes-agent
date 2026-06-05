@@ -28,6 +28,9 @@ Thumbs.db
 *.log
 logs/
 
+# GitOps watcher state (per-environment, not source)
+scripts/gitops/state/
+
 # Local runtime caches and build/data artefacts
 .hermes-docker/
 .notebooklm-home/
