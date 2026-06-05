@@ -5,7 +5,7 @@ Per spec (2026-06-04): the new mode system (plan / UltraPlan / recon) uses
 this instead of the single-question `clarify` tool.  Supports:
 
   * Batch: pass a list of questions in one tool call (UltraPlan: 3-4 Qs
-    per batch, Recon: 4 upfront Qs, Plan: 0-3 ad-hoc).
+    per batch, Recon: 4 upfront Qs, Plan: 2-4 mandatory interview).
   * Recommended: each question can mark one option as recommended; the
     UI highlights it with a "(Recommended)" label.
   * Boxed UI: platform layer renders each question in a bordered panel,
@@ -32,7 +32,7 @@ from tools.registry import registry, tool_error
 
 # Hard caps.  These mirror Claude Code's documented limits and the
 # recon/UltraPlan spec ranges:
-#   - Plan mode: 0-3 ad-hoc
+#   - Plan mode: 2-4 mandatory interview
 #   - UltraPlan: 10-15 total, in batches of 3-4
 #   - Recon:     exactly 4 upfront
 # Tool-level cap of 4 per batch keeps the TUI overlay readable.

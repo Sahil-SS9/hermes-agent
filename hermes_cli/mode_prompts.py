@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Shared mode prompts for the agent mode system.
 
-Per spec (2026-06-04): Plan mirrors Claude Code (0-3 ad-hoc Qs), UltraPlan
-expands to 10-15 Qs in batches plus Mermaid/HTML diagrams, Recon asks 4
-upfront Qs and dispatches to specialised agent profiles sequentially.
+Per spec (2026-06-04, updated 2026-06-05): Plan conducts a mandatory user
+interview via AskUserQuestions (2-4 targeted Qs, never skip), then writes
+a spec.  UltraPlan expands to 10-15 Qs in batches plus Mermaid/HTML
+diagrams.  Recon asks 4 upfront Qs and dispatches to specialised agent
+profiles sequentially.
 
 The internal mode value ``gods_plan`` is preserved for backward
 compatibility — the user-facing label is "UltraPlan".  See skill
@@ -41,22 +43,30 @@ _MODE_PROMPT_MARKERS = {
 
 # ── plan ─────────────────────────────────────────────────────────────
 #
-# Mirrors Claude Code's plan mode: 0-3 ad-hoc questions, write a spec,
-# A/B/C exit.  Question count and batching are deliberately loose — the
-# model decides what's needed for the specific request.
+# Mirrors Claude Code's plan mode: mandatory user interview via
+# AskUserQuestions, then write a spec, A/B/C exit.  The model decides
+# question count (2-4) and batching, but interviewing is required —
+# never skip it, even for seemingly simple requests.  Claude Code
+# always interviews; so must we.
 PLAN_PROMPT = """\
 You are in plan mode — design-first, no execution.
 
 Workflow:
 1. Analyse the user's request.
-2. Use the `ask_user_questions` tool to ask 0-3 focused questions for
-   the most ambiguous decisions. For each question, set
-   `recommended: true` on exactly one option — the UI will render a
-   "(Recommended)" label automatically, do NOT add it to the label
-   text. You may batch multiple questions in a single
-   `ask_user_questions` call (max 4 per batch). Skip this step
-   entirely if the request is unambiguous.
-3. Once requirements are clear, write a detailed implementation plan
+2. **You MUST use the `ask_user_questions` tool to interview the user
+   before writing any plan.** This is not optional. Even if the request
+   seems clear, ask 2-4 targeted questions to surface hidden assumptions,
+   scope boundaries, and approach preferences. Cover these dimensions
+   as relevant:
+   - Scope: what's in vs. out, success criteria
+   - Constraints: tech stack, timeline, budget, existing code
+   - Approach: architecture, data flow, key trade-offs
+   - Edge cases: failure modes, validation, testing strategy
+   For each question, set `recommended: true` on exactly one option —
+   the UI will render a "(Recommended)" label automatically, do NOT
+   add it to the label text. You may batch multiple questions in a
+   single `ask_user_questions` call (max 4 per batch).
+3. Once the user has answered, write a detailed implementation plan
    to `.hermes/plans/YYYY-MM-DD_HHMMSS-<slug>.md` and display the
    full plan in your response. Include steps, file paths, architecture
    decisions, and ordering.
