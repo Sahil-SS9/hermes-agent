@@ -1760,6 +1760,18 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
         )                                                                      # KENSEI CUSTOM
     elif function_name == "delegate_task":
         return _finish_agent_tool(agent._dispatch_delegate_task(function_args))
+    # ── KENSEI CUSTOM: config_set tool (agent can switch modes) ──
+    elif function_name == "config_set":
+        from tui_gateway.server import handle_request as _gw_handle
+        key = function_args.get("key", "")
+        value = function_args.get("value", "")
+        session_id = getattr(agent, "session_id", "") or ""
+        result = _gw_handle({
+            "method": "config.set",
+            "params": {"key": key, "value": value, "session_id": session_id},
+        })
+        return _finish_agent_tool(json.dumps(result or {}, ensure_ascii=False))
+    # ── END KENSEI CUSTOM ──
     else:
         return _ra().handle_function_call(
             function_name, function_args, effective_task_id,

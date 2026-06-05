@@ -85,7 +85,18 @@ Workflow:
    - **HTML:** standalone HTML files in `.hermes/plans/diagrams/` using
      the `architecture-diagram` skill (dark-themed SVG)
    Skip any diagram type the user did not select.
-4. Write a detailed implementation plan to
+   **Live sharing:** the gateway serves every file in that directory at
+   `http://127.0.0.1:9119/api/diagrams/<filename>` (path-traversal-safe,
+   no-cache). After writing a diagram, call the `config_set` tool with
+   `key="diagram.ready"` and `value=<filename>` to notify the TUI and
+   desktop app — the TUI shows a clickable link.
+4. **Feedback loop (after diagrams, before the plan):** after the TUI
+   confirms the diagram is open (or after a short pause if no TUI), ask
+   the user via `ask_user_questions` whether to (a) proceed with the
+   plan, (b) modify the diagram, or (c) skip the diagram. Do NOT write
+   the plan file until the user confirms or skips. This keeps the
+   diagram and the plan in sync.
+5. Write a detailed implementation plan to
    `.hermes/plans/YYYY-MM-DD_HHMMSS-<slug>.md` and display the
    full plan in your response. Include steps, file paths, architecture
    decisions, and ordering. Reference any generated diagrams.
@@ -145,7 +156,17 @@ Workflow:
    - **HTML:** standalone HTML files in `.hermes/plans/diagrams/` using
      the `architecture-diagram` skill (dark-themed SVG)
    Skip any diagram type the user did not select.
-4. Generate UI mock-ups (if the spec covers UI work):
+   **Live sharing:** the gateway serves every file in that directory at
+   `http://127.0.0.1:9119/api/diagrams/<filename>` (path-traversal-safe,
+   no-cache). After writing a diagram, call the `config_set` tool with
+   `key="diagram.ready"` and `value=<filename>` to notify the TUI and
+   desktop app — the TUI shows a clickable link.
+4. **Feedback loop (after diagrams, before mockups):** after the TUI
+   confirms the diagram is open (or after a short pause if no TUI), ask
+   the user via `ask_user_questions` whether to (a) proceed with mockups
+   and the spec, (b) modify the diagram, or (c) skip the diagram. Do NOT
+   proceed to mockups or the spec until the user confirms or skips.
+5. Generate UI mock-ups (if the spec covers UI work):
    - Use the `claude-design` or `mobile-screen-spec` skill
    - Save to `.hermes/plans/diagrams/`
    - Reference component names from the architecture diagrams

@@ -265,6 +265,9 @@ CREATE TABLE IF NOT EXISTS sessions (
     handoff_error TEXT,
     rewind_count INTEGER NOT NULL DEFAULT 0,
     archived INTEGER NOT NULL DEFAULT 0,
+    -- ── KENSEI CUSTOM: persist agent mode across restarts ──
+    agent_mode TEXT DEFAULT 'auto',
+    -- ── END KENSEI CUSTOM ──
     FOREIGN KEY (parent_session_id) REFERENCES sessions(id)
 );
 
@@ -1134,6 +1137,17 @@ class SessionDB:
                 (model, session_id),
             )
         self._execute_write(_do)
+
+    # ── KENSEI CUSTOM: persist agent mode across restarts ──
+    def update_session_agent_mode(self, session_id: str, agent_mode: str) -> None:
+        """Persist the agent mode (auto/plan/gods_plan/recon) to the session row."""
+        def _do(conn):
+            conn.execute(
+                "UPDATE sessions SET agent_mode = ? WHERE id = ?",
+                (agent_mode, session_id),
+            )
+        self._execute_write(_do)
+    # ── END KENSEI CUSTOM ──
 
     def update_token_counts(
         self,

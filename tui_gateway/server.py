@@ -3078,6 +3078,19 @@ def _(rid, params: dict) -> dict:
         except Exception as e:
             return _err(rid, 5000, f"resume failed: {e}")
         session = _sessions.get(sid) or {}
+        # ── KENSEI CUSTOM: restore agent mode from DB on resume ──
+        db = _get_db()
+        if db:
+            try:
+                db_session = db.get_session(target)
+                if db_session:
+                    saved_mode = db_session.get("agent_mode", "auto") or "auto"
+                    session["agent_mode"] = saved_mode
+                    if saved_mode != "auto":
+                        agent.ephemeral_system_prompt = _mode_prompt(saved_mode)
+            except Exception:
+                pass
+        # ── END KENSEI CUSTOM ──
     return _ok(
         rid,
         {
@@ -5235,6 +5248,14 @@ def _(rid, params: dict) -> dict:
             agent = session.get("agent")
             if agent is not None:
                 agent.ephemeral_system_prompt = _mode_prompt(nv)
+            # Persist to DB so mode survives gateway restarts
+            db = _get_db()
+            session_key = session.get("session_key", "")
+            if db and session_key:
+                try:
+                    db.update_session_agent_mode(session_key, nv)
+                except Exception:
+                    pass
             # Emit session.info so TUI/desktop learn the new mode
             if agent is not None:
                 _emit(
@@ -5244,6 +5265,29 @@ def _(rid, params: dict) -> dict:
                 )
 
         return _ok(rid, {"key": key, "value": nv})
+
+    # ── KENSEI CUSTOM: diagram.ready event emission ──
+    # Agent calls config.set(key="diagram.ready", value=<filename>) after
+    # writing a diagram.  We emit a diagram.ready event with the live URL
+    # so the TUI/desktop can show a clickable link.  No DB persistence
+    # needed -- diagrams are ephemeral session output.  See skill
+    # `agent-modes` for the full spec.  Must survive upstream merges.
+    if key == "diagram.ready":
+        import re as _re_diag
+        filename = str(value or "").strip()
+        if not _re_diag.fullmatch(r"[\w.\-]+", filename):
+            return _err(rid, 4002, f"invalid diagram filename: {filename!r}")
+        if session:
+            _emit(
+                "diagram.ready",
+                params.get("session_id", ""),
+                {
+                    "filename": filename,
+                    "url": f"/api/diagrams/{filename}",
+                    "session_id": params.get("session_id", ""),
+                },
+            )
+        return _ok(rid, {"key": key, "value": filename})
 
     if key == "yolo":
         # Per-session approval bypass — same scope as the TUI's Shift+Tab. This

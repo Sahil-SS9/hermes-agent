@@ -968,6 +968,49 @@ def _safe_call(mod, fn_name: str, default):
 
 
 # ---------------------------------------------------------------------------
+# Diagram serving — Excalidraw files for plan/UltraPlan mode output.
+# Agents write diagrams to <hermes_home>/plans/diagrams/ and the web server
+# serves them at /api/diagrams/<filename> for live TUI/browser viewing.
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/diagrams/{filename}")
+async def get_diagram(filename: str):
+    """Serve an Excalidraw file from <hermes_home>/plans/diagrams/.
+
+    Path traversal is blocked: only basename characters allowed, and the
+    resolved path must live under the diagrams directory.
+    """
+    import re as _re
+
+    if not _re.fullmatch(r"[\w.\-]+", filename):
+        return JSONResponse(
+            {"error": "invalid filename"},
+            status_code=400,
+        )
+    diagrams_dir = get_hermes_home() / "plans" / "diagrams"
+    diagrams_dir.mkdir(parents=True, exist_ok=True)
+    target = (diagrams_dir / filename).resolve()
+    try:
+        target.relative_to(diagrams_dir.resolve())
+    except ValueError:
+        return JSONResponse(
+            {"error": "path traversal blocked"},
+            status_code=403,
+        )
+    if not target.exists() or not target.is_file():
+        return JSONResponse(
+            {"error": "diagram not found"},
+            status_code=404,
+        )
+    return FileResponse(
+        target,
+        media_type="application/json",
+        headers={"Cache-Control": "no-cache, must-revalidate"},
+    )
+
+
+# ---------------------------------------------------------------------------
 # Portal endpoint — Nous Portal auth + Tool Gateway routing status (read-only).
 # ---------------------------------------------------------------------------
 
