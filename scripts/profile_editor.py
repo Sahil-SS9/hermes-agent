@@ -72,6 +72,34 @@ def edit(args: list[str]) -> dict:
     if len(args) < 5:
         return {"ok": False, "error": "usage: profile_editor.py <profile> <file> <key_path> <new_value> <reason>"}
 
+    # WS-7 safety gates: feature flag + blast-radius cap
+    # Feature flag must be explicitly enabled in config.yaml
+    config_path = HERMES_HOME / "config.yaml"
+    try:
+        import yaml as _yaml
+        with open(config_path) as _f:
+            _cfg = _yaml.safe_load(_f) or {}
+        autonomous = (_cfg.get("governance", {}) or {}).get("autonomous_edits_enabled", False)
+        if not autonomous:
+            return {"ok": False, "error": "autonomous edits disabled — set governance.autonomous_edits_enabled: true in config.yaml to enable"}
+    except Exception:
+        return {"ok": False, "error": "cannot read config.yaml to check autonomous_edits_enabled flag"}
+
+    # Blast-radius cap: max 3 profile edits per 24h window
+    import re as _re
+    import time as _time
+    now = _time.time()
+    try:
+        r = subprocess.run(
+            ["git", "log", "--oneline", "--since=24 hours ago", "--author=denji"],
+            cwd=str(PROFILES_DIR), capture_output=True, text=True, timeout=10,
+        )
+        recent_count = len(r.stdout.strip().splitlines()) if r.stdout.strip() else 0
+    except Exception:
+        recent_count = 0
+    if recent_count >= 3:
+        return {"ok": False, "error": f"blast-radius cap: {recent_count} edits in trailing 24h (max 3). Try again later."}
+
     profile_name = args[0]
     file_name = args[1]
     key_path = args[2]

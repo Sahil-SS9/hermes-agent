@@ -89,6 +89,14 @@ Rules:
     and the system will route to the default_assignee.
   - Each child task body is what a fresh worker will read with no other
     context — be specific about goal, approach, and acceptance criteria.
+  - FULL-TIER TASKS ONLY: if the parent task has tier=full, every child
+    body MUST include both of these exact section headers:
+    ## Acceptance Criteria
+    followed by bullet-pointed criteria.
+    ## Test Plan
+    followed by the testing strategy.
+    This is required for the contract gate (validate_task_contract).
+    Fast-tier tasks do NOT need these sections.
 
 When the task is genuinely a single unit of work (no useful decomposition),
 return:

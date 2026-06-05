@@ -3897,27 +3897,27 @@ def complete_task(
     ).fetchone()
     task_tier = (tier_row["tier"] or "").lower() if tier_row else ""
     if task_tier == "full":
-        # Loop guard: if this task has already passed review at least
-        # once, skip re-routing to review — the work has been vetted.
-        # Without this, approve→re-implement→complete would create an
-        # unbounded review loop (max_review_passes only caps chained
-        # approvals inside the review column, not complete→review cycles).
+        # WS-4 loop guard: only skip redirect when the latest review is
+        # UNRESOLVED (no subsequent approve/reject). Once a review is
+        # resolved (passed or rejected), the next completion must re-enter
+        # review so reject→fix→re-review works.
         passes = review_pass_count(conn, task_id)
-        already_routed = _count_events(conn, task_id, "review_requested") > 0
-        if passes > 0 or already_routed:
-            if already_routed and passes == 0:
-                _log.debug(
-                    "complete_task: %s has prior review_requested but no "
-                    "review_passed yet — skipping redirect, going to done "
-                    "(reviewer called kanban_complete instead of approve)",
-                    task_id,
-                )
-            else:
-                _log.debug(
-                    "complete_task: %s has %d prior review passes — "
-                    "skipping review redirect, going to done",
-                    task_id, passes,
-                )
+        latest_review_id = conn.execute(
+            "SELECT MAX(id) FROM task_events WHERE task_id = ? AND kind = 'review_requested'",
+            (task_id,),
+        ).fetchone()[0] or 0
+        latest_resolution_id = conn.execute(
+            "SELECT MAX(id) FROM task_events WHERE task_id = ? "
+            "AND kind IN ('review_passed', 'review_rejected')",
+            (task_id,),
+        ).fetchone()[0] or 0
+        review_is_open = latest_review_id > latest_resolution_id
+        if passes > 0 or review_is_open:
+            _log.debug(
+                "complete_task: %s — passes=%d, latest_review=%d, "
+                "latest_resolution=%d, review_is_open=%s — skipping redirect",
+                task_id, passes, latest_review_id, latest_resolution_id, review_is_open,
+            )
         else:
             return request_review(
                 conn, task_id,
