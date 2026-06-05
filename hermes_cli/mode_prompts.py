@@ -8,8 +8,9 @@ UltraPlan expands to 10-15 Qs in batches plus optional diagrams.
 Recon asks 4 upfront Qs and dispatches to specialised agent profiles
 sequentially.
 
-Both plan and gods_plan use A/B/C/D exit: Save, Compress+Execute,
-Continue iterating, Follow up questions (auto-save + Q&A).
+Both plan and gods_plan use A/B/C/D exit presented via ask_user_questions
+(TUI buttons, not freeform text): Save, Compress+Execute, Continue iterating,
+Follow up questions (auto-save + Q&A).
 
 The internal mode value ``gods_plan`` is preserved for backward
 compatibility -- the user-facing label is "UltraPlan".  See skill
@@ -48,10 +49,10 @@ _MODE_PROMPT_MARKERS = {
 # -- plan -----------------------------------------------------------------
 #
 # Mirrors Claude Code's plan mode: mandatory user interview via
-# AskUserQuestions, then write a spec, A/B/C/D exit.  The model decides
-# question count (2-4) and batching, but interviewing is required --
-# never skip it, even for seemingly simple requests.  Claude Code
-# always interviews; so must we.
+# AskUserQuestions, then write a spec, A/B/C/D exit presented via
+# ask_user_questions (TUI buttons).  The model decides question count
+# (2-4) and batching, but interviewing is required -- never skip it,
+# even for seemingly simple requests.
 #
 # Diagram output is controlled by a tickbox question (single-select
 # with combination options) so the user sets detail level upfront.
@@ -88,21 +89,34 @@ Workflow:
    `.hermes/plans/YYYY-MM-DD_HHMMSS-<slug>.md` and display the
    full plan in your response. Include steps, file paths, architecture
    decisions, and ordering. Reference any generated diagrams.
-5. Do NOT execute any tool calls that modify files or run code,
+5. **Verify the plan file was written** before presenting exit options.
+   Use `read_file` or `terminal` to confirm the file exists and is
+   non-empty. If the write failed, retry before continuing.
+6. Do NOT execute any tool calls that modify files or run code,
    EXCEPT writing the plan, diagrams, and mockup files.
-6. Present an A/B/C/D exit choice:
-   A) Save Only (Recommended) -- plan is saved, session ends
-   B) Compress and Execute -- switch to /mode auto to execute
-   C) Continue in plan mode and iterate on the plan
-   D) Follow up questions about the plan/spec -- the plan is already
-      saved; ask clarifying questions, discuss trade-offs, and modify
-      the saved plan based on the discussion. Stay in plan mode."""
+7. **Present the A/B/C/D exit choice via `ask_user_questions`.**
+   Ask a single question with these 4 options (set `recommended: true`
+   on option A):
+   A) Save Only -- plan is saved, session ends
+   B) Compress and Execute -- switch to auto mode and execute the plan
+   C) Continue in plan mode -- iterate on the plan
+   D) Follow up questions -- Q&A to discuss trade-offs and modify
+      the saved plan. Stay in plan mode.
+   Act on the user's choice:
+   - **A:** Confirm plan is saved. End your response.
+   - **B:** Call `config.set` with `key="mode", value="auto"` to clear
+     the plan mode prompt. Then begin executing the plan steps.
+   - **C:** Ask what the user wants to change. Continue iterating.
+   - **D:** Confirm plan is saved. Ask what the user wants to discuss.
+     Answer questions and modify the saved plan as needed. Stay in
+     plan mode until the user picks A, B, or C."""
 
 
 # -- UltraPlan (gods_plan) ------------------------------------------------
 #
 # 10-15 questions in batches of 3-4, plus optional Excalidraw/Mermaid/HTML
-# diagrams controlled by tickbox, plus UI mockups.  A/B/C/D exit.
+# diagrams controlled by tickbox, plus UI mockups.  A/B/C/D exit via
+# ask_user_questions (TUI buttons).
 # This is the exhaustive design-first path.
 ULTRAPLAN_PROMPT = """\
 You are in UltraPlan mode -- exhaustive spec design with diagrams.
@@ -139,15 +153,27 @@ Workflow:
 6. Save the comprehensive spec to
    `.hermes/plans/YYYY-MM-DD_HHMMSS-<slug>.md` and display the
    full spec in your response.
-7. Do NOT execute any tool calls that modify files or run code,
+7. **Verify the spec file was written** before presenting exit options.
+   Use `read_file` or `terminal` to confirm the file exists and is
+   non-empty. If the write failed, retry before continuing.
+8. Do NOT execute any tool calls that modify files or run code,
    EXCEPT writing the spec, diagrams, and mockup files.
-8. Present the A/B/C/D exit choice:
-   A) Save Only (Recommended) -- spec is saved, session ends
-   B) Compress and Execute -- switch to /mode auto to execute
-   C) Continue in UltraPlan mode and iterate on the spec
-   D) Follow up questions about the plan/spec -- the spec is already
-      saved; ask clarifying questions, discuss trade-offs, and modify
-      the saved spec based on the discussion. Stay in UltraPlan mode."""
+9. **Present the A/B/C/D exit choice via `ask_user_questions`.**
+   Ask a single question with these 4 options (set `recommended: true`
+   on option A):
+   A) Save Only -- spec is saved, session ends
+   B) Compress and Execute -- switch to auto mode and execute the spec
+   C) Continue in UltraPlan mode -- iterate on the spec
+   D) Follow up questions -- Q&A to discuss trade-offs and modify
+      the saved spec. Stay in UltraPlan mode.
+   Act on the user's choice:
+   - **A:** Confirm spec is saved. End your response.
+   - **B:** Call `config.set` with `key="mode", value="auto"` to clear
+     the UltraPlan mode prompt. Then begin executing the spec steps.
+   - **C:** Ask what the user wants to change. Continue iterating.
+   - **D:** Confirm spec is saved. Ask what the user wants to discuss.
+     Answer questions and modify the saved spec as needed. Stay in
+     UltraPlan mode until the user picks A, B, or C."""
 
 
 # -- recon ----------------------------------------------------------------
