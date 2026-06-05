@@ -18,7 +18,7 @@ from database import approve_draft, reject_draft, mark_enriched
 from database import list_approved_pending_enrichment, truncate_drafts, purge_stale_drafts, count_drafts_older_than
 from database import update_draft_ai_image_path, update_draft_ai_video_path
 from llm_drafts import generate_drafts
-from telegram_digest import deliver_digest, send_message
+from discord_digest import deliver_discord_digest
 
 
 def run_stage_1(
@@ -226,9 +226,9 @@ def run_digest(dry_run: bool = False, drafts: Optional[List[dict]] = None) -> bo
             print()
         return True
 
-    # Deliver digest
-    print(f"Delivering {len(drafts)} current draft(s) to Telegram...")
-    deliver_digest(drafts)
+    # Deliver digest via Discord
+    print(f"Delivering {len(drafts)} current draft(s) to Discord...")
+    deliver_discord_digest(drafts)
     return True
 
 
