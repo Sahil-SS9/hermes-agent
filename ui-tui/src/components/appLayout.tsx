@@ -373,6 +373,7 @@ const StatusRulePane = memo(function StatusRulePane({
   return (
     <Box marginTop={at === 'top' ? 1 : 0}>
       <StatusRule
+        agentMode={ui.agentMode}
         bgCount={ui.bgTasks.size}
         busy={ui.busy}
         cols={composer.cols}

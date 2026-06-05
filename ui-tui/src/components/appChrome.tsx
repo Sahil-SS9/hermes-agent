@@ -367,6 +367,7 @@ export function GoodVibesHeart({ tick, t }: { tick: number; t: Theme }) {
 }
 
 export function StatusRule({
+  agentMode = 'auto',
   cwdLabel,
   cols,
   busy,
@@ -390,6 +391,21 @@ export function StatusRule({
   const barColor = ctxBarColor(pct, t)
   const segs = statusBarSegments(cols)
 
+  // ── KENSEI CUSTOM: mode badge in status bar ──
+  const MODE_BADGE: Record<string, { icon: string; label: string; color: string }> = {
+    auto:      { icon: '', label: '', color: '' },
+    plan:      { icon: '📋', label: 'Plan', color: 'green' },
+    gods_plan: { icon: '👑', label: 'UltraPlan', color: 'red' },
+    recon:     { icon: '🔍', label: 'Recon', color: 'yellow' },
+  }
+  const modeInfo = MODE_BADGE[agentMode] || MODE_BADGE.auto
+  const modeText = modeInfo.label ? `${modeInfo.icon} ${modeInfo.label}` : ''
+  const modeColor = modeInfo.color === 'green' ? t.color.ok
+    : modeInfo.color === 'red' ? t.color.error
+    : modeInfo.color === 'yellow' ? t.color.label
+    : t.color.muted
+  // ── END KENSEI CUSTOM ──
+
   // On narrow terminals the context read-out collapses to a bare token count
   // (`12k tok`) and the visual fill bar is dropped entirely.
   const ctxLabel = usage.context_max
@@ -403,7 +419,7 @@ export function StatusRule({
   const bar = !segs.compactCtx && usage.context_max ? ctxBar(pct) : ''
   const modelText = modelLabel(model, modelReasoningEffort, modelFast)
 
-  // Width of the must-keep left segments (indicator + model + context). They
+  // Width of the must-keep left segments (indicator + model/effort/mode + context). They
   // are pinned (never shrink) and reserved so the cwd/branch on the right
   // yields first. The busy face width depends on the active /indicator style
   // (kaomoji is wide + verb; unicode is a bare 1-col spinner).
@@ -412,6 +428,9 @@ export function StatusRule({
     (busy ? busyIndicatorWidth(indicatorStyle, turnStartedAt != null) : stringWidth(status)) +
     stringWidth(' │ ') +
     stringWidth(modelText) +
+    // ── KENSEI CUSTOM: mode badge width (inline with model) ──
+    (modeText ? stringWidth(' ') + stringWidth(modeText) : 0) +
+    // ── END KENSEI CUSTOM ──
     (ctxLabel ? stringWidth(' │ ') + stringWidth(ctxLabel) : 0)
 
   const { leftWidth, rightWidth, separatorWidth } = statusRuleWidths(cols, cwdLabel, essentialWidth)
@@ -475,6 +494,13 @@ export function StatusRule({
             {' │ '}
             {modelText}
           </Text>
+          {/* ── KENSEI CUSTOM: mode badge (inline with model+reasoning) ── */}
+          {modeText ? (
+            <Text color={modeColor} wrap="truncate-end">
+              {' '}{modeText}
+            </Text>
+          ) : null}
+          {/* ── END KENSEI CUSTOM ── */}
           {ctxLabel ? (
             <Text color={t.color.muted} wrap="truncate-end">
               {' │ '}
@@ -645,6 +671,7 @@ export function TranscriptScrollbar({ scrollRef, t }: TranscriptScrollbarProps) 
 }
 
 interface StatusRuleProps {
+  agentMode?: string
   bgCount: number
   liveSessionCount: number
   busy: boolean

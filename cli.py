@@ -3686,6 +3686,9 @@ class HermesCLI:
             "model_short": model_short,
             "provider_name": provider_name,
             "reasoning_effort": reasoning_effort,
+            # ── KENSEI CUSTOM: agent mode in status bar ──
+            "agent_mode": self._detect_current_mode(),
+            # ── END KENSEI CUSTOM ──
             "duration": format_duration_compact(elapsed_seconds),
             "prompt_elapsed": self._format_prompt_elapsed(
                 getattr(self, "_prompt_start_time", None),
@@ -3961,11 +3964,21 @@ class HermesCLI:
             duration_label = snapshot["duration"]
 
             yolo_active = self._is_session_yolo_active()
+            # ── KENSEI CUSTOM: compact mode badge for status bar ──
+            _MODE_BADGE_TEXT = {
+                "plan": "📋 Plan", "gods_plan": "👑 UltraPlan", "recon": "🔍 Recon",
+            }
+            _mode_text = _MODE_BADGE_TEXT.get(snapshot.get("agent_mode", "auto"), "")
+            # ── END KENSEI CUSTOM ──
             if width < 52:
                 effort = snapshot.get("reasoning_effort", "")
                 model_segment = f"⚕ {snapshot['model_short']}"
                 if effort and effort != "default":
                     model_segment += f" 🧠{effort}"
+                # ── KENSEI CUSTOM: mode badge (narrow) ──
+                if _mode_text:
+                    model_segment += f" {_mode_text}"
+                # ── END KENSEI CUSTOM ──
                 text = f"{model_segment} · {duration_label}"
                 if yolo_active:
                     text += " · ⚠ YOLO"
@@ -3976,6 +3989,10 @@ class HermesCLI:
                 model_segment = f"⚕ {snapshot['model_short']}"
                 if effort and effort != "default":
                     model_segment += f" 🧠{effort}"
+                # ── KENSEI CUSTOM: mode badge (medium) ──
+                if _mode_text:
+                    model_segment += f" {_mode_text}"
+                # ── END KENSEI CUSTOM ──
                 parts = [model_segment, percent_label]
                 compressions = snapshot.get("compressions", 0)
                 if compressions:
@@ -4006,6 +4023,10 @@ class HermesCLI:
                 model_segment += f" ({provider})"
             if effort and effort != "default":
                 model_segment += f" 🧠{effort}"
+            # ── KENSEI CUSTOM: mode badge (wide) ──
+            if _mode_text:
+                model_segment += f" {_mode_text}"
+            # ── END KENSEI CUSTOM ──
             parts = [model_segment, context_label, percent_label]
             if compressions:
                 parts.append(f"🗜️ {compressions}")
@@ -4038,6 +4059,14 @@ class HermesCLI:
             width = self._get_tui_terminal_width()
             duration_label = snapshot["duration"]
             yolo_active = self._is_session_yolo_active()
+            # ── KENSEI CUSTOM: mode badge fragments ──
+            _MODE_FRAGS = {
+                "plan":      ("class:status-bar-good", " 📋 Plan"),
+                "gods_plan": ("class:status-bar-bad",  " 👑 UltraPlan"),
+                "recon":     ("class:status-bar-warn", " 🔍 Recon"),
+            }
+            _mode_frag = _MODE_FRAGS.get(snapshot.get("agent_mode", "auto"))
+            # ── END KENSEI CUSTOM ──
 
             if width < 52:
                 frags = [
@@ -4048,6 +4077,10 @@ class HermesCLI:
                 effort = snapshot.get("reasoning_effort", "")
                 if effort and effort != "default":
                     frags.append(("class:status-bar-strong", f" 🧠{effort}"))
+                # ── KENSEI CUSTOM: mode badge (narrow fragments) ──
+                if _mode_frag:
+                    frags.append(_mode_frag)
+                # ── END KENSEI CUSTOM ──
                 frags.extend([
                     ("class:status-bar-dim", " · "),
                     ("class:status-bar-dim", duration_label),
@@ -4071,6 +4104,10 @@ class HermesCLI:
                     effort = snapshot.get("reasoning_effort", "")
                     if effort and effort != "default":
                         frags.append(("class:status-bar-strong", f" 🧠{effort}"))
+                    # ── KENSEI CUSTOM: mode badge (medium fragments) ──
+                    if _mode_frag:
+                        frags.append(_mode_frag)
+                    # ── END KENSEI CUSTOM ──
                     frags.extend([
                         ("class:status-bar-dim", " · "),
                         (self._status_bar_context_style(percent), percent_label),
@@ -4116,6 +4153,10 @@ class HermesCLI:
                     effort = snapshot.get("reasoning_effort", "")
                     if effort and effort != "default":
                         frags.append(("class:status-bar-strong", f" 🧠{effort}"))
+                    # ── KENSEI CUSTOM: mode badge (wide fragments) ──
+                    if _mode_frag:
+                        frags.append(_mode_frag)
+                    # ── END KENSEI CUSTOM ──
                     frags.extend([
                         ("class:status-bar-dim", " │ "),
                         ("class:status-bar-dim", context_label),
@@ -10275,6 +10316,18 @@ class HermesCLI:
         _cprint(f"  mode → {mode_label(mode)}")
         if mode != "auto":
             _cprint(f"  {_DIM}Shift+Tab to cycle, /mode auto to reset{_RST}")
+
+    # ── KENSEI CUSTOM: detect current mode for status bar ──
+    def _detect_current_mode(self) -> str:
+        """Return the current agent mode key (auto/plan/gods_plan/recon)."""
+        try:
+            from hermes_cli.mode_prompts import detect_mode
+            current = getattr(self, "agent", None)
+            prompt = getattr(current, "ephemeral_system_prompt", "") or ""
+            return detect_mode(prompt)
+        except Exception:
+            return "auto"
+    # ── END KENSEI CUSTOM ──
 
     def _handle_reasoning_command(self, cmd: str):
         """Handle /reasoning — manage effort level and display toggle.
