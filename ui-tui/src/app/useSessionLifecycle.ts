@@ -20,7 +20,7 @@ import type {
 import { asRpcResult } from '../lib/rpc.js'
 import type { Msg, PanelSection, SessionInfo, Usage } from '../types.js'
 
-import type { ComposerActions, GatewayRpc, StateSetter } from './interfaces.js'
+import type { AgentMode, ComposerActions, GatewayRpc, StateSetter } from './interfaces.js'
 import { patchOverlayState } from './overlayStore.js'
 import { turnController } from './turnController.js'
 import { patchTurnState } from './turnStore.js'
@@ -183,6 +183,7 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
 
       writeActiveSessionFile(r.session_id)
       patchUiState({
+        agentMode: (info?.agent_mode || 'auto') as AgentMode,
         info,
         sid: r.session_id,
         status: info?.version ? 'ready' : 'starting agent…',
@@ -325,6 +326,7 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
             setHistoryItems(info ? [introMsg(info), ...resumed] : resumed)
             writeActiveSessionFile(r.resumed ?? r.session_id)
             patchUiState({
+              agentMode: (info?.agent_mode || 'auto') as AgentMode,
               busy: running,
               info,
               sid: r.session_id,

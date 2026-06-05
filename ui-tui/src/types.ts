@@ -166,6 +166,7 @@ export interface McpServerStatus {
 }
 
 export interface SessionInfo {
+  agent_mode?: string
   cwd?: string
   fast?: boolean
   lazy?: boolean

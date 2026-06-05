@@ -1602,6 +1602,9 @@ def _session_info(agent, session: dict | None = None) -> dict:
         yolo = bool(_YOLO_MODE_FROZEN) or session_yolo or _get_approval_mode() == "off"
     except Exception:
         yolo = False
+    # ── KENSEI CUSTOM: agent mode in session info ──
+    agent_mode = (session or {}).get("agent_mode", "auto")
+    # ── END KENSEI CUSTOM ──
     info: dict = {
         "model": getattr(agent, "model", ""),
         "reasoning_effort": reasoning_effort,
@@ -1621,6 +1624,9 @@ def _session_info(agent, session: dict | None = None) -> dict:
         "update_command": "",
         "usage": _get_usage(agent),
         "profile_name": _current_profile_name(),
+        # ── KENSEI CUSTOM: agent mode in session info ──
+        "agent_mode": agent_mode,
+        # ── END KENSEI CUSTOM ──
     }
     try:
         from hermes_cli import __version__, __release_date__
@@ -5229,6 +5235,13 @@ def _(rid, params: dict) -> dict:
             agent = session.get("agent")
             if agent is not None:
                 agent.ephemeral_system_prompt = _mode_prompt(nv)
+            # Emit session.info so TUI/desktop learn the new mode
+            if agent is not None:
+                _emit(
+                    "session.info",
+                    params.get("session_id", ""),
+                    _session_info(agent, session),
+                )
 
         return _ok(rid, {"key": key, "value": nv})
 

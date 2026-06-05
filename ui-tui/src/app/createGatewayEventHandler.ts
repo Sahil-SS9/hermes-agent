@@ -16,7 +16,7 @@ import { fromSkin } from '../theme.js'
 import type { Msg, SubagentProgress, SubagentStatus } from '../types.js'
 
 import { applyDelegationStatus, getDelegationState } from './delegationStore.js'
-import type { GatewayEventHandlerContext } from './interfaces.js'
+import type { AgentMode, GatewayEventHandlerContext } from './interfaces.js'
 import { getOverlayState, patchOverlayState } from './overlayStore.js'
 import { turnController } from './turnController.js'
 import { getUiState, patchUiState } from './uiStore.js'
@@ -391,6 +391,7 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
 
         patchUiState(state => ({
           ...state,
+          agentMode: (info.agent_mode || state.agentMode) as AgentMode,
           info,
           status: state.status === 'starting agent…' ? 'ready' : state.status,
           usage: info.usage ? { ...state.usage, ...info.usage } : state.usage
