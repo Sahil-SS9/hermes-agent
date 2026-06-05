@@ -3902,16 +3902,18 @@ def complete_task(
     else:
         verified_cards = []
 
-    # WS-4 review gate: full-tier tasks auto-route running→review on
-    # completion instead of going straight to done. Fast-tier tasks
-    # go to done as before. Reviewer assignment happens at review
-    # dispatch time via the preferred_reviewer / sticky-reviewer flow.
-    # The dispatcher picks up review tasks and loads sdlc-review.
+    # WS-4 review gate (all-work review, ratified): every CLASSIFIED task
+    # (full or fast tier) auto-routes running→review on completion instead
+    # of going straight to done. Untyped/unclassified tasks (NULL tier —
+    # cron/system/automated work outside the deliberate pipeline) still go
+    # straight to done so internal automation is not gated. Reviewer
+    # assignment happens at review dispatch via the preferred_reviewer /
+    # sticky-reviewer flow; the dispatcher loads sdlc-review.
     tier_row = conn.execute(
         "SELECT tier FROM tasks WHERE id = ?", (task_id,)
     ).fetchone()
     task_tier = (tier_row["tier"] or "").lower() if tier_row else ""
-    if task_tier == "full":
+    if task_tier in ("full", "fast"):
         # WS-4 loop guard: only skip redirect when the latest review is
         # UNRESOLVED (no subsequent approve/reject). Once a review is
         # resolved (passed or rejected), the next completion must re-enter
