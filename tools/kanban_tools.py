@@ -31,6 +31,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sys
+from pathlib import Path
 from typing import Any, Optional
 
 from tools.registry import registry, tool_error
@@ -1420,6 +1422,68 @@ def _handle_request_human_approval(args: dict, **kw) -> str:
         return tool_error(f"request_human_approval failed: {exc}")
 
 
+# WS-7: profile_editor handlers — call the profile_editor.py script
+import subprocess as _sp
+import json as _json
+
+def _handle_profile_edit(args: dict, **kw) -> str:
+    """Edit a profile file with git-backed version control."""
+    profile = args.get("profile")
+    file = args.get("file")
+    key_path = args.get("key_path") or ""
+    new_value = args.get("new_value")
+    reason = args.get("reason")
+
+    if not all([profile, file, new_value, reason]):
+        return tool_error("profile, file, new_value, and reason are required")
+
+    script = str(Path(os.environ.get(
+        "HERMES_HOME", "/home/kensei/.hermes"
+    )) / "scripts" / "profile_editor.py")
+
+    cmd = [
+        sys.executable, script,
+        str(profile), str(file), str(key_path), str(new_value), str(reason),
+    ]
+    try:
+        r = _sp.run(cmd, capture_output=True, text=True, timeout=30)
+        if r.returncode != 0:
+            return tool_error(f"profile_edit failed: {_try_json_error(r)}")
+        result = _json.loads(r.stdout)
+        return _json.dumps(result, indent=2)
+    except Exception as exc:
+        return tool_error(f"profile_edit error: {exc}")
+
+
+def _handle_profile_rollback(args: dict, **kw) -> str:
+    """Revert a profile edit by commit hash."""
+    commit_hash = args.get("commit_hash")
+    if not commit_hash:
+        return tool_error("commit_hash is required")
+
+    script = str(Path(os.environ.get(
+        "HERMES_HOME", "/home/kensei/.hermes"
+    )) / "scripts" / "profile_editor.py")
+
+    cmd = [sys.executable, script, "--rollback", str(commit_hash)]
+    try:
+        r = _sp.run(cmd, capture_output=True, text=True, timeout=30)
+        if r.returncode != 0:
+            return tool_error(f"profile_rollback failed: {_try_json_error(r)}")
+        result = _json.loads(r.stdout)
+        return _json.dumps(result, indent=2)
+    except Exception as exc:
+        return tool_error(f"profile_rollback error: {exc}")
+
+
+def _try_json_error(r) -> str:
+    try:
+        err = _json.loads(r.stdout)
+        return err.get("error", r.stderr or "unknown error")
+    except Exception:
+        return r.stderr or r.stdout or "unknown error"
+
+
 # ---------------------------------------------------------------------------
 # Registration
 # ---------------------------------------------------------------------------
@@ -1580,4 +1644,80 @@ registry.register(
     handler=_handle_request_human_approval,
     check_fn=_check_kanban_mode,
     emoji="🛑",
+)
+
+# WS-7: profile_editor — governed profile mutation with git-backed rollback.
+# Restricted to governance profiles (Denji, KENSEI) only.
+KANBAN_PROFILE_EDIT_SCHEMA = {
+    "name": "kanban_profile_edit",
+    "description": (
+        "Edit a profile's config.yaml, SOUL.md, or USER.md with git-backed "
+        "version control. Every edit is committed to the profiles git repo "
+        "and logged to the profile-change-ledger.md. Supports rollback via "
+        "kanban_profile_rollback. RESTRICTED: governance profiles only."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "profile": {
+                "type": "string",
+                "description": "Profile name (e.g. 'octacon', 'wesker')",
+            },
+            "file": {
+                "type": "string",
+                "enum": ["config.yaml", "SOUL.md", "USER.md"],
+                "description": "Which file to edit",
+            },
+            "key_path": {
+                "type": "string",
+                "description": "Dot-separated YAML key path for config.yaml "
+                               "(e.g. 'agent.reasoning_effort'). Ignored for .md files.",
+            },
+            "new_value": {
+                "type": "string",
+                "description": "New value to set",
+            },
+            "reason": {
+                "type": "string",
+                "description": "Why this change is needed (logged to ledger)",
+            },
+        },
+        "required": ["profile", "file", "new_value", "reason"],
+    },
+}
+
+KANBAN_PROFILE_ROLLBACK_SCHEMA = {
+    "name": "kanban_profile_rollback",
+    "description": (
+        "Revert a previous profile edit by commit hash. Only the most recent "
+        "commits can be rolled back. RESTRICTED: governance profiles only."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "commit_hash": {
+                "type": "string",
+                "description": "The git commit hash to revert (from kanban_profile_edit output)",
+            },
+        },
+        "required": ["commit_hash"],
+    },
+}
+
+registry.register(
+    name="kanban_profile_edit",
+    toolset="kanban",
+    schema=KANBAN_PROFILE_EDIT_SCHEMA,
+    handler=_handle_profile_edit,
+    check_fn=_check_kanban_mode,
+    emoji="✏️",
+)
+
+registry.register(
+    name="kanban_profile_rollback",
+    toolset="kanban",
+    schema=KANBAN_PROFILE_ROLLBACK_SCHEMA,
+    handler=_handle_profile_rollback,
+    check_fn=_check_kanban_mode,
+    emoji="↩️",
 )

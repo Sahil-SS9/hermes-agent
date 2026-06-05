@@ -47,6 +47,13 @@ NEVER_GRANT = {
     "soyl-editor",
 }
 
+# WS-7 Denji loop closure: governance profiles are allowed to use
+# profile-config-mutator and soyl-editor — these are Denji's tools.
+# The check below still denies non-governance profiles.
+GOVERNANCE_GRANT_WHITELIST = {
+    "denji": {"profile-config-mutator", "soyl-editor"},
+}
+
 
 def _now() -> int:
     return int(time.time())
@@ -126,8 +133,12 @@ def grant_skill(profile: str, skill: str, task_id: str, reason: str = "", board:
                            f"'{skill}' is quarantined — requires manual review by Denji/skill-research before use",
                            board)
     if skill in NEVER_GRANT:
-        return record_deny(profile, skill, task_id,
-                           f"'{skill}' is on the NEVER_GRANT list (requires KENSEI/Denji)", board)
+        # WS-7: governance whitelist — Denji is allowed profile-config-mutator
+        # and soyl-editor since those are its own tools for autonomous profile editing.
+        allowed = GOVERNANCE_GRANT_WHITELIST.get(profile, set())
+        if skill not in allowed:
+            return record_deny(profile, skill, task_id,
+                               f"'{skill}' is on the NEVER_GRANT list (requires KENSEI/Denji)", board)
     freq = borrow_count(profile, skill)
     if freq >= FREQUENCY_LIMIT:
         return record_deny(profile, skill, task_id,
