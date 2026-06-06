@@ -5847,6 +5847,9 @@ class DispatchResult:
     subsequent tick when the assignee has capacity. Separate bucket so
     telemetry / dashboards can show "this profile is busy" vs
     "task is genuinely stuck"."""
+    pipeline_advanced: list[tuple[str, str, str]] = field(default_factory=list)
+    """List of ``(task_id, from_stage, to_stage)`` triples for tasks
+    that advanced through the feature pipeline (gate passed)."""
     crashed: list[str] = field(default_factory=list)
     """Task ids reclaimed because their worker PID disappeared."""
     auto_blocked: list[str] = field(default_factory=list)
@@ -7454,6 +7457,126 @@ def dispatch_once(
             )
             if auto:
                 result.auto_blocked.append(claimed.id)
+
+    # ---- feature pipeline dispatch ----
+    # Pipeline tasks (research, prd, spec) follow a gated progression:
+    #   triage → research → prd → spec → council (Phase B)
+    # Each stage has a gate function that validates the artifact before
+    # promotion.  When the gate fails, the task stays in its current
+    # status and the assigned lead continues working on the artifact.
+    # When the gate passes, the task advances to the next stage.
+    #
+    # Pipeline tasks are NOT dispatched to workers like ready tasks.
+    # Instead, the gate check runs each tick.  If the gate fails and
+    # the task has an assignee, we spawn the lead to continue working.
+    # If the gate passes, we promote to the next stage.
+    from hermes_cli.feature_pipeline import (
+        PIPELINE_STAGES,
+        GATE_FUNCTIONS,
+        get_next_stage,
+    )
+    _PIPELINE_STATUSES = ("research", "prd", "spec")
+    pipeline_rows = conn.execute(
+        "SELECT id, assignee, skills, pipeline_stage FROM tasks "
+        "WHERE status IN ('research', 'prd', 'spec') "
+        "AND claim_lock IS NULL "
+        "ORDER BY priority DESC, created_at ASC"
+    ).fetchall()
+    for row in pipeline_rows:
+        if max_spawn is not None and running_count + spawned >= max_spawn:
+            break
+        stage = row["pipeline_stage"]
+        if stage not in GATE_FUNCTIONS:
+            # Unknown stage or council (Phase B) — skip
+            continue
+        gate_fn = GATE_FUNCTIONS[stage]
+        # Determine artifact directory
+        artifact_base = os.path.join(
+            os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes")),
+            "feature-artifacts",
+        )
+        artifact_dir = os.path.join(artifact_base, row["id"])
+        gate_result = gate_fn(artifact_dir)
+        if gate_result is None:
+            # Gate passed — promote to next stage
+            next_stage = get_next_stage(stage)
+            if not dry_run:
+                with write_txn(conn):
+                    if next_stage:
+                        conn.execute(
+                            "UPDATE tasks SET pipeline_stage = ?, status = ? WHERE id = ?",
+                            (next_stage, next_stage, row["id"]),
+                        )
+                        _append_event(
+                            conn, row["id"], "pipeline_advanced",
+                            {"from_stage": stage, "to_stage": next_stage},
+                        )
+                    else:
+                        # End of pipeline (council) — mark as ready for Phase B
+                        conn.execute(
+                            "UPDATE tasks SET pipeline_stage = ? WHERE id = ?",
+                            (stage, row["id"]),
+                        )
+                        _append_event(
+                            conn, row["id"], "pipeline_complete",
+                            {"stage": stage},
+                        )
+            result.pipeline_advanced.append((row["id"], stage, next_stage or ""))
+        else:
+            # Gate failed — dispatch lead to continue working
+            if not row["assignee"]:
+                result.skipped_unassigned.append(row["id"])
+                continue
+            try:
+                from hermes_cli.profiles import profile_exists as _pe_pipe
+            except Exception:
+                _pe_pipe = None
+            if _pe_pipe is not None and not _pe_pipe(row["assignee"]):
+                result.skipped_nonspawnable.append(row["id"])
+                continue
+            if dry_run:
+                result.spawned.append((row["id"], row["assignee"], ""))
+                continue
+            claimed = claim_task(conn, row["id"], ttl_seconds=ttl_seconds)
+            if claimed is None:
+                continue
+            try:
+                workspace = resolve_workspace(claimed, board=board)
+            except Exception as exc:
+                auto = _record_spawn_failure(
+                    conn, claimed.id, f"workspace: {exc}",
+                    failure_limit=failure_limit,
+                )
+                if auto:
+                    result.auto_blocked.append(claimed.id)
+                continue
+            set_workspace_path(conn, claimed.id, str(workspace))
+            _maybe_emit_scratch_tip(conn, claimed.id, claimed.workspace_kind)
+            # Set pipeline skill for the lead
+            claimed.skills = ["feature-pipeline"]
+            _spawn = spawn_fn if spawn_fn is not None else _default_spawn
+            try:
+                import inspect
+                try:
+                    sig = inspect.signature(_spawn)
+                    if "board" in sig.parameters:
+                        pid = _spawn(claimed, str(workspace), board=board)
+                    else:
+                        pid = _spawn(claimed, str(workspace))
+                except (TypeError, ValueError):
+                    pid = _spawn(claimed, str(workspace))
+                if pid:
+                    _set_worker_pid(conn, claimed.id, int(pid))
+                result.spawned.append((claimed.id, claimed.assignee or "", str(workspace)))
+                spawned += 1
+            except Exception as exc:
+                auto = _record_spawn_failure(
+                    conn, claimed.id, str(exc),
+                    failure_limit=failure_limit,
+                )
+                if auto:
+                    result.auto_blocked.append(claimed.id)
+
     return result
 
 
