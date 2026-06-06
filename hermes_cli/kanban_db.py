@@ -770,6 +770,8 @@ class Task:
     current_run_id: Optional[int] = None
     workflow_template_id: Optional[str] = None
     current_step_key: Optional[str] = None
+    # Feature pipeline stage: research, prd, spec, council, or None
+    pipeline_stage: Optional[str] = None
     # Force-loaded skills for the worker on this task (appended to the
     # dispatcher's built-in `kanban-worker` via --skills). Stored as a
     # JSON array of skill names. None = use only the defaults; empty
@@ -868,6 +870,9 @@ class Task:
                 row["current_step_key"] if "current_step_key" in keys else None
             ),
             skills=skills_value,
+            pipeline_stage=(
+                row["pipeline_stage"] if "pipeline_stage" in keys else None
+            ),
             model_override=row["model_override"] if "model_override" in keys and row["model_override"] else None,
             max_retries=(
                 row["max_retries"] if "max_retries" in keys else None

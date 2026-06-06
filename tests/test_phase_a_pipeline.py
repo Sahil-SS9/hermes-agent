@@ -389,3 +389,172 @@ class TestGateFailedEvent:
             assert "reason" in ev.payload
             assert isinstance(ev.payload["stage"], str)
             assert isinstance(ev.payload["reason"], str)
+
+
+# ---------------------------------------------------------------------------
+# Phase A.10 — Integration: full pipeline walk
+# ---------------------------------------------------------------------------
+
+class TestPipelineIntegration:
+    """End-to-end: triage → research → prd → spec → council."""
+
+    def _create_artifact(self, stage, artifact_dir):
+        """Create a minimal passing artifact for the given stage."""
+        from pathlib import Path
+        ad = Path(artifact_dir)
+        ad.mkdir(parents=True, exist_ok=True)
+        if stage == "research":
+            (ad / "research-brief.md").write_text(
+                "# Research Brief\n\n## Problem\nTest problem.\n\n"
+                "## Findings\nKey finding.\n\n"
+                "## Alternatives Considered\nAlt A, Alt B.\n\n"
+                "## Recommendation\nUse Alt A.\n\n"
+                "## Evidence\nSource 1.\n\n"
+                "## Cost Analysis\nMinimal.\n\n"
+                "## Confidence\nHigh.\n"
+            )
+        elif stage == "prd":
+            (ad / "prd.md").write_text(
+                "# PRD\n\n## Problem\nTest.\n\n## Users\nDevs.\n\n"
+                "## Scope\nIn scope.\n\n## Out of Scope\nNothing.\n\n"
+                "## Metrics\n95%.\n"
+            )
+        elif stage == "spec":
+            (ad / "spec.md").write_text(
+                "# Spec\n\n## Architecture\nMonolith.\n\n"
+                "## Interfaces\nREST.\n\n## Test Strategy\nUnit + integration.\n"
+            )
+
+    def test_full_pipeline_walk(self, kanban_home):
+        """Walk a task through all pipeline stages with artifacts."""
+        from pathlib import Path
+        import os
+
+        # Set artifact base dir inside isolated home
+        artifact_base = os.path.join(str(kanban_home), "feature-artifacts")
+        os.environ["HERMES_HOME"] = str(kanban_home)
+
+        with kb.connect() as conn:
+            # 1. Create a tier=full intake task
+            tid = kb.create_task(
+                conn,
+                title="Full pipeline integration test",
+                body="## Problem\nTest problem.\n\n## Success Criteria\nIt works.",
+                assignee="remii",  # research stage owner
+                triage=True,
+            )
+            # Move to research stage (simulating triage processor)
+            conn.execute(
+                "UPDATE tasks SET status = ?, pipeline_stage = ? WHERE id = ?",
+                ("research", "research", tid),
+            )
+            conn.commit()
+
+            # 2. Stage: research → prd
+            # No artifact yet → gate should fail
+            result = kb.dispatch_once(conn, dry_run=False)
+            events = kb.list_events(conn, tid)
+            gate_fails = [e for e in events if e.kind == "gate_failed"]
+            assert len(gate_fails) >= 1
+
+            # Create research artifact
+            artifact_dir = os.path.join(artifact_base, tid)
+            self._create_artifact("research", artifact_dir)
+
+            # Assign to remii (research owner)
+            conn.execute("UPDATE tasks SET assignee = ? WHERE id = ?", ("remii", tid))
+            conn.commit()
+
+            # Dispatch again — gate should pass now
+            result = kb.dispatch_once(conn, dry_run=False)
+            events = kb.list_events(conn, tid)
+            advanced = [e for e in events if e.kind == "pipeline_advanced"]
+            research_advances = [e for e in advanced
+                                if e.payload.get("from_stage") == "research"
+                                and e.payload.get("to_stage") == "prd"]
+            assert len(research_advances) >= 1
+
+            # 3. Stage: prd → spec
+            # Move assignee to kensei (PRD owner)
+            conn.execute("UPDATE tasks SET assignee = ? WHERE id = ?", ("kensei", tid))
+            conn.commit()
+
+            # No PRD artifact yet → gate should fail
+            result = kb.dispatch_once(conn, dry_run=False)
+            events = kb.list_events(conn, tid)
+            prd_gate_fails = [e for e in events
+                             if e.kind == "gate_failed"
+                             and e.payload.get("stage") == "prd"]
+            assert len(prd_gate_fails) >= 1
+
+            # Create PRD artifact
+            self._create_artifact("prd", artifact_dir)
+
+            # Dispatch — gate should pass
+            result = kb.dispatch_once(conn, dry_run=False)
+            events = kb.list_events(conn, tid)
+            prd_advances = [e for e in events
+                           if e.kind == "pipeline_advanced"
+                           and e.payload.get("from_stage") == "prd"
+                           and e.payload.get("to_stage") == "spec"]
+            assert len(prd_advances) >= 1
+
+            # 4. Stage: spec → council
+            conn.execute("UPDATE tasks SET assignee = ? WHERE id = ?", ("octacon", tid))
+            conn.commit()
+
+            # Create spec artifact
+            self._create_artifact("spec", artifact_dir)
+
+            # Dispatch — gate should pass, pipeline complete
+            result = kb.dispatch_once(conn, dry_run=False)
+            events = kb.list_events(conn, tid)
+            spec_advances = [e for e in events
+                            if e.kind == "pipeline_advanced"
+                            and e.payload.get("from_stage") == "spec"
+                            and e.payload.get("to_stage") == "council"]
+            assert len(spec_advances) >= 1
+
+            # 5. Verify all event types fired
+            all_kinds = {e.kind for e in events}
+            assert "gate_failed" in all_kinds
+            assert "pipeline_advanced" in all_kinds
+            # Task should now be in council status
+            task = kb.get_task(conn, tid)
+            assert task.status == "council"
+            assert task.pipeline_stage == "council"
+
+    def test_full_pipeline_walk_dry_run(self, kanban_home):
+        """Dry-run walk should report advancement without side effects."""
+        import os
+        artifact_base = os.path.join(str(kanban_home), "feature-artifacts")
+        os.environ["HERMES_HOME"] = str(kanban_home)
+
+        with kb.connect() as conn:
+            tid = kb.create_task(
+                conn,
+                title="Dry run pipeline test",
+                body="## Problem\nTest.\n\n## Success Criteria\nWorks.",
+                assignee="remii",
+                triage=True,
+            )
+            conn.execute(
+                "UPDATE tasks SET status = ?, pipeline_stage = ? WHERE id = ?",
+                ("research", "research", tid),
+            )
+            conn.commit()
+
+            # Create artifact so gate passes
+            artifact_dir = os.path.join(artifact_base, tid)
+            self._create_artifact("research", artifact_dir)
+
+            # Dry run — should report advancement but not change DB
+            result = kb.dispatch_once(conn, dry_run=True)
+            assert len(result.pipeline_advanced) >= 1
+            assert result.pipeline_advanced[0][0] == tid
+            assert result.pipeline_advanced[0][1] == "research"
+            assert result.pipeline_advanced[0][2] == "prd"
+
+            # DB should be unchanged (still research)
+            task = kb.get_task(conn, tid)
+            assert task.status == "research"
