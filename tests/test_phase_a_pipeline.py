@@ -318,3 +318,74 @@ class TestPipelineStateMachine:
     def test_pipeline_stages_order(self):
         """Pipeline stages are in correct order."""
         assert PIPELINE_STAGES == ["research", "prd", "spec", "council"]
+
+
+# ---------------------------------------------------------------------------
+# Phase A.9 — Notifier event tests (gate_failed)
+# ---------------------------------------------------------------------------
+
+class TestGateFailedEvent:
+    """Verify gate_failed events are written when pipeline gates fail."""
+
+    def test_gate_failed_event_written_on_gate_failure(self, kanban_home):
+        """dispatch_once with dry_run=False writes gate_failed when gate fails."""
+        import json
+        with kb.connect() as conn:
+            # Create a task in research stage with no artifact (gate will fail)
+            tid = kb.create_task(
+                conn, title="gate-fail test",
+                body="## Problem\nTest.\n## Success Criteria\nWorks.",
+                assignee="test", triage=True,
+            )
+            # Move to research stage
+            conn.execute(
+                "UPDATE tasks SET status = ?, pipeline_stage = ? WHERE id = ?",
+                ("research", "research", tid),
+            )
+            # Run dispatch — gate will fail because no artifact exists
+            result = kb.dispatch_once(conn, dry_run=False)
+            # Check that gate_failed event was written
+            events = kb.list_events(conn, tid)
+            gate_fail_events = [e for e in events if e.kind == "gate_failed"]
+            assert len(gate_fail_events) >= 1
+            assert gate_fail_events[0].payload["stage"] == "research"
+            assert "research-brief.md" in gate_fail_events[0].payload.get("reason", "")
+
+    def test_gate_failed_event_not_written_on_dry_run(self, kanban_home):
+        """dry_run=True should NOT write gate_failed events."""
+        with kb.connect() as conn:
+            tid = kb.create_task(
+                conn, title="dry-run gate test",
+                body="## Problem\nTest.\n## Success Criteria\nWorks.",
+                assignee="test", triage=True,
+            )
+            conn.execute(
+                "UPDATE tasks SET status = ?, pipeline_stage = ? WHERE id = ?",
+                ("research", "research", tid),
+            )
+            result = kb.dispatch_once(conn, dry_run=True)
+            events = kb.list_events(conn, tid)
+            gate_fail_events = [e for e in events if e.kind == "gate_failed"]
+            assert len(gate_fail_events) == 0
+
+    def test_gate_failed_event_payload_has_stage_and_reason(self, kanban_home):
+        """gate_failed payload contains stage and reason fields."""
+        with kb.connect() as conn:
+            tid = kb.create_task(
+                conn, title="payload check",
+                body="## Problem\nTest.\n## Success Criteria\nWorks.",
+                assignee="test", triage=True,
+            )
+            conn.execute(
+                "UPDATE tasks SET status = ?, pipeline_stage = ? WHERE id = ?",
+                ("research", "research", tid),
+            )
+            kb.dispatch_once(conn, dry_run=False)
+            events = kb.list_events(conn, tid)
+            gate_fail_events = [e for e in events if e.kind == "gate_failed"]
+            assert len(gate_fail_events) >= 1
+            ev = gate_fail_events[0]
+            assert "stage" in ev.payload
+            assert "reason" in ev.payload
+            assert isinstance(ev.payload["stage"], str)
+            assert isinstance(ev.payload["reason"], str)

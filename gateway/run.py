@@ -5147,6 +5147,8 @@ class GatewayRunner:
             return
 
         TERMINAL_KINDS = ("completed", "blocked", "gave_up", "crashed", "timed_out")
+        PIPELINE_KINDS = ("pipeline_advanced", "pipeline_complete", "gate_failed")
+        NOTIFY_KINDS = TERMINAL_KINDS + PIPELINE_KINDS
         # Subscriptions are removed only when the task reaches a truly final
         # status (done / archived). We used to also unsub on any terminal
         # event kind (gave_up / crashed / timed_out / blocked), but that
@@ -5254,7 +5256,7 @@ class GatewayRunner:
                                     platform=sub["platform"],
                                     chat_id=sub["chat_id"],
                                     thread_id=sub.get("thread_id") or "",
-                                    kinds=TERMINAL_KINDS,
+                                    kinds=NOTIFY_KINDS,
                                 )
                                 if not events:
                                     continue
@@ -5359,6 +5361,26 @@ class GatewayRunner:
                             msg = (
                                 f"⏱ {tag}Kanban {sub['task_id']} timed out "
                                 f"(max_runtime={limit}s); will retry"
+                            )
+                        elif kind == "pipeline_advanced":
+                            from_stage = (ev.payload or {}).get("from_stage", "?")
+                            to_stage = (ev.payload or {}).get("to_stage", "?")
+                            msg = (
+                                f"🔬 {tag}Kanban {sub['task_id']} advanced "
+                                f"{from_stage} → {to_stage}"
+                            )
+                        elif kind == "pipeline_complete":
+                            stage_name = (ev.payload or {}).get("stage", "?")
+                            msg = (
+                                f"✅ {tag}Kanban {sub['task_id']} pipeline "
+                                f"Phase A complete (reached {stage_name})"
+                            )
+                        elif kind == "gate_failed":
+                            stage_name = (ev.payload or {}).get("stage", "?")
+                            reason = (ev.payload or {}).get("reason", "")[:120]
+                            msg = (
+                                f"🚧 {tag}Kanban {sub['task_id']} gate failed "
+                                f"at {stage_name}: {reason}"
                             )
                         else:
                             continue

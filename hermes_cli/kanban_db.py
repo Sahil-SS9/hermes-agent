@@ -7523,7 +7523,13 @@ def dispatch_once(
                         )
             result.pipeline_advanced.append((row["id"], stage, next_stage or ""))
         else:
-            # Gate failed — dispatch lead to continue working
+            # Gate failed — record event then dispatch lead to continue working
+            if not dry_run:
+                with write_txn(conn):
+                    _append_event(
+                        conn, row["id"], "gate_failed",
+                        {"stage": stage, "reason": gate_result},
+                    )
             if not row["assignee"]:
                 result.skipped_unassigned.append(row["id"])
                 continue
