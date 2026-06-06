@@ -65,10 +65,12 @@ class TestNewPipelineStates:
         assert HUMAN_GATE_STAGES == {"sign_off", "final_sign_off"}
 
     def test_pipeline_stages_full_order(self):
-        """Full pipeline order is correct."""
+        """Full pipeline order is correct (design doc §3, 12 stages)."""
         assert PIPELINE_STAGES == [
             "research", "prd", "spec", "council",
-            "sign_off", "tech_review", "final_sign_off",
+            "sign_off", "tech_review",
+            "decompose", "execute", "pr+qa", "audit",
+            "final_sign_off", "document",
         ]
 
 
@@ -160,10 +162,18 @@ class TestAdvancePipelineExtended:
         assert get_next_stage("sign_off") == "tech_review"
 
     def test_tech_review_to_final_sign_off(self):
-        assert get_next_stage("tech_review") == "final_sign_off"
+        # Phase D added 5 new stages between tech_review and final_sign_off
+        # (design doc §3: decompose, execute, pr+qa, audit).
+        assert get_next_stage("tech_review") == "decompose"
+        assert get_next_stage("decompose") == "execute"
+        assert get_next_stage("execute") == "pr+qa"
+        assert get_next_stage("pr+qa") == "audit"
+        assert get_next_stage("audit") == "final_sign_off"
 
     def test_final_sign_off_is_terminal(self):
-        assert get_next_stage("final_sign_off") is None
+        # final_sign_off is no longer terminal — it advances to document.
+        assert get_next_stage("final_sign_off") == "document"
+        assert get_next_stage("document") is None
 
     def test_human_gates_in_gate_functions(self):
         """Human gate stages are NOT in GATE_FUNCTIONS (they use event checks)."""
@@ -302,4 +312,5 @@ class TestHumanGatePipelineWalk:
             current = get_next_stage(current)
         assert "sign_off" in path
         assert "final_sign_off" in path
-        assert path[-1] == "final_sign_off"
+        # final_sign_off is no longer terminal — it advances to document.
+        assert path[-1] == "document"

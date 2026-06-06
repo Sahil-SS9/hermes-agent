@@ -87,10 +87,12 @@ class TestPipelineStageMigration:
             assert row["pipeline_stage"] is None
 
     def test_pipeline_stage_accepts_valid_values(self, kanban_home):
-        """pipeline_stage should accept research, prd, spec, council."""
+        """pipeline_stage should accept all 12 pipeline stages (full path)."""
         with kb.connect() as conn:
             task_id = kb.create_task(conn, title="test", assignee="test", triage=True)
-            for stage in ("research", "prd", "spec", "council"):
+            for stage in ("research", "prd", "spec", "council", "sign_off",
+                          "tech_review", "decompose", "execute", "pr+qa",
+                          "audit", "final_sign_off", "document"):
                 conn.execute("UPDATE tasks SET pipeline_stage = ? WHERE id = ?", (stage, task_id))
                 row = conn.execute("SELECT pipeline_stage FROM tasks WHERE id = ?", (task_id,)).fetchone()
                 assert row["pipeline_stage"] == stage
@@ -257,8 +259,13 @@ class TestPipelineStateMachine:
         assert get_next_stage("spec") == "council"
         assert get_next_stage("council") == "sign_off"
         assert get_next_stage("sign_off") == "tech_review"
-        assert get_next_stage("tech_review") == "final_sign_off"
-        assert get_next_stage("final_sign_off") is None
+        assert get_next_stage("tech_review") == "decompose"
+        assert get_next_stage("decompose") == "execute"
+        assert get_next_stage("execute") == "pr+qa"
+        assert get_next_stage("pr+qa") == "audit"
+        assert get_next_stage("audit") == "final_sign_off"
+        assert get_next_stage("final_sign_off") == "document"
+        assert get_next_stage("document") is None
 
     def test_get_next_stage_invalid(self):
         assert get_next_stage("invalid") is None
@@ -341,10 +348,12 @@ class TestPipelineStateMachine:
         assert "[MEDIUM]" in result["gate_message"]
 
     def test_pipeline_stages_order(self):
-        """Pipeline stages are in correct order."""
+        """Pipeline stages are in correct order (design doc §3)."""
         assert PIPELINE_STAGES == [
             "research", "prd", "spec", "council",
-            "sign_off", "tech_review", "final_sign_off",
+            "sign_off", "tech_review",
+            "decompose", "execute", "pr+qa", "audit",
+            "final_sign_off", "document",
         ]
 
 

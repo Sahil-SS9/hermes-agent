@@ -99,7 +99,13 @@ _log = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-VALID_STATUSES = {"triage", "todo", "scheduled", "ready", "running", "blocked", "review", "done", "archived", "backlog", "research", "prd", "spec", "council", "sign_off", "tech_review", "final_sign_off"}
+VALID_STATUSES = {
+    "triage", "todo", "scheduled", "ready", "running", "blocked", "review",
+    "done", "archived", "backlog",
+    # Feature pipeline stages (Phase A→D)
+    "research", "prd", "spec", "council", "sign_off", "tech_review",
+    "decompose", "execute", "pr+qa", "audit", "final_sign_off", "document",
+}
 VALID_INITIAL_STATUSES = {"running", "blocked", "backlog"}
 VALID_WORKSPACE_KINDS = {"scratch", "worktree", "dir"}
 KNOWN_TOOLSET_NAMES = frozenset(name.casefold() for name in get_toolset_names())
@@ -1739,6 +1745,14 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
         # the WS-1/WS-4/WS-8 write paths don't crash on new boards.
         _add_column_if_missing(conn, "tasks", "status_reason", "status_reason TEXT")
 
+    if "pipeline_mode" not in cols:
+        # Phase D: per-task pipeline mode selector. 'full' (default) walks all
+        # 12 stages; 'express' skips PRD, Council, Tech Review, and the audit
+        # follow-up ladder (design doc §3 express path). Stored on the task
+        # so dispatch_once can branch on it without re-reading config every
+        # tick.
+        _add_column_if_missing(conn, "tasks", "pipeline_mode", "pipeline_mode TEXT")
+
     if "reviewer" not in cols:
         # Sticky-reviewer pin for the review flow (WS-4): profile that should
         # pick up the next review pass. NULL until first review. Also present
@@ -2148,6 +2162,11 @@ def create_task(
     notify_thread_id: Optional[str] = None,
     notify_user_id: Optional[str] = None,
     notify_profile: Optional[str] = None,
+    # Phase D: per-task pipeline mode selector. 'full' (default) walks all
+    # 12 stages; 'express' skips PRD/Council/Tech Review/Audit (design
+    # doc §3 express path). Stored on the task so dispatch_once branches
+    # on it without re-reading config.
+    pipeline_mode: Optional[str] = None,
 ) -> str:
     """Create a new task and optionally link it under parent tasks.
 
@@ -2322,8 +2341,8 @@ def create_task(
                         created_by, created_at, workspace_kind, workspace_path,
                         branch_name, tenant, idempotency_key, max_runtime_seconds,
                         skills, max_retries, goal_mode, goal_max_turns, session_id,
-                        theme, tier
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        theme, tier, pipeline_mode
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         task_id,
@@ -2347,6 +2366,7 @@ def create_task(
                         session_id,
                         theme.strip() if isinstance(theme, str) and theme.strip() else None,
                         tier.strip() if isinstance(tier, str) and tier.strip() else None,
+                        pipeline_mode.strip() if isinstance(pipeline_mode, str) and pipeline_mode.strip() else None,
                     ),
                 )
                 for pid in parents:
@@ -7481,20 +7501,58 @@ def dispatch_once(
         GATE_FUNCTIONS,
         HUMAN_GATE_STAGES,
         get_next_stage,
+        get_pipeline_mode,
         check_human_approved,
         time_in_stage_hours,
     )
-    _PIPELINE_STATUSES = ("research", "prd", "spec", "council")
+    # Read the full pipeline stage list dynamically so the dispatcher stays
+    # in sync with feature_pipeline.PIPELINE_STAGES (design doc §3).
+    _PIPELINE_STATUSES = tuple(PIPELINE_STAGES)
+    # Build a placeholder list for the IN (...) clause; the dispatcher loops
+    # over rows but filters in Python where the IN list is large.
+    _placeholders = ",".join("?" * len(_PIPELINE_STATUSES))
     pipeline_rows = conn.execute(
-        "SELECT id, assignee, skills, pipeline_stage FROM tasks "
-        "WHERE status IN ('research', 'prd', 'spec', 'council') "
-        "AND claim_lock IS NULL "
-        "ORDER BY priority DESC, created_at ASC"
+        f"SELECT id, assignee, skills, pipeline_stage, pipeline_mode "
+        f"FROM tasks WHERE status IN ({_placeholders}) "
+        f"AND claim_lock IS NULL "
+        f"ORDER BY priority DESC, created_at ASC",
+        _PIPELINE_STATUSES,
     ).fetchall()
     for row in pipeline_rows:
         if max_spawn is not None and running_count + spawned >= max_spawn:
             break
         stage = row["pipeline_stage"]
+        mode = get_pipeline_mode(dict(row))
+        if stage not in GATE_FUNCTIONS and stage not in HUMAN_GATE_STAGES:
+            # Pass-through stages (execute, pr+qa) — auto-advance when the
+            # next stage is ready. Lead-driven; no artifact gate.
+            next_stage = get_next_stage(stage, mode)
+            if next_stage is None:
+                # End of pipeline
+                if not dry_run:
+                    with write_txn(conn):
+                        conn.execute(
+                            "UPDATE tasks SET pipeline_stage = ?, status = ? WHERE id = ?",
+                            (stage, "todo", row["id"]),
+                        )
+                        _append_event(
+                            conn, row["id"], "pipeline_complete",
+                            {"stage": stage, "mode": mode},
+                        )
+                result.pipeline_advanced.append((row["id"], stage, "todo"))
+                continue
+            if not dry_run:
+                with write_txn(conn):
+                    conn.execute(
+                        "UPDATE tasks SET pipeline_stage = ?, status = ? WHERE id = ?",
+                        (next_stage, next_stage, row["id"]),
+                    )
+                    _append_event(
+                        conn, row["id"], "pipeline_advanced",
+                        {"from_stage": stage, "to_stage": next_stage, "mode": mode},
+                    )
+            result.pipeline_advanced.append((row["id"], stage, next_stage))
+            continue
         if stage not in GATE_FUNCTIONS:
             # Unknown stage — skip
             continue
@@ -7507,8 +7565,31 @@ def dispatch_once(
         artifact_dir = os.path.join(artifact_base, row["id"])
         gate_result = gate_fn(artifact_dir)
         if gate_result is None:
-            # Gate passed — promote to next stage
-            next_stage = get_next_stage(stage)
+            # Gate passed — promote to next stage.
+            # Audit is special: PASS/CONDITIONAL passes the gate, but
+            # CONDITIONAL also auto-creates a follow-up task so the issues
+            # are tracked (design doc §3 [11]).
+            if stage == "audit":
+                try:
+                    from hermes_cli.feature_pipeline import get_audit_verdict
+                    audit_verdict = get_audit_verdict(artifact_dir)
+                except Exception:
+                    audit_verdict = None
+                if audit_verdict == "CONDITIONAL" and not dry_run:
+                    new_id = _create_audit_followup_task(
+                        conn, row["id"], "CONDITIONAL",
+                        summary="(see audit-report.md)",
+                    )
+                    if new_id:
+                        _append_event(
+                            conn, row["id"], "audit_followup_created",
+                            {"followup_id": new_id},
+                        )
+                    _record_denji_review_signal(
+                        conn, row["id"], signal_type="audit_conditional",
+                        followup_id=new_id,
+                    )
+            next_stage = get_next_stage(stage, mode)
             if not dry_run:
                 with write_txn(conn):
                     if next_stage:
@@ -7518,17 +7599,23 @@ def dispatch_once(
                         )
                         _append_event(
                             conn, row["id"], "pipeline_advanced",
-                            {"from_stage": stage, "to_stage": next_stage},
+                            {"from_stage": stage, "to_stage": next_stage, "mode": mode},
                         )
+                        if stage == "audit":
+                            _record_denji_review_signal(
+                                conn, row["id"],
+                                signal_type="audit_passed",
+                                verdict=get_audit_verdict(artifact_dir) or "PASS",
+                            )
                     else:
-                        # End of pipeline — council passed, task is ready for next phase
+                        # End of pipeline — gate passed, task completes
                         conn.execute(
                             "UPDATE tasks SET pipeline_stage = ?, status = ? WHERE id = ?",
                             (stage, "todo", row["id"]),
                         )
                         _append_event(
                             conn, row["id"], "pipeline_complete",
-                            {"stage": stage},
+                            {"stage": stage, "mode": mode},
                         )
             result.pipeline_advanced.append((row["id"], stage, next_stage or "todo"))
         elif stage == "council":
@@ -7536,14 +7623,12 @@ def dispatch_once(
             # Don't spawn a lead; the spec author continues working.
             if not dry_run:
                 with write_txn(conn):
-                    # Track revise count
                     revise_count = _get_council_revise_count(conn, row["id"])
                     max_loops = _get_max_revise_loops()
                     if revise_count >= max_loops:
-                        # Loop cap exceeded — escalate to operator
                         conn.execute(
                             "UPDATE tasks SET status = ?, pipeline_stage = ? WHERE id = ?",
-                            ("blocked", "council"),
+                            ("blocked", "council", row["id"]),
                         )
                         _append_event(
                             conn, row["id"], "gate_failed",
@@ -7553,10 +7638,9 @@ def dispatch_once(
                              "max_loops": max_loops},
                         )
                     else:
-                        # Bounce back to spec
                         conn.execute(
                             "UPDATE tasks SET status = ?, pipeline_stage = ? WHERE id = ?",
-                            ("spec", "spec"),
+                            ("spec", "spec", row["id"]),
                         )
                         _append_event(
                             conn, row["id"], "gate_failed",
@@ -7566,6 +7650,39 @@ def dispatch_once(
                         )
                     _record_council_revise(conn, row["id"])
             result.pipeline_advanced.append((row["id"], stage, "spec"))
+        elif stage == "audit":
+            # Audit BLOCKED — bounce to spec (capped). Same loop cap policy
+            # as council REVISE — the spec author fixes the blockers, and at
+            # max_revise_loops we escalate to operator.
+            if not dry_run:
+                with write_txn(conn):
+                    revise_count = _get_council_revise_count(conn, row["id"])
+                    max_loops = _get_max_revise_loops()
+                    if revise_count >= max_loops:
+                        conn.execute(
+                            "UPDATE tasks SET status = ?, pipeline_stage = ? WHERE id = ?",
+                            ("blocked", "audit", row["id"]),
+                        )
+                        _append_event(
+                            conn, row["id"], "gate_failed",
+                            {"stage": stage, "reason": gate_result,
+                             "escalated": True,
+                             "revise_count": revise_count,
+                             "max_loops": max_loops},
+                        )
+                    else:
+                        conn.execute(
+                            "UPDATE tasks SET status = ?, pipeline_stage = ? WHERE id = ?",
+                            ("spec", "spec", row["id"]),
+                        )
+                        _append_event(
+                            conn, row["id"], "gate_failed",
+                            {"stage": stage, "reason": gate_result,
+                             "bounced_to": "spec",
+                             "revise_count": revise_count + 1},
+                        )
+                        _record_council_revise(conn, row["id"])
+            result.pipeline_advanced.append((row["id"], stage, "spec"))
         elif stage in HUMAN_GATE_STAGES:
             # Human gate (sign_off, final_sign_off) — check events table.
             # Gate passes when Sahil approves via CLI/Discord.
@@ -7573,7 +7690,7 @@ def dispatch_once(
             # Stale-nudge after configurable idle hours.
             approved = check_human_approved(conn, row["id"], stage)
             if approved:
-                next_stage = get_next_stage(stage)
+                next_stage = get_next_stage(stage, mode)
                 if not dry_run:
                     with write_txn(conn):
                         if next_stage:
@@ -7584,7 +7701,7 @@ def dispatch_once(
                             _append_event(
                                 conn, row["id"], "pipeline_advanced",
                                 {"from_stage": stage, "to_stage": next_stage,
-                                 "approved_by": "human"},
+                                 "approved_by": "human", "mode": mode},
                             )
                         else:
                             conn.execute(
@@ -7593,7 +7710,7 @@ def dispatch_once(
                             )
                             _append_event(
                                 conn, row["id"], "pipeline_complete",
-                                {"stage": stage, "approved_by": "human"},
+                                {"stage": stage, "approved_by": "human", "mode": mode},
                             )
                 result.pipeline_advanced.append((row["id"], stage, next_stage or "todo"))
             else:
@@ -7660,6 +7777,10 @@ def dispatch_once(
                     pid = _spawn(claimed, str(workspace))
                 if pid:
                     _set_worker_pid(conn, claimed.id, int(pid))
+                # Record pipeline spawn for Denji's frequency tracking
+                _record_pipeline_spawn(
+                    conn, claimed.id, stage=stage, assignee=claimed.assignee or "",
+                )
                 result.spawned.append((claimed.id, claimed.assignee or "", str(workspace)))
                 spawned += 1
             except Exception as exc:
@@ -7707,8 +7828,183 @@ def _get_council_revise_count(conn: sqlite3.Connection, task_id: str) -> int:
 def _record_council_revise(conn: sqlite3.Connection, task_id: str) -> None:
     """Record a council REVISE event for loop tracking."""
     conn.execute(
-        "INSERT INTO task_events (task_id, kind, payload) VALUES (?, ?, ?)",
+        "INSERT INTO task_events (task_id, kind, payload, created_at) VALUES (?, ?, ?, datetime('now'))",
         (task_id, "council_revise", '{"stage": "council"}'),
+    )
+
+
+def _record_pipeline_spawn(
+    conn: sqlite3.Connection, task_id: str, *, stage: str, assignee: str
+) -> None:
+    """Record a pipeline_spawn event for Denji's spawn-frequency tracking.
+
+    Fires each time the dispatcher claims a task in a pipeline stage and
+    spawns the lead to continue working. Denji's review-cycle scripts
+    group on ``assignee`` and surface recurring spawn patterns to be
+    promoted to persistent profiles (D6 in the design doc).
+    """
+    import json as _json
+    payload = _json.dumps({"stage": stage, "assignee": assignee or ""})
+    conn.execute(
+        "INSERT INTO task_events (task_id, kind, payload, created_at) VALUES (?, ?, ?, datetime('now'))",
+        (task_id, "pipeline_spawn", payload),
+    )
+
+
+def _record_denji_review_signal(
+    conn: sqlite3.Connection, task_id: str, *, signal_type: str, **details
+) -> None:
+    """Emit a denji_review_signal event.
+
+    This is the consumer wiring for the existing ``denji_review_signal: True``
+    flag on completion events. Denji's review-cycle scripts scan for these
+    events to generate audit follow-up reviews (Phase D, #15 in the design).
+    """
+    import json as _json
+    payload = _json.dumps({"signal_type": signal_type, **details})
+    conn.execute(
+        "INSERT INTO task_events (task_id, kind, payload, created_at) VALUES (?, ?, ?, datetime('now'))",
+        (task_id, "denji_review_signal", payload),
+    )
+
+
+def _get_spawn_frequency_threshold() -> int:
+    """Return the spawn-frequency threshold for Denji promotion proposals.
+
+    When a single (assignee, stage) pair accumulates this many pipeline_spawn
+    events in the rolling 7-day window, Denji surfaces a promotion proposal.
+    Default 8 — about once per workday.
+    """
+    try:
+        from hermes_cli.config import load_config_readonly
+        cfg = load_config_readonly()
+        n = cfg.get("pipeline", {}).get("spawn_frequency_threshold", 8)
+        return int(n) if n is not None else 8
+    except Exception:
+        return 8
+
+
+def get_spawn_frequency(
+    conn: sqlite3.Connection, *, days: int = 7
+) -> list[dict]:
+    """Aggregate pipeline_spawn events by (assignee, stage) for Denji.
+
+    Returns a list of dicts:
+        [{"assignee": str, "stage": str, "spawn_count": int, "tasks": [str,...]}]
+
+    Sorted by spawn_count desc. A row hitting the configured threshold
+    (default 8) is the trigger for Denji to file a promotion proposal.
+    """
+    import json as _json
+    rows = conn.execute(
+        "SELECT payload FROM task_events "
+        "WHERE kind = 'pipeline_spawn' "
+        "AND created_at >= datetime('now', ?)",
+        (f"-{int(days)} days",),
+    ).fetchall()
+    agg: dict[tuple[str, str], dict] = {}
+    for row in rows:
+        try:
+            data = _json.loads(row[0])
+        except (TypeError, ValueError):
+            continue
+        assignee = data.get("assignee", "")
+        stage = data.get("stage", "")
+        key = (assignee, stage)
+        entry = agg.setdefault(key, {
+            "assignee": assignee, "stage": stage,
+            "spawn_count": 0, "tasks": set(),
+        })
+        entry["spawn_count"] += 1
+    # Materialise the sets for JSON-friendly output and sort by count desc
+    out = []
+    for entry in agg.values():
+        out.append({
+            "assignee": entry["assignee"],
+            "stage": entry["stage"],
+            "spawn_count": entry["spawn_count"],
+        })
+    out.sort(key=lambda r: (-r["spawn_count"], r["assignee"], r["stage"]))
+    return out
+
+
+def _create_audit_followup_task(
+    conn: sqlite3.Connection, parent_id: str, audit_verdict: str,
+    *, summary: str = "",
+) -> Optional[str]:
+    """Create a follow-up task tracking audit CONDITIONAL issues.
+
+    Only used when the audit gate returns CONDITIONAL — the gate still
+    passes, but the conditional issues are tracked as a child task so
+    they're not lost. Returns the new task id, or None on failure.
+    """
+    try:
+        # Read parent for context
+        parent = conn.execute(
+            "SELECT id, title FROM tasks WHERE id = ?", (parent_id,)
+        ).fetchone()
+        if not parent:
+            return None
+        title = f"[audit-followup] {parent[1]}"
+        body_lines = [
+            "## Problem",
+            f"Audit returned CONDITIONAL for parent task {parent_id}.",
+            "Track and resolve the conditional issues surfaced by the audit.",
+            "",
+            "## Success Criteria",
+            "- All CONDITIONAL issues from audit-report.md are addressed",
+            "- Tests still pass after the fixes",
+            "- New commit / PR linked back to the parent task",
+            "",
+            "## Audit Summary",
+            summary or "(see audit-report.md in parent artifacts)",
+            "",
+            "## Verdict",
+            f"**{audit_verdict}**",
+        ]
+        body = "\n".join(body_lines)
+        new_id = create_task(
+            conn,
+            title=title,
+            body=body,
+            assignee="octacon",
+            tier="fast",
+            board=parent[2] if len(parent) > 2 and parent[2] else None,
+        )
+        # Link the follow-up to the parent
+        conn.execute(
+            "INSERT OR IGNORE INTO task_links (parent_id, child_id) VALUES (?, ?)",
+            (parent_id, new_id),
+        )
+        return new_id
+    except Exception as exc:
+        import logging
+        logging.getLogger(__name__).exception(
+            "Failed to create audit follow-up task for %s: %s", parent_id, exc
+        )
+        return None
+
+
+def _record_bypass_record(
+    conn: sqlite3.Connection, task_id: str, *,
+    skipped_stages: list[str], launched_by: str, mode: str,
+) -> None:
+    """Record an express-path bypass-record event for Denji review.
+
+    Express launches skip PRD, Council, and Tech Review. Each launch
+    writes a ``bypass_record`` event with the skipped stages, the
+    launcher, and the timestamp. Denji samples these for governance
+    review (design doc §4a).
+    """
+    import json as _json
+    payload = _json.dumps({
+        "skipped_stages": skipped_stages,
+        "launched_by": launched_by,
+        "mode": mode,
+    })
+    conn.execute(
+        "INSERT INTO task_events (task_id, kind, payload, created_at) VALUES (?, ?, ?, datetime('now'))",
+        (task_id, "bypass_record", payload),
     )
 
 
