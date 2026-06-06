@@ -6,6 +6,7 @@ Scans the user's config.yaml for common misconfigurations:
 
 - auxiliary.<task> entries where base_url is empty but provider is "auto"
   (the task silently falls through the full auto-detection chain).
+- pipeline.<setting> invalid types or values.
 """
 
 import os
@@ -46,6 +47,33 @@ def run_validate_config(args) -> int:
                     f"  WARNING: auxiliary.{task_name}: base_url is empty with "
                     f"provider 'auto'. May fall back unexpectedly."
                 )
+
+    # Validate pipeline config — check for common misconfigurations.
+    user_pipeline = user_config.get("pipeline", {})
+    if isinstance(user_pipeline, dict):
+        # Validate max_revise_loops is positive int
+        max_revise = user_pipeline.get("max_revise_loops")
+        if max_revise is not None:
+            if not isinstance(max_revise, int) or max_revise < 1:
+                warnings.append(
+                    f"  WARNING: pipeline.max_revise_loops must be a positive "
+                    f"integer, got {max_revise!r}."
+                )
+        # Validate token_cap is None or positive int
+        token_cap = user_pipeline.get("token_cap")
+        if token_cap is not None:
+            if not isinstance(token_cap, int) or token_cap < 1:
+                warnings.append(
+                    f"  WARNING: pipeline.token_cap must be null or a positive "
+                    f"integer, got {token_cap!r}."
+                )
+        # Validate stage_owners is a dict
+        stage_owners = user_pipeline.get("stage_owners")
+        if stage_owners is not None and not isinstance(stage_owners, dict):
+            warnings.append(
+                f"  WARNING: pipeline.stage_owners must be a dict, "
+                f"got {type(stage_owners).__name__}."
+            )
 
     if warnings:
         for w in warnings:

@@ -2056,6 +2056,35 @@ DEFAULT_CONFIG = {
         # don't count.
         "max_review_passes": 4,
     },
+    # Feature pipeline — controls the gated progression of tier=full tasks
+    # through research, PRD, spec, and council stages. Each stage has a gate
+    # function that validates an artifact before promotion. The pipeline is
+    # only triggered when intake classifies a task as tier=full.
+    "pipeline": {
+        # Maximum number of times the council can REVISE a spec before
+        # escalating to the operator. Prevents infinite loops when the
+        # council and spec author disagree on scope or approach.
+        "max_revise_loops": 4,
+        # Per-council token cap (backstop for cost governance).
+        # Limits total tokens consumed across all council phases.
+        # None = no cap (uses provider-level limits).
+        "token_cap": None,
+        # Enable express workflow (drops PRD, Council, Tech Review).
+        # Express runs are logged as bypasses for Denji review.
+        "express_enabled": True,
+        # Artifact storage base directory. Artifacts are stored as
+        # <base>/<task_id>/<artifact-name>.md. Relative to HERMES_HOME
+        # if not absolute.
+        "artifact_dir": "feature-artifacts",
+        # Stage ownership: which profile is responsible for each stage.
+        # Used for dispatch routing and notifications.
+        "stage_owners": {
+            "research": "remii",
+            "prd": "kensei-intake",
+            "spec": "octacon",
+            "council": "",  # Phase B: council service
+        },
+    },
 
     # execute_code settings — controls the tool used for programmatic tool calls.
     "code_execution": {
@@ -6276,6 +6305,27 @@ def _inject_platform_plugin_env_vars() -> None:
                 }
     except Exception:
         pass
+def get_pipeline_config() -> Dict[str, Any]:
+    """Return the ``pipeline`` section from config, merged with defaults.
+
+    The pipeline config lives under ``pipeline:`` in config.yaml and
+    controls gated progression of tier=full tasks through research,
+    PRD, spec, and council stages.
+    """
+    cfg = load_config_readonly()
+    pipeline_cfg = cfg.get("pipeline", {})
+    defaults = DEFAULT_CONFIG.get("pipeline", {})
+    merged = dict(defaults)
+    merged.update(pipeline_cfg)
+    # Deep-merge stage_owners
+    if isinstance(merged.get("stage_owners"), dict) and isinstance(
+        defaults.get("stage_owners"), dict
+    ):
+        owner_defaults = dict(defaults["stage_owners"])
+        owner_defaults.update(merged["stage_owners"])
+        merged["stage_owners"] = owner_defaults
+    return merged
+
 
 
 # Eagerly inject so that platform plugin env vars show up in the setup wizard.
