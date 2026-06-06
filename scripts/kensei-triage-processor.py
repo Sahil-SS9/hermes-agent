@@ -147,6 +147,27 @@ def _set_task_assignee(board, task_id, assignee):
     except Exception:
         return False
 
+def _promote_to_pipeline(task_id, board, stage):
+    """Promote a task to a pipeline stage (research/prd/spec/council).
+
+    Sets status=stage and pipeline_stage=stage via direct SQL.
+    Returns True on success, False on failure.
+    """
+    db_path = _get_board_db(board)
+    if not os.path.exists(db_path):
+        return False
+    try:
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            "UPDATE tasks SET status = ?, pipeline_stage = ? WHERE id = ?",
+            (stage, stage, task_id)
+        )
+        conn.commit()
+        conn.close()
+        return True
+    except Exception:
+        return False
+
 def classify_task(title, body):
     """Classify triage task: AUTO-PROMOTE vs NEEDS HUMAN, and tier (fast/full)."""
     title_lower = title.lower() if title else ''
@@ -224,14 +245,41 @@ def main():
             routed_board, routed_assignee = _route_task(title, body)
 
         if classification == 'AUTO-PROMOTE':
-            if promote_task(task_id, board):
-                _set_task_tier(board, task_id, tier)
-                if routed_assignee:
-                    _set_task_assignee(board, task_id, routed_assignee)
-                auto_promoted.append({'id': task_id, 'board': board, 'title': title, 'tier': tier})
+            if tier == 'full':
+                # Feature pipeline: tier=full tasks enter at 'research'
+                # stage. Intake gate must pass (body has problem + success
+                # criteria) before promotion.
+                from hermes_cli.feature_pipeline import validate_intake_brief
+                gate_fail = validate_intake_brief(body)
+                if gate_fail:
+                    reason = f"Intake gate failed: {gate_fail}"
+                    if block_task(task_id, board, reason):
+                        _set_task_tier(board, task_id, tier)
+                        pending_tasks.append({
+                            'id': task_id, 'board': board, 'title': title,
+                            'body': body, 'assignee': assignee,
+                            'blocked_at': int(time.time()), 'investigated': False
+                        })
+                    else:
+                        errors.append({'id': task_id, 'board': board, 'title': title, 'error': 'block failed'})
+                    continue
+                # Gate passed — promote to 'research' with pipeline_stage set
+                if _promote_to_pipeline(task_id, board, 'research'):
+                    _set_task_tier(board, task_id, tier)
+                    if routed_assignee:
+                        _set_task_assignee(board, task_id, routed_assignee)
+                    auto_promoted.append({'id': task_id, 'board': board, 'title': title, 'tier': tier, 'stage': 'research'})
+                else:
+                    errors.append({'id': task_id, 'board': board, 'title': title, 'error': 'promote to research failed'})
             else:
-                errors.append({'id': task_id, 'board': board, 'title': title, 'error': 'promote failed'})
-                print(f"[ERROR] promote failed for {task_id} ({board}): {title[:80]}", file=sys.stderr)
+                # Fast tier: promote to 'todo' (existing behavior)
+                if promote_task(task_id, board):
+                    _set_task_tier(board, task_id, tier)
+                    if routed_assignee:
+                        _set_task_assignee(board, task_id, routed_assignee)
+                    auto_promoted.append({'id': task_id, 'board': board, 'title': title, 'tier': tier})
+                else:
+                    errors.append({'id': task_id, 'board': board, 'title': title, 'error': 'promote failed'})
         else:
             reason = f"Needs Sahil's decision: {title[:120]}"
             if block_task(task_id, board, reason):
