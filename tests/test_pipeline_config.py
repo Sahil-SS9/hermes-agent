@@ -105,7 +105,7 @@ class TestGetPipelineConfig:
         # research should be overridden
         assert result["stage_owners"]["research"] == "custom-research-profile"
         # Other defaults should still be present
-        assert result["stage_owners"]["prd"] == "kensei-intake"
+        assert result["stage_owners"]["prd"] == "kensei"
         assert result["stage_owners"]["spec"] == "octacon"
 
 

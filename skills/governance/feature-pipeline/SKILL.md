@@ -71,7 +71,7 @@ hermes feature advance <task_id>
 | Stage   | Owner Profile    |
 |---------|------------------|
 | Research | remii           |
-| PRD     | kensei-intake    |
+| PRD     | kensei           |
 | Spec    | octacon         |
 | Council | (Phase B)       |
 
@@ -85,7 +85,7 @@ pipeline:
   artifact_dir: feature-artifacts  # Relative to HERMES_HOME
   stage_owners:
     research: remii
-    prd: kensei-intake
+    prd: kensei
     spec: octacon
     council: ""
 ```

@@ -2080,7 +2080,7 @@ DEFAULT_CONFIG = {
         # Used for dispatch routing and notifications.
         "stage_owners": {
             "research": "remii",
-            "prd": "kensei-intake",
+            "prd": "kensei",
             "spec": "octacon",
             "council": "",  # Phase B: council service
         },
