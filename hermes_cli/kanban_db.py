@@ -99,7 +99,7 @@ _log = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-VALID_STATUSES = {"triage", "todo", "scheduled", "ready", "running", "blocked", "review", "done", "archived", "backlog"}
+VALID_STATUSES = {"triage", "todo", "scheduled", "ready", "running", "blocked", "review", "done", "archived", "backlog", "research", "prd", "spec", "council"}
 VALID_INITIAL_STATUSES = {"running", "blocked", "backlog"}
 VALID_WORKSPACE_KINDS = {"scratch", "worktree", "dir"}
 KNOWN_TOOLSET_NAMES = frozenset(name.casefold() for name in get_toolset_names())
@@ -1053,7 +1053,11 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- or 'full' (product/feature/research/multi-step). NULL = unclassified,
     -- treated as 'fast' for backward compatibility. The contract validator
     -- (validate_task_contract) gates full-tier tasks on AC + test plan.
-    tier                 TEXT
+    tier                 TEXT,
+    -- Phase A: current stage within the feature pipeline ('research', 'prd',
+    -- 'spec', 'council'). NULL = not in pipeline (fast-tier or pre-pipeline).
+    -- Used by the dispatcher to route tasks to the correct gate function.
+    pipeline_stage       TEXT
 );
 
 CREATE TABLE IF NOT EXISTS task_links (
@@ -1735,6 +1739,13 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
         # pick up the next review pass. NULL until first review. Also present
         # on live boards via out-of-band ALTER; added here for fresh boards.
         _add_column_if_missing(conn, "tasks", "reviewer", "reviewer TEXT")
+
+    if "pipeline_stage" not in cols:
+        # Phase A: current stage within the feature pipeline ('research',
+        # 'prd', 'spec', 'council'). NULL = not in pipeline (fast-tier or
+        # pre-pipeline). Used by the dispatcher to route tasks to the
+        # correct gate function.
+        _add_column_if_missing(conn, "tasks", "pipeline_stage", "pipeline_stage TEXT")
 
     # Indexes over additive ``tasks`` columns must be created after the
     # columns exist. Keeping them in SCHEMA_SQL breaks legacy boards: SQLite
