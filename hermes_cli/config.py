@@ -2056,6 +2056,37 @@ DEFAULT_CONFIG = {
         # don't count.
         "max_review_passes": 4,
     },
+    # LLM Council — multi-model deliberation gate on PRD+Spec for tier=full
+    # features. Three-phase: independent review (parallel) → cross-ranking
+    # (anonymised) → chairman synthesis. Returns APPROVED or REVISE.
+    "council": {
+        # Panel members: the models that independently review PRD+Spec.
+        # Each member MUST include ``provider`` and ``model``. Optional
+        # ``fallback`` chain is tried in order if the primary provider
+        # returns a transient error (402, 429, connection failure).
+        # Diversity across providers is recommended — lint warns on
+        # same-family panels.
+        "panel": [
+            {"provider": "opencode-go",  "model": "minimax-m3",       "fallback": []},
+            {"provider": "opencode-go",  "model": "mimo-2.5-pro",     "fallback": []},
+            {"provider": "ollama-cloud", "model": "kimi-k2.6",        "fallback": []},
+        ],
+        # Chairman model: reads all critiques + rankings and emits the
+        # final APPROVED or REVISE verdict. No fallback — if the chairman
+        # fails, the council fails and the operator is notified.
+        "chairman": {
+            "provider": "ollama-cloud",
+            "model": "deepseek-v4-pro",
+        },
+        # Per-council token cap (backstop for cost governance).
+        # Limits total tokens consumed across all three phases.
+        # None = no cap (uses provider-level limits).
+        "token_cap": 200_000,
+        # Max seconds for the entire council deliberation before timeout.
+        "timeout_seconds": 600,
+        # Per-member LLM call timeout in seconds.
+        "member_timeout_seconds": 180,
+    },
     # Feature pipeline — controls the gated progression of tier=full tasks
     # through research, PRD, spec, and council stages. Each stage has a gate
     # function that validates an artifact before promotion. The pipeline is
@@ -6325,6 +6356,26 @@ def get_pipeline_config() -> Dict[str, Any]:
         owner_defaults.update(merged["stage_owners"])
         merged["stage_owners"] = owner_defaults
     return merged
+
+
+def get_council_config() -> "CouncilConfig":
+    """Return the ``council`` section from config, merged with defaults.
+
+    Returns a CouncilConfig dataclass with panel members, chairman,
+    token cap, and timeout settings.
+    """
+    from hermes_cli.council import CouncilConfig
+    cfg = load_config_readonly()
+    council_cfg = cfg.get("council", {})
+    defaults = DEFAULT_CONFIG.get("council", {})
+    merged = dict(defaults)
+    merged.update(council_cfg)
+    # Deep-merge panel (list of dicts — replace, don't merge)
+    if "panel" in council_cfg:
+        merged["panel"] = council_cfg["panel"]
+    if "chairman" in council_cfg:
+        merged["chairman"] = council_cfg["chairman"]
+    return CouncilConfig.from_config(merged)
 
 
 

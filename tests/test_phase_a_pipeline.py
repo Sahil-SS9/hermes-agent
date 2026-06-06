@@ -255,7 +255,10 @@ class TestPipelineStateMachine:
         assert get_next_stage("research") == "prd"
         assert get_next_stage("prd") == "spec"
         assert get_next_stage("spec") == "council"
-        assert get_next_stage("council") is None
+        assert get_next_stage("council") == "sign_off"
+        assert get_next_stage("sign_off") == "tech_review"
+        assert get_next_stage("tech_review") == "final_sign_off"
+        assert get_next_stage("final_sign_off") is None
 
     def test_get_next_stage_invalid(self):
         assert get_next_stage("invalid") is None
@@ -306,18 +309,43 @@ class TestPipelineStateMachine:
         assert result["gate_passed"] is True
         assert result["to_stage"] == "council"
 
-    def test_advance_pipeline_council_no_gate(self, tmp_path):
-        """Council has no gate (Phase B) — should advance to None."""
+    def test_advance_pipeline_council_approved(self, tmp_path):
+        """Council gate passes when verdict artifact says APPROVED."""
         artifact_dir = tmp_path / "task-014"
         artifact_dir.mkdir()
+        (artifact_dir / "prd.md").write_text("## Problem\nX\n\n## Users\nY")
+        (artifact_dir / "spec.md").write_text("## Architecture\nA\n\n## Interfaces\nB\n\n## Test Strategy\nC")
+        (artifact_dir / "council-verdict.md").write_text(
+            "# Council Verdict\n\n**Verdict: APPROVED**\n\nNo issues."
+        )
         result = advance_pipeline("task-014", "council", str(tmp_path))
-        assert result["advanced"] is False
+        assert result["advanced"] is True
         assert result["gate_passed"] is True
-        assert result["to_stage"] is None
+        assert result["to_stage"] == "sign_off"
+        assert result["gate_message"] is None
+
+    def test_advance_pipeline_council_revise(self, tmp_path):
+        """Council gate fails when verdict artifact says REVISE."""
+        artifact_dir = tmp_path / "task-015"
+        artifact_dir.mkdir()
+        (artifact_dir / "council-verdict.md").write_text(
+            "# Council Verdict\n\n**Verdict: REVISE**\n\n"
+            "- **[HIGH]** Missing error handling in API layer\n"
+            "- **[MEDIUM]** Test strategy too vague\n"
+        )
+        result = advance_pipeline("task-015", "council", str(tmp_path))
+        assert result["advanced"] is False
+        assert result["gate_passed"] is False
+        assert "REVISE" in result["gate_message"]
+        assert "[HIGH]" in result["gate_message"]
+        assert "[MEDIUM]" in result["gate_message"]
 
     def test_pipeline_stages_order(self):
         """Pipeline stages are in correct order."""
-        assert PIPELINE_STAGES == ["research", "prd", "spec", "council"]
+        assert PIPELINE_STAGES == [
+            "research", "prd", "spec", "council",
+            "sign_off", "tech_review", "final_sign_off",
+        ]
 
 
 # ---------------------------------------------------------------------------

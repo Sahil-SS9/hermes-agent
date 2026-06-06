@@ -147,20 +147,148 @@ def validate_spec_artifact(artifact_dir: str) -> Optional[str]:
     return _check_body_markers(content, _SPEC_MARKERS)
 
 
+def validate_council_artifact(artifact_dir: str) -> Optional[str]:
+    """Gate: council-verdict.md must exist and contain APPROVED.
+
+    If the verdict artifact doesn't exist yet, this runs the council
+    deliberation (LLM calls). This is intentionally expensive — it only
+    fires once per council stage entry.
+
+    Returns None if APPROVED, reason string if REVISE or error.
+    """
+    verdict_path = os.path.join(artifact_dir, "council-verdict.md")
+
+    if not os.path.exists(verdict_path):
+        # No verdict yet — run the deliberation
+        import logging
+        _log = logging.getLogger(__name__)
+        # Extract task_id from artifact_dir (last path component)
+        task_id = os.path.basename(os.path.normpath(artifact_dir))
+        try:
+            from hermes_cli.council import deliberate as run_council
+            verdict = run_council(task_id, artifact_dir)
+            if verdict.verdict == "APPROVED":
+                return None
+            else:
+                # Build REVISE reason from issues
+                issue_lines = []
+                for issue in verdict.issues:
+                    sev = issue.get("severity", "medium")
+                    desc = issue.get("description", "")
+                    issue_lines.append(f"[{sev.upper()}] {desc}")
+                reason = "Council REVISE. Issues:\n" + "\n".join(issue_lines)
+                if verdict.chairman_rationale:
+                    reason += f"\n\nChairman: {verdict.chairman_rationale}"
+                return reason
+        except Exception as exc:
+            _log.exception("Council deliberation failed for %s", task_id)
+            return f"Council deliberation failed: {exc}"
+
+    # Verdict artifact exists — read and check
+    try:
+        with open(verdict_path) as f:
+            content = f.read()
+    except OSError as exc:
+        return f"Cannot read council-verdict.md: {exc}"
+
+    if not content or not content.strip():
+        return "council-verdict.md is empty"
+
+    # Parse the verdict from the markdown
+    content_lower = content.lower()
+    if "**verdict: approved**" in content_lower or "verdict: approved" in content_lower:
+        return None
+
+    # Extract issues for REVISE reason
+    if "**verdict: revise**" in content_lower or "verdict: revise" in content_lower:
+        # Try to extract issues from the markdown
+        import re
+        issue_matches = re.findall(
+            r"- \*?\*?\[(CRITICAL|HIGH|MEDIUM|LOW)\]\*?\*?\s+(.+)",
+            content, re.IGNORECASE,
+        )
+        if issue_matches:
+            issue_lines = [f"[{m[0].upper()}] {m[1]}" for m in issue_matches]
+            return "Council REVISE. Issues:\n" + "\n".join(issue_lines)
+        return "Council REVISE — see council-verdict.md for details"
+
+    # Verdict unclear — treat as REVISE
+    return "Council verdict unclear — see council-verdict.md"
+
+
+def validate_tech_review_artifact(artifact_dir: str) -> Optional[str]:
+    """Gate: tech-review.md must exist with Architecture, Risk Assessment sections."""
+    path = os.path.join(artifact_dir, "tech-review.md")
+    if not os.path.exists(path):
+        return "Missing tech-review.md artifact"
+    with open(path) as f:
+        content = f.read()
+
+    if not content or not content.strip():
+        return "tech-review.md is empty"
+
+    _MARKERS = {
+        "architecture": ("## architecture", "# architecture", "architecture:", "**architecture**"),
+        "risks": ("## risks", "# risks", "risks:", "**risks**", "## risk assessment", "# risk assessment"),
+    }
+    return _check_body_markers(content, _MARKERS)
+
+
+def check_human_approved(conn: "sqlite3.Connection", task_id: str, stage: str) -> bool:
+    """Check if a task has been approved by a human for the given stage.
+
+    Looks for ``human_approved`` events in the events table.
+    The stage field in the event payload must match the current stage.
+    """
+    row = conn.execute(
+        "SELECT 1 FROM task_events "
+        "WHERE task_id = ? AND kind = 'human_approved' "
+        "AND json_extract(payload, '$.stage') = ? "
+        "ORDER BY created_at DESC LIMIT 1",
+        (task_id, stage),
+    ).fetchone()
+    return row is not None
+
+
+def time_in_stage_hours(conn: "sqlite3.Connection", task_id: str, stage: str) -> float:
+    """Return hours since the task entered the given stage."""
+    row = conn.execute(
+        "SELECT created_at FROM task_events "
+        "WHERE task_id = ? AND kind = 'pipeline_advanced' "
+        "AND json_extract(payload, '$.to_stage') = ? "
+        "ORDER BY created_at DESC LIMIT 1",
+        (task_id, stage),
+    ).fetchone()
+    if not row:
+        return 0.0
+    import datetime
+    created = datetime.datetime.fromisoformat(row[0])
+    now = datetime.datetime.now(datetime.timezone.utc)
+    return (now - created).total_seconds() / 3600.0
+
+
 # ---------------------------------------------------------------------------
 # Pipeline state machine
 # ---------------------------------------------------------------------------
 
 # Stage order in the feature pipeline
-PIPELINE_STAGES = ["research", "prd", "spec", "council"]
+PIPELINE_STAGES = ["research", "prd", "spec", "council", "sign_off", "tech_review", "final_sign_off"]
 
 # Gate function mapping per stage
 GATE_FUNCTIONS = {
     "research": validate_research_artifact,
     "prd": validate_prd_artifact,
     "spec": validate_spec_artifact,
-    # council gate is Phase B — no gate function yet
+    "council": validate_council_artifact,
+    # sign_off and final_sign_off are human gates — handled by dispatcher
+    # tech_review checks tech-review.md artifact
+    "tech_review": validate_tech_review_artifact,
 }
+
+# Human-gate stages: these stages require manual approval via CLI/Discord.
+# The dispatcher checks for a ``human_approved`` event in the events table
+# rather than running a gate function on disk artifacts.
+HUMAN_GATE_STAGES = {"sign_off", "final_sign_off"}
 
 
 def get_next_stage(current_stage: str) -> Optional[str]:

@@ -28,8 +28,10 @@ from hermes_cli.kanban_db import (
 from hermes_cli.feature_pipeline import (
     PIPELINE_STAGES,
     GATE_FUNCTIONS,
+    HUMAN_GATE_STAGES,
     get_next_stage,
     validate_intake_brief,
+    check_human_approved,
     get_artifact_path,
     write_artifact,
     read_artifact,
@@ -239,6 +241,22 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
     advance_parser.add_argument("task_id", help="Task ID to advance")
     advance_parser.add_argument("--force", "-f", action="store_true", help="Bypass gate check")
 
+    # hermes feature sign-off — approve a human-gate stage
+    signoff_parser = feature_subparsers.add_parser(
+        "sign-off",
+        help="Approve a task at a human-gate stage (sign_off/final_sign_off)",
+    )
+    signoff_parser.add_argument("task_id", help="Task ID to approve")
+    signoff_parser.add_argument("--note", "-n", help="Optional approval note")
+
+    # hermes feature reject — reject a human-gate stage
+    reject_parser = feature_subparsers.add_parser(
+        "reject",
+        help="Reject a task at a human-gate stage (bounces back to spec or tech_review)",
+    )
+    reject_parser.add_argument("task_id", help="Task ID to reject")
+    reject_parser.add_argument("reason", nargs="?", default="No reason given", help="Rejection reason")
+
     return feature_parser
 
 
@@ -252,6 +270,84 @@ def cmd_feature(args: argparse.Namespace) -> int:
         return cmd_feature_status(args)
     elif action == "advance":
         return cmd_feature_advance(args)
+    elif action == "sign-off":
+        return cmd_feature_signoff(args)
+    elif action == "reject":
+        return cmd_feature_reject(args)
     else:
-        print("Usage: hermes feature {create|status|advance}", file=sys.stderr)
+        print("Usage: hermes feature {create|status|advance|sign-off|reject}", file=sys.stderr)
+        return 1
+
+
+def cmd_feature_signoff(args: argparse.Namespace) -> int:
+    """Approve a task at a human-gate stage."""
+    task_id = args.task_id
+    note = args.note
+
+    try:
+        with connect() as conn:
+            task = get_task(conn, task_id)
+            if not task:
+                print(f"Task not found: {task_id}", file=sys.stderr)
+                return 1
+
+            stage = task.pipeline_stage
+            if stage not in HUMAN_GATE_STAGES:
+                print(f"Task {task_id} is at '{stage}', not a human-gate stage. "
+                      f"Human gate stages: {', '.join(sorted(HUMAN_GATE_STAGES))}",
+                      file=sys.stderr)
+                return 1
+
+            # Write human_approved event
+            payload = json.dumps({"stage": stage, "note": note or ""})
+            conn.execute(
+                "INSERT INTO task_events (task_id, kind, payload) VALUES (?, ?, ?)",
+                (task_id, "human_approved", payload),
+            )
+            conn.commit()
+            print(f"Approved {task_id} at {stage} stage.")
+            print("The dispatcher will advance the task on the next tick.")
+            return 0
+    except Exception as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+
+def cmd_feature_reject(args: argparse.Namespace) -> int:
+    """Reject a task at a human-gate stage, bouncing it back."""
+    task_id = args.task_id
+    reason = args.reason
+
+    try:
+        with connect() as conn:
+            task = get_task(conn, task_id)
+            if not task:
+                print(f"Task not found: {task_id}", file=sys.stderr)
+                return 1
+
+            stage = task.pipeline_stage
+            if stage not in HUMAN_GATE_STAGES:
+                print(f"Task {task_id} is at '{stage}', not a human-gate stage.",
+                      file=sys.stderr)
+                return 1
+
+            # Write human_rejected event
+            payload = json.dumps({"stage": stage, "reason": reason})
+            conn.execute(
+                "INSERT INTO task_events (task_id, kind, payload) VALUES (?, ?, ?)",
+                (task_id, "human_rejected", payload),
+            )
+
+            # Bounce back: sign_off → spec, final_sign_off → tech_review
+            bounce_stage = "spec" if stage == "sign_off" else "tech_review"
+            conn.execute(
+                "UPDATE tasks SET status = ?, pipeline_stage = ? WHERE id = ?",
+                (bounce_stage, bounce_stage, task_id),
+            )
+            conn.commit()
+            print(f"Rejected {task_id}: {reason}")
+            print(f"Bounced back: {stage} → {bounce_stage}")
+            return 0
+    except Exception as exc:
+        print(f"Error: {exc}", file=sys.stderr)
         return 1

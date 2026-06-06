@@ -99,7 +99,7 @@ _log = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-VALID_STATUSES = {"triage", "todo", "scheduled", "ready", "running", "blocked", "review", "done", "archived", "backlog", "research", "prd", "spec", "council"}
+VALID_STATUSES = {"triage", "todo", "scheduled", "ready", "running", "blocked", "review", "done", "archived", "backlog", "research", "prd", "spec", "council", "sign_off", "tech_review", "final_sign_off"}
 VALID_INITIAL_STATUSES = {"running", "blocked", "backlog"}
 VALID_WORKSPACE_KINDS = {"scratch", "worktree", "dir"}
 KNOWN_TOOLSET_NAMES = frozenset(name.casefold() for name in get_toolset_names())
@@ -7464,11 +7464,12 @@ def dispatch_once(
                 result.auto_blocked.append(claimed.id)
 
     # ---- feature pipeline dispatch ----
-    # Pipeline tasks (research, prd, spec) follow a gated progression:
-    #   triage → research → prd → spec → council (Phase B)
+    # Pipeline tasks (research, prd, spec, council) follow a gated progression:
+    #   triage → research → prd → spec → council (LLM deliberation)
     # Each stage has a gate function that validates the artifact before
     # promotion.  When the gate fails, the task stays in its current
     # status and the assigned lead continues working on the artifact.
+    # Exception: council REVISE bounces back to spec (capped at max_revise_loops).
     # When the gate passes, the task advances to the next stage.
     #
     # Pipeline tasks are NOT dispatched to workers like ready tasks.
@@ -7478,12 +7479,15 @@ def dispatch_once(
     from hermes_cli.feature_pipeline import (
         PIPELINE_STAGES,
         GATE_FUNCTIONS,
+        HUMAN_GATE_STAGES,
         get_next_stage,
+        check_human_approved,
+        time_in_stage_hours,
     )
-    _PIPELINE_STATUSES = ("research", "prd", "spec")
+    _PIPELINE_STATUSES = ("research", "prd", "spec", "council")
     pipeline_rows = conn.execute(
         "SELECT id, assignee, skills, pipeline_stage FROM tasks "
-        "WHERE status IN ('research', 'prd', 'spec') "
+        "WHERE status IN ('research', 'prd', 'spec', 'council') "
         "AND claim_lock IS NULL "
         "ORDER BY priority DESC, created_at ASC"
     ).fetchall()
@@ -7492,7 +7496,7 @@ def dispatch_once(
             break
         stage = row["pipeline_stage"]
         if stage not in GATE_FUNCTIONS:
-            # Unknown stage or council (Phase B) — skip
+            # Unknown stage — skip
             continue
         gate_fn = GATE_FUNCTIONS[stage]
         # Determine artifact directory
@@ -7517,16 +7521,94 @@ def dispatch_once(
                             {"from_stage": stage, "to_stage": next_stage},
                         )
                     else:
-                        # End of pipeline (council) — mark as ready for Phase B
+                        # End of pipeline — council passed, task is ready for next phase
                         conn.execute(
-                            "UPDATE tasks SET pipeline_stage = ? WHERE id = ?",
-                            (stage, row["id"]),
+                            "UPDATE tasks SET pipeline_stage = ?, status = ? WHERE id = ?",
+                            (stage, "todo", row["id"]),
                         )
                         _append_event(
                             conn, row["id"], "pipeline_complete",
                             {"stage": stage},
                         )
-            result.pipeline_advanced.append((row["id"], stage, next_stage or ""))
+            result.pipeline_advanced.append((row["id"], stage, next_stage or "todo"))
+        elif stage == "council":
+            # Council REVISE — bounce back to spec with loop tracking.
+            # Don't spawn a lead; the spec author continues working.
+            if not dry_run:
+                with write_txn(conn):
+                    # Track revise count
+                    revise_count = _get_council_revise_count(conn, row["id"])
+                    max_loops = _get_max_revise_loops()
+                    if revise_count >= max_loops:
+                        # Loop cap exceeded — escalate to operator
+                        conn.execute(
+                            "UPDATE tasks SET status = ?, pipeline_stage = ? WHERE id = ?",
+                            ("blocked", "council"),
+                        )
+                        _append_event(
+                            conn, row["id"], "gate_failed",
+                            {"stage": stage, "reason": gate_result,
+                             "escalated": True,
+                             "revise_count": revise_count,
+                             "max_loops": max_loops},
+                        )
+                    else:
+                        # Bounce back to spec
+                        conn.execute(
+                            "UPDATE tasks SET status = ?, pipeline_stage = ? WHERE id = ?",
+                            ("spec", "spec"),
+                        )
+                        _append_event(
+                            conn, row["id"], "gate_failed",
+                            {"stage": stage, "reason": gate_result,
+                             "bounced_to": "spec",
+                             "revise_count": revise_count + 1},
+                        )
+                    _record_council_revise(conn, row["id"])
+            result.pipeline_advanced.append((row["id"], stage, "spec"))
+        elif stage in HUMAN_GATE_STAGES:
+            # Human gate (sign_off, final_sign_off) — check events table.
+            # Gate passes when Sahil approves via CLI/Discord.
+            # No lead spawn — tasks wait passively for human action.
+            # Stale-nudge after configurable idle hours.
+            approved = check_human_approved(conn, row["id"], stage)
+            if approved:
+                next_stage = get_next_stage(stage)
+                if not dry_run:
+                    with write_txn(conn):
+                        if next_stage:
+                            conn.execute(
+                                "UPDATE tasks SET pipeline_stage = ?, status = ? WHERE id = ?",
+                                (next_stage, next_stage, row["id"]),
+                            )
+                            _append_event(
+                                conn, row["id"], "pipeline_advanced",
+                                {"from_stage": stage, "to_stage": next_stage,
+                                 "approved_by": "human"},
+                            )
+                        else:
+                            conn.execute(
+                                "UPDATE tasks SET pipeline_stage = ?, status = ? WHERE id = ?",
+                                (stage, "todo", row["id"]),
+                            )
+                            _append_event(
+                                conn, row["id"], "pipeline_complete",
+                                {"stage": stage, "approved_by": "human"},
+                            )
+                result.pipeline_advanced.append((row["id"], stage, next_stage or "todo"))
+            else:
+                # Not yet approved — check for stale timeout
+                hours = time_in_stage_hours(conn, row["id"], stage)
+                stale_hours = _get_sign_off_timeout_hours()
+                if hours > stale_hours and not dry_run:
+                    with write_txn(conn):
+                        _append_event(
+                            conn, row["id"], "human_gate_stale_nudge",
+                            {"stage": stage, "hours_idle": round(hours, 1)},
+                        )
+                # Don't spawn a lead for human gates — passive wait
+                logger.debug("Human gate %s waiting for approval: %s (%.1f hrs)",
+                            stage, row["id"], hours)
         else:
             # Gate failed — record event then dispatch lead to continue working
             if not dry_run:
@@ -7589,6 +7671,45 @@ def dispatch_once(
                     result.auto_blocked.append(claimed.id)
 
     return result
+
+
+def _get_max_revise_loops() -> int:
+    """Return the council max_revise_loops from config, default 4."""
+    try:
+        from hermes_cli.config import load_config_readonly
+        cfg = load_config_readonly()
+        loops = cfg.get("pipeline", {}).get("max_revise_loops", 4)
+        return int(loops) if loops is not None else 4
+    except Exception:
+        return 4
+
+
+def _get_sign_off_timeout_hours() -> int:
+    """Return the sign-off stale timeout from config, default 48 hours."""
+    try:
+        from hermes_cli.config import load_config_readonly
+        cfg = load_config_readonly()
+        return int(cfg.get("pipeline", {}).get("sign_off_timeout_hours", 48))
+    except Exception:
+        return 48
+
+
+def _get_council_revise_count(conn: sqlite3.Connection, task_id: str) -> int:
+    """Count how many times the council has REVISEd this task."""
+    row = conn.execute(
+        "SELECT COUNT(*) FROM task_events "
+        "WHERE task_id = ? AND kind = 'council_revise'",
+        (task_id,),
+    ).fetchone()
+    return row[0] if row else 0
+
+
+def _record_council_revise(conn: sqlite3.Connection, task_id: str) -> None:
+    """Record a council REVISE event for loop tracking."""
+    conn.execute(
+        "INSERT INTO task_events (task_id, kind, payload) VALUES (?, ?, ?)",
+        (task_id, "council_revise", '{"stage": "council"}'),
+    )
 
 
 def _positive_int(value: Any, default: int, *, minimum: int = 1) -> int:
