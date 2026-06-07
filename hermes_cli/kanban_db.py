@@ -778,6 +778,9 @@ class Task:
     current_step_key: Optional[str] = None
     # Feature pipeline stage: research, prd, spec, council, or None
     pipeline_stage: Optional[str] = None
+    # Task tier, set at intake: "full" (enforced pipeline) or "fast".
+    # NULL = unclassified, treated as 'fast' for backward compat.
+    tier: Optional[str] = None
     # Feature pipeline mode: "full" or "express" (None = full). Drives
     # which stage set get_next_stage walks for this task.
     pipeline_mode: Optional[str] = None
@@ -882,6 +885,7 @@ class Task:
             pipeline_stage=(
                 row["pipeline_stage"] if "pipeline_stage" in keys else None
             ),
+            tier=row["tier"] if "tier" in keys else None,
             pipeline_mode=(
                 row["pipeline_mode"] if "pipeline_mode" in keys else None
             ),
@@ -7408,9 +7412,11 @@ def dispatch_once(
     # sdlc-review skill) that verifies the PR and either merges (→ done)
     # or rejects (→ back to running for the worker to fix).
     #
-    # Same concurrency model as ready dispatch: review spawns count
-    # against max_spawn alongside ready tasks, so the total number of
-    # running workers stays bounded.
+    # Reviewer concurrency lane: review spawns are governed by a separate
+    # ``max_review_spawn`` cap (default: max(1, max_spawn // 2)) so review
+    # cannot starve work and vice versa. The total fleet concurrency is
+    # ``max_spawn + max_review_spawn`` — a conscious trade-off for pipeline
+    # safety. See Phase 2 P2-1.
     #
     # Sticky-reviewer pin: tasks that re-enter review after a rejection
     # get their assignee swapped to the rejecting reviewer's profile
@@ -7422,8 +7428,10 @@ def dispatch_once(
         "WHERE status = 'review' AND claim_lock IS NULL "
         "ORDER BY priority DESC, created_at ASC"
     ).fetchall()
+    _review_spawned = 0
+    _max_review_spawn = max(1, (max_spawn or 4) // 2)
     for row in review_rows:
-        if max_spawn is not None and running_count + spawned >= max_spawn:
+        if _review_spawned >= _max_review_spawn:
             break
         if not row["assignee"]:
             result.skipped_unassigned.append(row["id"])
@@ -7484,6 +7492,7 @@ def dispatch_once(
                 _set_worker_pid(conn, claimed.id, int(pid))
             result.spawned.append((claimed.id, claimed.assignee or "", str(workspace)))
             spawned += 1
+            _review_spawned += 1
         except Exception as exc:
             auto = _record_spawn_failure(
                 conn, claimed.id, str(exc),
