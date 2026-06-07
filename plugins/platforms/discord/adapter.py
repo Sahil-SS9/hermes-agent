@@ -657,6 +657,12 @@ class DiscordAdapter(BasePlatformAdapter):
             self._coerce_int(_floor_ttl_raw, 60) or 60
         )
         self._voice_floor_dir: Optional[str] = None  # set lazily
+
+        # Default init for tests: _multi_agent_voice_channel_id must exist
+        # even when extra config doesn't set it (prevents AttributeError in
+        # play_in_voice_channel when test fixtures create bare adapters).
+        if not hasattr(self, '_multi_agent_voice_channel_id'):
+            self._multi_agent_voice_channel_id = None
         # Voice channel state (per-guild)
         self._voice_clients: Dict[int, Any] = {}  # guild_id -> VoiceClient
         self._voice_locks: Dict[int, asyncio.Lock] = {}  # guild_id -> serialize join/leave
@@ -2258,10 +2264,8 @@ class DiscordAdapter(BasePlatformAdapter):
         # so two bots never speak simultaneously. Non-multi-agent channels
         # skip this (no floor configured = no contention).
         vc_channel_id = getattr(getattr(vc, "channel", None), "id", None)
-        is_multi_agent = (
-            self._multi_agent_voice_channel_id is not None
-            and vc_channel_id == self._multi_agent_voice_channel_id
-        )
+        _multi = getattr(self, '_multi_agent_voice_channel_id', None)
+        is_multi_agent = _multi is not None and vc_channel_id == _multi
         floor_acquired = False
         if is_multi_agent:
             wait_start = time.monotonic()
@@ -2367,6 +2371,25 @@ class DiscordAdapter(BasePlatformAdapter):
             log = deque(maxlen=64)
             self._channel_author_log[channel_id] = log
         log.append(bool(getattr(message.author, "bot", False)))
+
+    # ── KENSEI CUSTOM: max bot hops guard ──
+    def _discord_max_bot_hops(self) -> int:
+        """Max consecutive bot messages allowed before this bot stops replying.
+
+        Guards against two bots @mentioning each other forever in a shared
+        channel. 0 disables the guard.
+        """
+        configured = self.config.extra.get("max_bot_hops")
+        if configured is None:
+            configured = os.getenv("DISCORD_MAX_BOT_HOPS")
+        if configured is None or configured == "":
+            return 6
+        try:
+            value = int(configured)
+        except (TypeError, ValueError):
+            logger.warning("[Discord] Invalid max_bot_hops value %r, falling back to 6", configured)
+            return 6
+        return max(0, value)
 
     def _bot_loop_would_exceed(self, message) -> bool:
         """True when this (already-recorded) bot message extends a bot-only chain past the cap."""
