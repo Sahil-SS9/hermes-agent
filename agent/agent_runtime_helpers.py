@@ -1784,7 +1784,6 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
                 ),
                 next_args,
             )
-        )
     # ── KENSEI CUSTOM: ask_user_questions (batched multi-question tool) ──
     elif function_name == "ask_user_questions":
         def _execute(next_args: dict) -> Any:
