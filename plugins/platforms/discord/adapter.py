@@ -628,11 +628,8 @@ class DiscordAdapter(BasePlatformAdapter):
         # auto_join_channel_id: when set, only auto-join when the user enters
         # THIS specific VC. Allows multi-agent bots to join one dedicated channel
         # without also gate-crashing Misa-Misa's 1:1 sessions.
-        # When unset (None), the bot joins any VC the configured user enters.
         self._auto_join_channel_id: Optional[int] = self._coerce_int(extra.get("auto_join_channel_id"))
         # auto_join_delay_seconds: how long to wait before joining/greeting.
-        # Stagger multi-agent bot introductions so they sequence rather than
-        # pile up simultaneously. 0 = join immediately (default).
         self._auto_join_delay_seconds: float = float(
             self._coerce_int(extra.get("auto_join_delay_seconds"), 0) or 0
         )
@@ -652,8 +649,6 @@ class DiscordAdapter(BasePlatformAdapter):
         )
 
         # ── Multi-agent voice floor (cross-process, filesystem-lock) ──
-        # When multiple bots share one VC, only the bot holding the floor
-        # may play TTS. Others pause their receiver while the floor is held.
         self._multi_agent_voice_channel_id: Optional[int] = self._coerce_int(
             extra.get("multi_agent_voice_channel_id")
         )
@@ -662,7 +657,6 @@ class DiscordAdapter(BasePlatformAdapter):
             self._coerce_int(_floor_ttl_raw, 60) or 60
         )
         self._voice_floor_dir: Optional[str] = None  # set lazily
-
         # Voice channel state (per-guild)
         self._voice_clients: Dict[int, Any] = {}  # guild_id -> VoiceClient
         self._voice_locks: Dict[int, asyncio.Lock] = {}  # guild_id -> serialize join/leave
@@ -679,6 +673,12 @@ class DiscordAdapter(BasePlatformAdapter):
         self._voice_listen_tasks: Dict[int, asyncio.Task] = {}  # guild_id -> listen loop
         self._voice_input_callback: Optional[Callable] = None  # set by run.py
         self._on_voice_disconnect: Optional[Callable] = None  # set by run.py
+        # Phase 3: continuous voice mixer (ambient idle bed + ducked speech).
+        # Installed once per guild on join; lets acks / TTS / the "thinking"
+        # loop overlap in one outgoing stream instead of stop-and-swap.
+        self._voice_mixers: Dict[int, Any] = {}  # guild_id -> VoiceMixer
+        self._ambient_pcm_cache: Optional[bytes] = None  # decoded ambient bed
+        self._voice_fx_cfg: Dict[str, Any] = self._load_voice_fx_config()
         # Track threads where the bot has participated so follow-up messages
         # in those threads don't require @mention.  Persisted to disk so the
         # set survives gateway restarts.
@@ -716,23 +716,9 @@ class DiscordAdapter(BasePlatformAdapter):
             opus_path = ctypes.util.find_library("opus")
             if opus_path:
                 opus_candidates.append(opus_path)
-            # ctypes.util.find_library can fail in systemd / restricted envs
-            # even when the shared object exists on disk. Fall back to known
-            # Linux paths before trying macOS.
-            _linux_paths = (
-                "/usr/lib/x86_64-linux-gnu/libopus.so.0",
-                "/lib/x86_64-linux-gnu/libopus.so.0",
-                "/usr/lib64/libopus.so.0",
-            )
-            if not opus_path:
-                if sys.platform.startswith("linux"):
-                    for _lp in _linux_paths:
-                        if os.path.isfile(_lp):
-                            opus_candidates.append(_lp)
-                            break
             # ctypes.util.find_library fails on macOS with Homebrew-installed libs,
             # so fall back to known Homebrew paths if needed.
-            if not opus_path and not any(os.path.isfile(p) for p in _linux_paths):
+            if not opus_path:
                 _homebrew_paths = (
                     "/opt/homebrew/lib/libopus.dylib",  # Apple Silicon
                     "/usr/local/lib/libopus.dylib",     # Intel Mac
@@ -791,14 +777,6 @@ class DiscordAdapter(BasePlatformAdapter):
             intents.members = (
                 any(not entry.isdigit() for entry in self._allowed_user_ids)
                 or bool(self._allowed_role_ids)  # Need members intent for role lookup
-                or bool(self._auto_join_user_id)  # Need members intent for voice-state auto-join tracking
-            )
-            logger.debug(
-                "[%s] Intents configured: members=%s voice_states=%s auto_join_user_id=%s",
-                self.name,
-                intents.members,
-                intents.voice_states,
-                self._auto_join_user_id,
             )
             intents.voice_states = True
 
@@ -866,6 +844,9 @@ class DiscordAdapter(BasePlatformAdapter):
                 if adapter_self._dedup.is_duplicate(str(message.id)):
                     return
 
+                # ── KENSEI CUSTOM: record author for bot loop guard ──
+                adapter_self._note_channel_author(message)
+
                 # Always ignore our own messages
                 if message.author == self._client.user:
                     return
@@ -874,11 +855,6 @@ class DiscordAdapter(BasePlatformAdapter):
                 # Allow both default and reply types — replies have a distinct MessageType.
                 if message.type not in {discord.MessageType.default, discord.MessageType.reply}:
                     return
-
-                # Record author kind for the bot loop-guard before any branching
-                # so a human turn always resets the chain, even for messages this
-                # bot ultimately ignores (e.g. addressed to another agent).
-                adapter_self._note_channel_author(message)
 
                 # Bot message filtering (DISCORD_ALLOW_BOTS):
                 #   "none"     — ignore all other bots (default)
@@ -896,16 +872,6 @@ class DiscordAdapter(BasePlatformAdapter):
                             return
                     # "all" falls through; bot is permitted — skip the
                     # human-user allowlist below (bots aren't in it).
-                    # Loop-guard: stop replying once a bot-only chain runs long
-                    # enough that no human has spoken — prevents two bots
-                    # @mentioning each other indefinitely.
-                    if adapter_self._bot_loop_would_exceed(message):
-                        logger.debug(
-                            "[%s] bot loop-guard tripped in channel %s; staying silent",
-                            adapter_self.name,
-                            getattr(message.channel, "id", "?"),
-                        )
-                        return
                 else:
                     # Non-bot: enforce the configured user/role allowlists.
                     # Pass guild + is_dm so role checks are scoped to the
@@ -966,10 +932,6 @@ class DiscordAdapter(BasePlatformAdapter):
             @self._client.event
             async def on_voice_state_update(member, before, after):
                 """Track voice channel join/leave events."""
-                # ── Auto-join / leave for configured user (applied before tracking) ──
-                if member != adapter_self._client.user:
-                    await adapter_self._handle_auto_join_voice_state(member, before, after)
-
                 # Only track channels where the bot is connected
                 bot_guild_ids = set(adapter_self._voice_clients.keys())
                 if not bot_guild_ids:
@@ -999,6 +961,9 @@ class DiscordAdapter(BasePlatformAdapter):
                         else f"moved {before.channel.name} -> {after.channel.name}",
                         guild_id,
                     )
+
+                # ── KENSEI CUSTOM: auto-join voice when configured user enters ──
+                await adapter_self._handle_auto_join_voice_state(member, before, after)
 
             # Register slash commands
             if self._slash_commands:
@@ -1781,36 +1746,25 @@ class DiscordAdapter(BasePlatformAdapter):
         file_path: str,
         caption: Optional[str] = None,
         file_name: Optional[str] = None,
-        thread_id: Optional[str] = None,
     ) -> SendResult:
         """Send a local file as a Discord attachment.
 
-        When ``thread_id`` is provided the file is posted into that existing
-        thread (so a forum's weekly thread accrues the file as a reply rather
-        than spawning a new thread per attachment).  Otherwise, forum parent
-        channels (type 15) get a new thread whose starter message carries the
-        file — they reject direct POST /messages.
+        Forum channels (type 15) get a new thread whose starter message
+        carries the file — they reject direct POST /messages.
         """
         if not self._client:
             return SendResult(success=False, error="Not connected")
 
-        # A thread_id in metadata takes precedence — address the thread directly
-        # so attachments land inside the existing thread instead of creating one.
-        target_id = thread_id or chat_id
-        channel = self._client.get_channel(int(target_id))
+        channel = self._client.get_channel(int(chat_id))
         if not channel:
-            channel = await self._client.fetch_channel(int(target_id))
+            channel = await self._client.fetch_channel(int(chat_id))
         if not channel:
-            label = "Thread" if thread_id else "Channel"
-            return SendResult(success=False, error=f"{label} {target_id} not found")
+            return SendResult(success=False, error=f"Channel {chat_id} not found")
 
         filename = file_name or os.path.basename(file_path)
         with open(file_path, "rb") as fh:
             file = discord.File(fh, filename=filename)
-            # Only create a new thread when the resolved target is itself a
-            # forum parent (no thread_id given). A resolved thread channel
-            # accepts channel.send() with a file directly.
-            if thread_id is None and self._is_forum_parent(channel):
+            if self._is_forum_parent(channel):
                 return await self._forum_post_file(
                     channel,
                     content=(caption or "").strip(),
@@ -1818,52 +1772,6 @@ class DiscordAdapter(BasePlatformAdapter):
                 )
             msg = await channel.send(content=caption if caption else None, file=file)
         return SendResult(success=True, message_id=str(msg.id))
-
-    async def send_documents_bundle(
-        self,
-        chat_id: str,
-        file_paths: list,
-        caption: Optional[str] = None,
-        metadata: Optional[Dict[str, Any]] = None,
-    ) -> SendResult:
-        """Send several local files as a SINGLE Discord message (one comment).
-
-        Discord allows up to 10 attachments per message, so a lesson's HTML and
-        audio can ride together on one message instead of posting separately.
-        Honours ``metadata['thread_id']`` so the bundle lands inside the existing
-        weekly thread; only creates a new forum thread when no thread_id is given
-        and the resolved target is a forum parent.
-        """
-        if not self._client:
-            return SendResult(success=False, error="Not connected")
-
-        thread_id = metadata.get("thread_id") if metadata else None
-        target_id = thread_id or chat_id
-        channel = self._client.get_channel(int(target_id))
-        if not channel:
-            channel = await self._client.fetch_channel(int(target_id))
-        if not channel:
-            label = "Thread" if thread_id else "Channel"
-            return SendResult(success=False, error=f"{label} {target_id} not found")
-
-        open_files = []
-        try:
-            for p in file_paths:
-                fh = open(p, "rb")
-                open_files.append(fh)
-            files = [discord.File(fh, filename=os.path.basename(getattr(fh, "name", "file")))
-                     for fh in open_files]
-            content = (caption or "").strip() or None
-            if thread_id is None and self._is_forum_parent(channel):
-                return await self._forum_post_file(channel, content=content or "", files=files)
-            msg = await channel.send(content=content, files=files)
-            return SendResult(success=True, message_id=str(msg.id))
-        finally:
-            for fh in open_files:
-                try:
-                    fh.close()
-                except Exception:
-                    pass
 
     async def send_multiple_images(
         self,
@@ -2024,17 +1932,11 @@ class DiscordAdapter(BasePlatformAdapter):
         try:
             import io
 
-            # A thread_id in metadata takes precedence so audio lands inside the
-            # existing thread (e.g. the weekly lesson thread) rather than
-            # spawning a new forum thread per audio file.
-            thread_id = metadata.get("thread_id") if metadata else None
-            target_id = thread_id or chat_id
-            channel = self._client.get_channel(int(target_id))
+            channel = self._client.get_channel(int(chat_id))
             if not channel:
-                channel = await self._client.fetch_channel(int(target_id))
+                channel = await self._client.fetch_channel(int(chat_id))
             if not channel:
-                label = "Thread" if thread_id else "Channel"
-                return SendResult(success=False, error=f"{label} {target_id} not found")
+                return SendResult(success=False, error=f"Channel {chat_id} not found")
 
             if not os.path.exists(audio_path):
                 return SendResult(success=False, error=f"Audio file not found: {audio_path}")
@@ -2044,12 +1946,11 @@ class DiscordAdapter(BasePlatformAdapter):
             with open(audio_path, "rb") as f:
                 file_data = f.read()
 
-            # Forum *parent* channels (type 15) reject direct POST /messages — the
+            # Forum channels (type 15) reject direct POST /messages — the
             # native voice flag path also targets /messages so it would fail
             # too.  Create a thread post with the audio as the starter
-            # attachment instead.  When a thread_id resolved a thread channel,
-            # skip this — threads accept channel.send() with a file directly.
-            if thread_id is None and self._is_forum_parent(channel):
+            # attachment instead.
+            if self._is_forum_parent(channel):
                 forum_file = discord.File(io.BytesIO(file_data), filename=filename)
                 return await self._forum_post_file(
                     channel,
@@ -2109,6 +2010,160 @@ class DiscordAdapter(BasePlatformAdapter):
     # Voice channel methods (join / leave / play)
     # ------------------------------------------------------------------
 
+    def _load_voice_fx_config(self) -> Dict[str, Any]:
+        """Read voice mixer / ambient / ack settings from config.yaml.
+
+        All settings live under ``discord.voice_fx`` in config.yaml (NOT the
+        .env file — these are behavioral, not secrets).  The feature is OFF by
+        default; users opt in with ``discord.voice_fx.enabled: true``.
+
+        Returns a dict with safe defaults so callers never KeyError.
+        """
+        defaults: Dict[str, Any] = {
+            "enabled": False,        # master switch for the mixer subsystem
+            "ambient_enabled": True, # idle "thinking" bed while tools run
+            "ambient_path": "",      # optional custom loop file; "" = synthesised
+            "ambient_gain": 0.18,    # idle bed loudness (0..1)
+            "duck_gain": 0.06,       # ambient loudness while speech plays
+            "speech_gain": 1.0,      # TTS / ack loudness
+            "ack_enabled": True,     # speak a short phrase before tool calls
+            "ack_phrases": [
+                "Let me look into that.",
+                "One moment.",
+                "Checking on that now.",
+                "Give me a sec.",
+                "On it.",
+            ],
+        }
+        try:
+            from hermes_cli.config import read_raw_config
+            cfg = read_raw_config() or {}
+            fx = ((cfg.get("discord") or {}).get("voice_fx") or {})
+            if isinstance(fx, dict):
+                for k, v in fx.items():
+                    if k in defaults and v is not None:
+                        defaults[k] = v
+        except Exception as e:
+            logger.debug("Could not load discord.voice_fx config: %s", e)
+        return defaults
+
+    def _get_ambient_pcm(self) -> Optional[bytes]:
+        """Return decoded 48k/stereo/s16le PCM for the ambient idle bed.
+
+        Uses a custom file when ``ambient_path`` is set and decodable, else a
+        synthesised pad.  Cached after first build.
+        """
+        if self._ambient_pcm_cache is not None:
+            return self._ambient_pcm_cache
+        if not self._voice_fx_cfg.get("ambient_enabled"):
+            return None
+        try:
+            from voice_mixer import decode_to_pcm, synth_ambient_pcm
+        except ImportError:
+            from .voice_mixer import decode_to_pcm, synth_ambient_pcm
+
+        pcm: Optional[bytes] = None
+        path = (self._voice_fx_cfg.get("ambient_path") or "").strip()
+        if path and os.path.isfile(path):
+            pcm = decode_to_pcm(path)
+            if not pcm:
+                logger.warning("Ambient file %s failed to decode; using synth bed", path)
+        if not pcm:
+            pcm = synth_ambient_pcm()
+        self._ambient_pcm_cache = pcm
+        return pcm
+
+    async def _install_voice_mixer(self, guild_id: int, vc) -> None:
+        """Create a VoiceMixer, start the ambient bed, and play it on the VC.
+
+        The mixer runs continuously for the life of the connection: one
+        ``vc.play(mixer)`` call, never stopped until leave.
+        """
+        try:
+            from voice_mixer import VoiceMixer
+        except ImportError:
+            from .voice_mixer import VoiceMixer
+
+        mixer = VoiceMixer(
+            ambient_gain=float(self._voice_fx_cfg.get("ambient_gain", 0.18)),
+            duck_gain=float(self._voice_fx_cfg.get("duck_gain", 0.06)),
+            speech_gain=float(self._voice_fx_cfg.get("speech_gain", 1.0)),
+        )
+        ambient = await asyncio.to_thread(self._get_ambient_pcm)
+        if ambient:
+            mixer.set_ambient(ambient)
+
+        def _after(error):
+            if error:
+                logger.error("Voice mixer stream error (guild=%d): %s", guild_id, error)
+
+        if vc.is_playing():
+            vc.stop()
+        vc.play(mixer, after=_after)
+        self._voice_mixers[guild_id] = mixer
+        logger.info("Voice mixer installed (guild=%d, ambient=%s)", guild_id, bool(ambient))
+
+    async def play_ack_in_voice(self, guild_id: int, phrase: Optional[str] = None) -> bool:
+        """Speak a short acknowledgement over the ambient bed.
+
+        Called from the gateway's tool-progress hook on the first tool call of
+        a turn, so the user hears "let me look into that" before the bot goes
+        quiet to work.  No-op unless the mixer is installed and acks enabled.
+        """
+        if not self._voice_fx_cfg.get("ack_enabled"):
+            return False
+        mixer = self._voice_mixers.get(guild_id)
+        if mixer is None:
+            return False
+        if phrase is None:
+            import random
+            phrases = self._voice_fx_cfg.get("ack_phrases") or ["One moment."]
+            phrase = random.choice(phrases)
+
+        # Synthesise the ack via the configured TTS provider, then layer it.
+        import uuid as _uuid
+        audio_path = os.path.join(
+            tempfile.gettempdir(), "hermes_voice",
+            f"ack_{_uuid.uuid4().hex[:12]}.mp3",
+        )
+        os.makedirs(os.path.dirname(audio_path), exist_ok=True)
+        try:
+            from tools.tts_tool import text_to_speech_tool
+            result_json = await asyncio.to_thread(
+                text_to_speech_tool, text=phrase, output_path=audio_path
+            )
+            result = json.loads(result_json)
+            actual = result.get("file_path", audio_path)
+            if not result.get("success") or not os.path.isfile(actual):
+                return False
+            try:
+                from voice_mixer import decode_to_pcm
+            except ImportError:
+                from .voice_mixer import decode_to_pcm
+            pcm = await asyncio.to_thread(decode_to_pcm, actual)
+            if not pcm:
+                return False
+            mixer.play_speech(
+                pcm, gain=float(self._voice_fx_cfg.get("speech_gain", 1.0))
+            )
+            self._reset_voice_timeout(guild_id)
+            return True
+        except Exception as e:
+            logger.debug("play_ack_in_voice failed: %s", e)
+            return False
+        finally:
+            for p in {audio_path, locals().get("actual")}:
+                if p and os.path.isfile(p):
+                    try:
+                        os.unlink(p)
+                    except OSError:
+                        pass
+
+    def voice_mixer_active(self, guild_id: int) -> bool:
+        """True when a continuous mixer is installed for this guild."""
+        mixers = getattr(self, "_voice_mixers", None)
+        return bool(mixers) and mixers.get(guild_id) is not None
+
     async def join_voice_channel(self, channel) -> bool:
         """Join a Discord voice channel. Returns True on success."""
         if not self._client or not DISCORD_AVAILABLE:
@@ -2124,6 +2179,8 @@ class DiscordAdapter(BasePlatformAdapter):
                     return True
                 await existing.move_to(channel)
                 self._reset_voice_timeout(guild_id)
+                if floor_acquired:
+                    self._release_voice_floor(int(vc_channel_id))
                 return True
 
             vc = await channel.connect()
@@ -2141,6 +2198,15 @@ class DiscordAdapter(BasePlatformAdapter):
             except Exception as e:
                 logger.warning("Voice receiver failed to start: %s", e)
 
+            # Phase 3: install the continuous mixer (ambient bed + ducked
+            # speech).  Best-effort — if it fails we fall back to the legacy
+            # one-shot FFmpegPCMAudio playback path in play_in_voice_channel.
+            if getattr(self, "_voice_fx_cfg", {}).get("enabled"):
+                try:
+                    await self._install_voice_mixer(guild_id, vc)
+                except Exception as e:
+                    logger.warning("Voice mixer failed to start: %s", e)
+
             return True
 
     async def leave_voice_channel(self, guild_id: int) -> None:
@@ -2154,8 +2220,17 @@ class DiscordAdapter(BasePlatformAdapter):
             if listen_task:
                 listen_task.cancel()
 
+            # Tear down the mixer (stops the continuous outgoing stream).
+            if getattr(self, "_voice_mixers", None) is not None:
+                self._voice_mixers.pop(guild_id, None)
+
             vc = self._voice_clients.pop(guild_id, None)
             if vc and vc.is_connected():
+                try:
+                    if vc.is_playing():
+                        vc.stop()
+                except Exception:
+                    pass
                 await vc.disconnect()
             task = self._voice_timeout_tasks.pop(guild_id, None)
             if task:
@@ -2166,129 +2241,29 @@ class DiscordAdapter(BasePlatformAdapter):
     # Maximum seconds to wait for voice playback before giving up
     PLAYBACK_TIMEOUT = 120
 
-    # ------------------------------------------------------------------
-    # Multi-agent voice floor (filesystem-lock, cross-process)
-    # ------------------------------------------------------------------
-
-    def _floor_dir(self) -> Optional[Any]:
-        """Return the floor-lock directory Path, creating it if needed."""
-        if self._voice_floor_dir is None:
-            import pathlib
-            d = pathlib.Path.home() / ".hermes" / "voice-floor"
-            try:
-                d.mkdir(parents=True, exist_ok=True)
-                self._voice_floor_dir = str(d)
-            except Exception as exc:
-                logger.warning("voice-floor dir unavailable: %s", exc)
-                return None
-        import pathlib
-        return pathlib.Path(self._voice_floor_dir)
-
-    def _floor_lock_path(self, vc_channel_id: int) -> Optional[Any]:
-        d = self._floor_dir()
-        if d is None:
-            return None
-        return d / f"{vc_channel_id}.lock"
-
-    def _acquire_voice_floor(self, vc_channel_id: int) -> bool:
-        """Atomically acquire the voice floor for this bot (O_EXCL create).
-
-        Returns True on success. If another bot holds the lock and it is not
-        stale (mtime < TTL seconds ago), returns False. Stale locks are
-        forcibly removed so a crashed bot never deadlocks the channel.
-        """
-        lock_path = self._floor_lock_path(vc_channel_id)
-        if lock_path is None:
-            return True  # floor dir unavailable — allow play (fail-open)
-        import os as _os, json as _json
-        payload = _json.dumps({"bot_id": str(self._client.user.id)}).encode()
-        try:
-            fd = _os.open(str(lock_path), _os.O_WRONLY | _os.O_CREAT | _os.O_EXCL, 0o600)
-            _os.write(fd, payload)
-            _os.close(fd)
-            return True
-        except FileExistsError:
-            pass
-        # Check for stale lock (compare wall-clock mtime against TTL)
-        try:
-            age_seconds = time.time() - lock_path.stat().st_mtime
-            if age_seconds > self._voice_floor_ttl:
-                lock_path.unlink(missing_ok=True)
-                return self._acquire_voice_floor(vc_channel_id)
-        except Exception:
-            pass
-        return False
-
-    def _release_voice_floor(self, vc_channel_id: int) -> None:
-        """Release the voice floor by removing the lock file."""
-        lock_path = self._floor_lock_path(vc_channel_id)
-        if lock_path is None:
-            return
-        try:
-            lock_path.unlink(missing_ok=True)
-        except Exception as exc:
-            logger.debug("voice floor release error: %s", exc)
-
-    def _voice_floor_held_by_other(self, vc_channel_id: int) -> bool:
-        """True when the floor lock file exists and belongs to another bot."""
-        lock_path = self._floor_lock_path(vc_channel_id)
-        if lock_path is None:
-            return False
-        try:
-            if not lock_path.exists():
-                return False
-            import json as _json
-            payload = _json.loads(lock_path.read_bytes())
-            holder = str(payload.get("bot_id", ""))
-            my_id = str(getattr(getattr(self._client, "user", None), "id", ""))
-            if holder == my_id:
-                return False
-            # Stale check
-            if time.time() - lock_path.stat().st_mtime > self._voice_floor_ttl:
-                lock_path.unlink(missing_ok=True)
-                return False
-            return True
-        except Exception:
-            return False
-
-    async def _pause_while_floor_held(self, vc_channel_id: int, guild_id: int) -> None:
-        """Pause the voice receiver while another bot holds the floor.
-
-        Polls at 200 ms intervals (same cadence as the silence detector).
-        Called from the voice-listen loop when floor state changes.
-        """
-        receiver = self._voice_receivers.get(guild_id)
-        if receiver:
-            receiver.pause()
-        try:
-            while self._voice_floor_held_by_other(vc_channel_id):
-                await asyncio.sleep(0.2)
-        finally:
-            if receiver:
-                receiver.resume()
-
     async def play_in_voice_channel(self, guild_id: int, audio_path: str) -> bool:
         """Play an audio file in the connected voice channel.
 
-        In a multi-agent VC (``multi_agent_voice_channel_id`` configured), the
-        bot acquires the cross-process voice floor before playing so two bots
-        never speak simultaneously. Other bots watching the same channel pause
-        their receivers while the floor is held, preventing cross-bot STT echo.
+        When the continuous mixer is installed for this guild, the clip is
+        decoded to PCM and layered over the ambient bed (ducking it) so the
+        reply can overlap the idle "thinking" loop seamlessly.  Otherwise we
+        fall back to the legacy one-shot FFmpegPCMAudio path.
         """
         vc = self._voice_clients.get(guild_id)
         if not vc or not vc.is_connected():
             return False
 
-        # Determine if this is a multi-agent channel that needs floor control.
+        # ── KENSEI CUSTOM: multi-agent voice floor ──
+        # In multi-agent VCs, acquire the cross-process floor before playing
+        # so two bots never speak simultaneously. Non-multi-agent channels
+        # skip this (no floor configured = no contention).
         vc_channel_id = getattr(getattr(vc, "channel", None), "id", None)
         is_multi_agent = (
             self._multi_agent_voice_channel_id is not None
             and vc_channel_id == self._multi_agent_voice_channel_id
         )
-
         floor_acquired = False
         if is_multi_agent:
-            # Poll until we get the floor (or fall back after timeout).
             wait_start = time.monotonic()
             while not self._acquire_voice_floor(int(vc_channel_id)):
                 if time.monotonic() - wait_start > self.PLAYBACK_TIMEOUT:
@@ -2300,7 +2275,36 @@ class DiscordAdapter(BasePlatformAdapter):
                 await asyncio.sleep(0.2)
             else:
                 floor_acquired = True
+        # ── END KENSEI CUSTOM ──
 
+        # ── Mixer path (overlap + ducking) ──────────────────────────────
+        mixer = getattr(self, "_voice_mixers", {}).get(guild_id) if getattr(self, "_voice_mixers", None) else None
+        if mixer is not None:
+            try:
+                from voice_mixer import decode_to_pcm
+            except ImportError:
+                from .voice_mixer import decode_to_pcm
+            pcm = await asyncio.to_thread(decode_to_pcm, audio_path)
+            if pcm:
+                speech_gain = float(self._voice_fx_cfg.get("speech_gain", 1.0))
+                mixer.play_speech(pcm, gain=speech_gain)
+                # Block until the speech child drains so callers serialise
+                # replies (mirrors legacy semantics) but the ambient keeps
+                # playing underneath the whole time.
+                wait_start = time.monotonic()
+                while mixer.speech_active:
+                    if time.monotonic() - wait_start > self.PLAYBACK_TIMEOUT:
+                        logger.warning("Mixer speech playback timed out after %ds", self.PLAYBACK_TIMEOUT)
+                        mixer.stop_speech()
+                        break
+                    await asyncio.sleep(0.05)
+                self._reset_voice_timeout(guild_id)
+                if floor_acquired:
+                    self._release_voice_floor(int(vc_channel_id))
+                return True
+            logger.warning("Mixer decode failed for %s; falling back to legacy playback", audio_path)
+
+        # ── Legacy one-shot path (no mixer) ─────────────────────────────
         # Pause voice receiver while playing (echo prevention)
         receiver = self._voice_receivers.get(guild_id)
         if receiver:
@@ -2333,16 +2337,56 @@ class DiscordAdapter(BasePlatformAdapter):
                 logger.warning("Voice playback timed out after %ds", self.PLAYBACK_TIMEOUT)
                 vc.stop()
             self._reset_voice_timeout(guild_id)
+            if floor_acquired:
+                self._release_voice_floor(int(vc_channel_id))
             return True
         finally:
             if receiver:
+                if floor_acquired:
+                    self._release_voice_floor(int(vc_channel_id))
+                    floor_acquired = False  # prevent double-release
                 receiver.resume()
-            if is_multi_agent and floor_acquired and vc_channel_id:
-                self._release_voice_floor(int(vc_channel_id))
 
-    # ------------------------------------------------------------------
-    # Auto-join / greeting methods
-    # ------------------------------------------------------------------
+    # ── KENSEI CUSTOM: per-channel bot loop guard ───────────────────────
+
+    def _note_channel_author(self, message) -> None:
+        """Record whether the latest channel message came from a bot.
+
+        Feeds the bot loop-guard from an in-process, per-channel log rather
+        than a Discord REST history fetch on every bot message. Each gateway
+        receives every message in channels it can see, so this log reflects the
+        true author sequence without a network round-trip or shared state.
+        Called once per accepted message (after the RESUME-dedup check) for
+        both humans and bots so a human turn always resets the chain.
+        """
+        channel_id = getattr(getattr(message, "channel", None), "id", None)
+        if channel_id is None:
+            return
+        log = self._channel_author_log.get(channel_id)
+        if log is None:
+            log = deque(maxlen=64)
+            self._channel_author_log[channel_id] = log
+        log.append(bool(getattr(message.author, "bot", False)))
+
+    def _bot_loop_would_exceed(self, message) -> bool:
+        """True when this (already-recorded) bot message extends a bot-only chain past the cap."""
+        max_hops = self._discord_max_bot_hops()
+        if max_hops <= 0:
+            return False
+        channel_id = getattr(getattr(message, "channel", None), "id", None)
+        log = self._channel_author_log.get(channel_id)
+        if not log:
+            return False
+        consecutive = 0
+        for is_bot in reversed(log):
+            if not is_bot:
+                break
+            consecutive += 1
+            if consecutive > max_hops:
+                return True
+        return False
+
+    # ── KENSEI CUSTOM: auto-join voice infrastructure ───────────────────
 
     async def _handle_auto_join_voice_state(self, member, before, after) -> None:
         """Auto-join/leave voice when the configured user enters or exits VC.
@@ -2367,16 +2411,13 @@ class DiscordAdapter(BasePlatformAdapter):
         )
 
         # Channel-specific filter: only react when the user entered/left
-        # the configured VC. Allows dedicated multi-agent VCs without
-        # these bots joining every VC Sahil opens.
+        # the configured VC.
         if self._auto_join_channel_id is not None:
             target = self._auto_join_channel_id
             after_id = getattr(after_channel, "id", None)
             before_id = getattr(before_channel, "id", None)
-            # Entered or switched to the target channel
             if (joined or switched) and after_id != target:
                 return
-            # Left the target channel
             if left and before_id != target:
                 return
 
@@ -2396,7 +2437,6 @@ class DiscordAdapter(BasePlatformAdapter):
             joined_ok = await self.join_voice_channel(after_channel)
             if not joined_ok:
                 return
-            # Wire the linked text channel so voice transcripts have a destination
             guild_obj = getattr(member, "guild", None)
             if guild_obj and self._auto_join_text_channel_id:
                 self._voice_text_channels[int(guild_id)] = self._auto_join_text_channel_id
@@ -2479,6 +2519,93 @@ class DiscordAdapter(BasePlatformAdapter):
                         os.unlink(p)
                 except Exception:
                     pass
+
+    # ── KENSEI CUSTOM: multi-agent voice floor (cross-process filesystem lock) ──
+
+    def _floor_dir(self) -> Optional[Any]:
+        """Return the floor-lock directory Path, creating it if needed."""
+        if self._voice_floor_dir is None:
+            import pathlib
+            d = pathlib.Path.home() / ".hermes" / "voice-floor"
+            try:
+                d.mkdir(parents=True, exist_ok=True)
+                self._voice_floor_dir = str(d)
+            except Exception as exc:
+                logger.warning("voice-floor dir unavailable: %s", exc)
+                return None
+        import pathlib
+        return pathlib.Path(self._voice_floor_dir)
+
+    def _floor_lock_path(self, vc_channel_id: int) -> Optional[Any]:
+        d = self._floor_dir()
+        if d is None:
+            return None
+        return d / f"{vc_channel_id}.lock"
+
+    def _acquire_voice_floor(self, vc_channel_id: int) -> bool:
+        """Atomically acquire the voice floor for this bot (O_EXCL create)."""
+        lock_path = self._floor_lock_path(vc_channel_id)
+        if lock_path is None:
+            return True
+        import os as _os, json as _json
+        payload = _json.dumps({"bot_id": str(self._client.user.id)}).encode()
+        try:
+            fd = _os.open(str(lock_path), _os.O_WRONLY | _os.O_CREAT | _os.O_EXCL, 0o600)
+            _os.write(fd, payload)
+            _os.close(fd)
+            return True
+        except FileExistsError:
+            pass
+        try:
+            age_seconds = time.time() - lock_path.stat().st_mtime
+            if age_seconds > self._voice_floor_ttl:
+                lock_path.unlink(missing_ok=True)
+                return self._acquire_voice_floor(vc_channel_id)
+        except Exception:
+            pass
+        return False
+
+    def _release_voice_floor(self, vc_channel_id: int) -> None:
+        """Release the voice floor by removing the lock file."""
+        lock_path = self._floor_lock_path(vc_channel_id)
+        if lock_path is None:
+            return
+        try:
+            lock_path.unlink(missing_ok=True)
+        except Exception as exc:
+            logger.debug("voice floor release error: %s", exc)
+
+    def _voice_floor_held_by_other(self, vc_channel_id: int) -> bool:
+        """True when the floor lock file exists and belongs to another bot."""
+        lock_path = self._floor_lock_path(vc_channel_id)
+        if lock_path is None:
+            return False
+        try:
+            if not lock_path.exists():
+                return False
+            import json as _json
+            payload = _json.loads(lock_path.read_bytes())
+            holder = str(payload.get("bot_id", ""))
+            my_id = str(getattr(getattr(self._client, "user", None), "id", ""))
+            if holder == my_id:
+                return False
+            if time.time() - lock_path.stat().st_mtime > self._voice_floor_ttl:
+                lock_path.unlink(missing_ok=True)
+                return False
+            return True
+        except Exception:
+            return False
+
+    async def _pause_while_floor_held(self, vc_channel_id: int, guild_id: int) -> None:
+        """Pause the voice receiver while another bot holds the floor."""
+        receiver = self._voice_receivers.get(guild_id)
+        if not receiver:
+            return
+        while self._voice_floor_held_by_other(vc_channel_id):
+            receiver.pause()
+            await asyncio.sleep(0.2)
+        receiver.resume()
+
 
     async def get_user_voice_channel(self, guild_id: int, user_id: str):
         """Return the voice channel the user is currently in, or None."""
@@ -2625,22 +2752,6 @@ class DiscordAdapter(BasePlatformAdapter):
                             vc._connection.send_packet(b'\xf8\xff\xfe')
                     except Exception:
                         pass
-
-                # Multi-agent floor check: if another bot holds the playback
-                # floor in the shared multi-agent VC, pause our receiver until
-                # it's released to avoid transcribing the other bot's TTS.
-                vc_ref = self._voice_clients.get(guild_id)
-                vc_channel_ref = getattr(getattr(vc_ref, "channel", None), "id", None)
-                if (
-                    self._multi_agent_voice_channel_id
-                    and vc_channel_ref == self._multi_agent_voice_channel_id
-                    and self._voice_floor_held_by_other(int(vc_channel_ref))
-                ):
-                    await self._pause_while_floor_held(int(vc_channel_ref), guild_id)
-                    # Receiver may have been paused; re-fetch in case it changed
-                    receiver = self._voice_receivers.get(guild_id)
-                    if not receiver or not receiver._running:
-                        break
 
                 completed = receiver.check_silence()
                 # Voice inputs always originate from a specific guild
@@ -3018,8 +3129,7 @@ class DiscordAdapter(BasePlatformAdapter):
     ) -> SendResult:
         """Send a local image file natively as a Discord file attachment."""
         try:
-            thread_id = metadata.get("thread_id") if metadata else None
-            return await self._send_file_attachment(chat_id, image_path, caption, thread_id=thread_id)
+            return await self._send_file_attachment(chat_id, image_path, caption)
         except FileNotFoundError:
             return SendResult(success=False, error=f"Image file not found: {image_path}")
         except Exception as e:  # pragma: no cover - defensive logging
@@ -3184,8 +3294,7 @@ class DiscordAdapter(BasePlatformAdapter):
     ) -> SendResult:
         """Send a local video file natively as a Discord attachment."""
         try:
-            thread_id = metadata.get("thread_id") if metadata else None
-            return await self._send_file_attachment(chat_id, video_path, caption, thread_id=thread_id)
+            return await self._send_file_attachment(chat_id, video_path, caption)
         except FileNotFoundError:
             return SendResult(success=False, error=f"Video file not found: {video_path}")
         except Exception as e:  # pragma: no cover - defensive logging
@@ -3203,8 +3312,7 @@ class DiscordAdapter(BasePlatformAdapter):
     ) -> SendResult:
         """Send an arbitrary file natively as a Discord attachment."""
         try:
-            thread_id = metadata.get("thread_id") if metadata else None
-            return await self._send_file_attachment(chat_id, file_path, caption, file_name=file_name, thread_id=thread_id)
+            return await self._send_file_attachment(chat_id, file_path, caption, file_name=file_name)
         except FileNotFoundError:
             return SendResult(success=False, error=f"File not found: {file_path}")
         except Exception as e:  # pragma: no cover - defensive logging
@@ -4092,65 +4200,6 @@ class DiscordAdapter(BasePlatformAdapter):
                 return configured.lower() not in {"false", "0", "no", "off"}
             return bool(configured)
         return os.getenv("DISCORD_REQUIRE_MENTION", "true").lower() not in {"false", "0", "no", "off"}
-
-    def _discord_max_bot_hops(self) -> int:
-        """Max consecutive bot messages allowed before this bot stops replying.
-
-        Guards against two bots @mentioning each other forever in a shared
-        channel. 0 disables the guard.
-        """
-        configured = self.config.extra.get("max_bot_hops")
-        if configured is None:
-            configured = os.getenv("DISCORD_MAX_BOT_HOPS")
-        if configured is None or configured == "":
-            return 6
-        try:
-            value = int(configured)
-        except (TypeError, ValueError):
-            logger.warning("[Discord] Invalid max_bot_hops value %r, falling back to 6", configured)
-            return 6
-        return max(0, value)
-
-    def _note_channel_author(self, message) -> None:
-        """Record whether the latest channel message came from a bot.
-
-        Feeds the bot loop-guard from an in-process, per-channel log rather
-        than a Discord REST history fetch on every bot message. Each gateway
-        receives every message in channels it can see, so this log reflects the
-        true author sequence without a network round-trip or shared state.
-        Called once per accepted message (after the RESUME-dedup check) for
-        both humans and bots so a human turn always resets the chain.
-        """
-        channel_id = getattr(getattr(message, "channel", None), "id", None)
-        if channel_id is None:
-            return
-        log = self._channel_author_log.get(channel_id)
-        if log is None:
-            log = deque(maxlen=64)
-            self._channel_author_log[channel_id] = log
-        log.append(bool(getattr(message.author, "bot", False)))
-
-    def _bot_loop_would_exceed(self, message) -> bool:
-        """True when this (already-recorded) bot message extends a bot-only chain past the cap.
-
-        Counts consecutive trailing bot messages in the channel log, including
-        the current one. A human message breaks the chain.
-        """
-        max_hops = self._discord_max_bot_hops()
-        if max_hops <= 0:
-            return False
-        channel_id = getattr(getattr(message, "channel", None), "id", None)
-        log = self._channel_author_log.get(channel_id)
-        if not log:
-            return False
-        consecutive = 0
-        for is_bot in reversed(log):
-            if not is_bot:
-                break
-            consecutive += 1
-            if consecutive > max_hops:
-                return True
-        return False
 
     def _discord_allow_any_attachment(self) -> bool:
         """Return whether Discord attachments bypass the SUPPORTED_DOCUMENT_TYPES allowlist.
@@ -5511,34 +5560,35 @@ def _component_check_auth(
 ) -> bool:
     """Shared user-or-role OR semantics for component view button clicks.
 
-    Mirrors ``DiscordAdapter._is_allowed_user`` / the slash and on_message
-    gates so every Discord interaction surface honors the same trust
-    boundary. Component views (ExecApprovalView, SlashConfirmView,
-    UpdatePromptView, ModelPickerView) used to receive only
-    ``allowed_user_ids``: in role-only deployments
-    (DISCORD_ALLOWED_ROLES set, DISCORD_ALLOWED_USERS empty) the user
-    set was empty and the legacy "no allowlist = allow everyone" branch
-    let any guild member click the buttons -- approving exec commands,
-    cancelling slash confirmations, switching the model.
+    Mirrors the gateway's external-surface authorization model: component
+    button clicks must be explicitly authorized by a Discord user/role
+    allowlist, a global user allowlist, or an explicit allow-all flag.
 
     Behavior:
 
-      - both allowlists empty -> allow (preserves existing no-allowlist
-        deployments, no regression)
-      - user is in user allowlist -> allow
+      - DISCORD_ALLOW_ALL_USERS or GATEWAY_ALLOW_ALL_USERS -> allow
+      - user is in DISCORD_ALLOWED_USERS or GATEWAY_ALLOWED_USERS -> allow
       - role allowlist set + user has a role in it -> allow
       - role allowlist set + interaction.user has no resolvable
         ``roles`` attribute (e.g. DM context with a role policy active)
         -> reject (fail closed)
       - otherwise -> reject
     """
-    user_set = allowed_user_ids or set()
-    role_set = allowed_role_ids or set()
-    has_users = bool(user_set)
-    has_roles = bool(role_set)
-    if not has_users and not has_roles:
+    if os.getenv("DISCORD_ALLOW_ALL_USERS", "").strip().lower() in {"true", "1", "yes"}:
+        return True
+    if os.getenv("GATEWAY_ALLOW_ALL_USERS", "").strip().lower() in {"true", "1", "yes"}:
         return True
 
+    user_set = {str(uid).strip() for uid in (allowed_user_ids or set()) if str(uid).strip()}
+    global_allowed = {
+        uid.strip()
+        for uid in os.getenv("GATEWAY_ALLOWED_USERS", "").split(",")
+        if uid.strip()
+    }
+    user_set.update(global_allowed)
+    role_set = set(allowed_role_ids or set())
+    has_users = bool(user_set)
+    has_roles = bool(role_set)
     user = getattr(interaction, "user", None)
     if user is None:
         return False
@@ -5548,7 +5598,7 @@ def _component_check_auth(
             uid = str(user.id)
         except AttributeError:
             uid = ""
-        if uid and uid in user_set:
+        if "*" in user_set or (uid and uid in user_set):
             return True
 
     if has_roles:
@@ -6784,48 +6834,7 @@ def _apply_yaml_config(yaml_cfg: dict, discord_cfg: dict) -> dict | None:
     if _discord_rtm is not None and not os.getenv("DISCORD_REPLY_TO_MODE"):
         _rtm_str = "off" if _discord_rtm is False else str(_discord_rtm).lower()
         os.environ["DISCORD_REPLY_TO_MODE"] = _rtm_str
-    # allow_bots: whether the bot reacts to other bots (none | mentions | all).
-    # Top-level preferred, falls back to extra.allow_bots. Without this the
-    # adapter's DISCORD_ALLOW_BOTS read defaults to "none" and bot-to-bot
-    # co-working in shared channels silently never fires.
-    _discord_allow_bots = (
-        discord_cfg["allow_bots"] if "allow_bots" in discord_cfg
-        else _discord_extra.get("allow_bots")
-    )
-    if _discord_allow_bots is not None and not os.getenv("DISCORD_ALLOW_BOTS"):
-        os.environ["DISCORD_ALLOW_BOTS"] = str(_discord_allow_bots).strip().lower()
-    # max_bot_hops: cap on consecutive bot messages before the loop-guard
-    # stays silent. Top-level preferred, falls back to extra.max_bot_hops.
-    _discord_max_hops = (
-        discord_cfg["max_bot_hops"] if "max_bot_hops" in discord_cfg
-        else _discord_extra.get("max_bot_hops")
-    )
-    if _discord_max_hops is not None and not os.getenv("DISCORD_MAX_BOT_HOPS"):
-        os.environ["DISCORD_MAX_BOT_HOPS"] = str(_discord_max_hops).strip()
-
-    # Bridge voice/auto-join keys into PlatformConfig.extra so the adapter can
-    # consume them via ``config.extra.get("auto_join_user_id")`` rather than
-    # requiring env-only configuration. Check both top-level and inside
-    # ``extra`` so the profile works regardless of where the keys are placed
-    # in config.yaml.
-    _voice_keys_to_bridge = (
-        "auto_join_user_id",
-        "auto_join_channel_id",
-        "auto_join_delay_seconds",
-        "auto_join_send_text_greeting",
-        "auto_join_text_channel_id",
-        "auto_join_greeting_text",
-        "auto_leave_on_user_exit",
-        "voice_timeout_seconds",
-        "multi_agent_voice_channel_id",
-        "voice_floor_ttl_seconds",
-    )
-    _extra = discord_cfg.get("extra", {}) if isinstance(discord_cfg.get("extra"), dict) else {}
-    return {
-        key: discord_cfg.get(key, _extra.get(key))
-        for key in _voice_keys_to_bridge
-        if key in discord_cfg or key in _extra
-    }
+    return None  # all settings flow through env; nothing to merge into extras
 
 
 def _is_connected(config) -> bool:
