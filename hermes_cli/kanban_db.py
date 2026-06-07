@@ -7537,8 +7537,11 @@ def dispatch_once(
         _PIPELINE_STATUSES,
     ).fetchall()
     for row in pipeline_rows:
-        if max_spawn is not None and running_count + spawned >= max_spawn:
-            break
+        # Gate checks, council launches, and human-gate handling are
+        # near-zero-cost (file stat + regex).  Only the spawn-on-failure
+        # path respects spawn pool capacity — the gate check itself fires
+        # unconditionally.  This prevents pipeline tasks from stalling
+        # silently when the ready-task pool is saturated.
         stage = row["pipeline_stage"]
         mode = get_pipeline_mode(dict(row))
         if stage not in GATE_FUNCTIONS and stage not in HUMAN_GATE_STAGES:
@@ -7769,9 +7772,34 @@ def dispatch_once(
                 from hermes_cli.profiles import profile_exists as _pe_pipe
             except Exception:
                 _pe_pipe = None
-            if _pe_pipe is not None and not _pe_pipe(row["assignee"]):
-                result.skipped_nonspawnable.append(row["id"])
-                continue
+            assignee = row["assignee"]
+            if _pe_pipe is not None and not _pe_pipe(assignee):
+                # Assignee is nonspawnable - try the configured stage owner.
+                # Prevents silent deadlock when a task is assigned to an
+                # orchestrator profile (e.g. 'kensei') that has no worker
+                # instance. Stage owners are in config.yaml's
+                # pipeline.stage_owners map (research: remii, spec: octacon).
+                _stage_owner = _get_stage_owner(stage)
+                if _stage_owner and _stage_owner != assignee:
+                    _log.info(
+                        "gate_failed: assignee '%s' is nonspawnable - "
+                        "falling back to stage owner '%s' for stage '%s' (%s)",
+                        assignee, _stage_owner, stage, row["id"],
+                    )
+                    if not dry_run:
+                        conn.execute(
+                            "UPDATE tasks SET assignee = ? WHERE id = ?",
+                            (_stage_owner, row["id"]),
+                        )
+                        _append_event(
+                            conn, row["id"], "assigned",
+                            {"assignee": _stage_owner,
+                             "reason": "nonspawnable assignee -> stage owner"},
+                        )
+                    assignee = _stage_owner
+                else:
+                    result.skipped_nonspawnable.append(row["id"])
+                    continue
             if dry_run:
                 result.spawned.append((row["id"], row["assignee"], ""))
                 continue
@@ -7833,6 +7861,22 @@ def _get_max_revise_loops() -> int:
         return int(loops) if loops is not None else 4
     except Exception:
         return 4
+
+
+def _get_stage_owner(stage: str) -> str | None:
+    """Return the configured stage owner for *stage* from config.yaml.
+
+    Reads ``pipeline.stage_owners`` map (e.g. ``research: remii``,
+    ``spec: octacon``).  Returns None when no owner is configured for the
+    stage or the config is unreadable.
+    """
+    try:
+        from hermes_cli.config import load_config_readonly
+        cfg = load_config_readonly()
+        owners = cfg.get("pipeline", {}).get("stage_owners", {})
+        return owners.get(stage)
+    except Exception:
+        return None
 
 
 def _hours_since_last_event(
