@@ -20,7 +20,7 @@ SERVICES = [
     ("gojo", "hermes-gateway-gojo.service"),
     ("light", "hermes-gateway-light.service"),
     ("misa-misa", "hermes-gateway-misa-misa.service"),
-    ("miyagi", "hermes-gateway-miyagi.service"),
+    ("mrhermagi", "hermes-gateway-mrhermagi.service"),
     ("octacon", "hermes-gateway-octacon.service"),
     ("remii", "hermes-gateway-remii.service"),
     ("wesker", "hermes-gateway-wesker.service"),

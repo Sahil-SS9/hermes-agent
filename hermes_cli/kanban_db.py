@@ -6986,13 +6986,8 @@ def has_spawnable_ready(conn: sqlite3.Connection) -> bool:
     ).fetchall()
     if not rows:
         return False
-    try:
-        from hermes_cli.profiles import profile_exists  # local import: avoids cycle
-    except Exception:
-        # Can't introspect — assume spawnable, preserve legacy behavior.
-        return True
     for row in rows:
-        if profile_exists(row["assignee"]):
+        if _is_profile_spawnable(row["assignee"]):
             return True
     return False
 
@@ -7012,12 +7007,8 @@ def has_spawnable_review(conn: sqlite3.Connection) -> bool:
     ).fetchall()
     if not rows:
         return False
-    try:
-        from hermes_cli.profiles import profile_exists  # local import: avoids cycle
-    except Exception:
-        return True
     for row in rows:
-        if profile_exists(row["assignee"]):
+        if _is_profile_spawnable(row["assignee"]):
             return True
     return False
 
@@ -7250,15 +7241,11 @@ def dispatch_once(
         # subprocess would crash on startup, get reaped as a zombie,
         # the task would loop back to ``ready`` on next tick, and we'd
         # burn CPU forever (#kanban-dispatcher-crash-loop 2026-05-05).
-        try:
-            from hermes_cli.profiles import profile_exists  # local import: avoids cycle
-        except Exception:
-            profile_exists = None  # type: ignore[assignment]
-        if profile_exists is not None and not profile_exists(row_assignee):
+        if not _is_profile_spawnable(row_assignee):
             # Bucket separately from skipped_unassigned: the operator
             # cannot fix this by assigning a profile (the assignee IS the
-            # intended owner — a terminal lane). Health telemetry uses
-            # this distinction to suppress spurious "stuck" warnings on
+            # intended owner — a lead or a terminal lane). Health telemetry
+            # uses this distinction to suppress spurious "stuck" warnings on
             # multi-lane setups where the ready queue is steadily full
             # of human-pulled work.
             result.skipped_nonspawnable.append(row["id"])
@@ -7436,11 +7423,7 @@ def dispatch_once(
         if not row["assignee"]:
             result.skipped_unassigned.append(row["id"])
             continue
-        try:
-            from hermes_cli.profiles import profile_exists
-        except Exception:
-            profile_exists = None  # type: ignore[assignment]
-        if profile_exists is not None and not profile_exists(row["assignee"]):
+        if not _is_profile_spawnable(row["assignee"]):
             result.skipped_nonspawnable.append(row["id"])
             continue
         if not dry_run:
@@ -7768,12 +7751,8 @@ def dispatch_once(
             if not row["assignee"]:
                 result.skipped_unassigned.append(row["id"])
                 continue
-            try:
-                from hermes_cli.profiles import profile_exists as _pe_pipe
-            except Exception:
-                _pe_pipe = None
             assignee = row["assignee"]
-            if _pe_pipe is not None and not _pe_pipe(assignee):
+            if not _is_profile_spawnable(assignee):
                 # Assignee is nonspawnable - try the configured stage owner.
                 # Prevents silent deadlock when a task is assigned to an
                 # orchestrator profile (e.g. 'kensei') that has no worker
@@ -7877,6 +7856,33 @@ def _get_stage_owner(stage: str) -> str | None:
         return owners.get(stage)
     except Exception:
         return None
+
+
+def _is_profile_spawnable(name: str) -> bool:
+    """Return True if *name* is eligible for kanban worker spawn.
+
+    A profile must BOTH: (a) have a directory on disk, AND (b) NOT be
+    listed in ``kanban.nonspawnable_profiles``.  This blocks lead profiles
+    (remii, octacon, quan, etc.) from being spawned while allowing their
+    specialist sub-profiles (remii-deep, quan-code, etc.).
+
+    Orchestrator-only names (no profile directory) are blocked by
+    ``profile_exists()`` already — this function adds the second layer
+    for profiles that DO have directories but are not workers.
+    """
+    try:
+        from hermes_cli.profiles import profile_exists
+    except Exception:
+        return True  # fail open: can't load profiles → assume spawnable
+    if not profile_exists(name):
+        return False
+    try:
+        from hermes_cli.config import load_config_readonly
+        cfg = load_config_readonly()
+        blocked = cfg.get("kanban", {}).get("nonspawnable_profiles", [])
+        return name not in blocked
+    except Exception:
+        return True  # fail open
 
 
 def _hours_since_last_event(

@@ -2087,6 +2087,14 @@ DEFAULT_CONFIG = {
         # calls (``outcome="chained"``). Terminal and conditional approvals
         # don't count.
         "max_review_passes": 4,
+        # Profiles that the dispatcher must NEVER spawn as workers, even
+        # though they have profile directories on disk.  This is for lead
+        # profiles that own a lane and coordinate workers, not run work
+        # themselves.  Specialist sub-profiles (e.g. remii-deep, octacon-
+        # frontend, quan-code) are NOT listed here — they ARE spawnable.
+        # Profiles without directories (orchestrator-only names) are
+        # already blocked by profile_exists() and do not need listing.
+        "nonspawnable_profiles": [],
     },
     # LLM Council — multi-model deliberation gate on PRD+Spec for tier=full
     # features. Three-phase: independent review (parallel) → cross-ranking
