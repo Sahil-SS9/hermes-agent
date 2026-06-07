@@ -6857,7 +6857,35 @@ def _apply_yaml_config(yaml_cfg: dict, discord_cfg: dict) -> dict | None:
     if _discord_rtm is not None and not os.getenv("DISCORD_REPLY_TO_MODE"):
         _rtm_str = "off" if _discord_rtm is False else str(_discord_rtm).lower()
         os.environ["DISCORD_REPLY_TO_MODE"] = _rtm_str
-    return None  # all settings flow through env; nothing to merge into extras
+    # ── KENSEI CUSTOM: allow_bots / max_bot_hops env-var sync ──
+    # allow_bots: whether the bot reacts to other bots (none | mentions | all).
+    _discord_allow_bots = (
+        discord_cfg["allow_bots"] if "allow_bots" in discord_cfg
+        else _discord_extra.get("allow_bots")
+    )
+    if _discord_allow_bots is not None and not os.getenv("DISCORD_ALLOW_BOTS"):
+        os.environ["DISCORD_ALLOW_BOTS"] = str(_discord_allow_bots).strip().lower()
+    # max_bot_hops: cap on consecutive bot messages before the loop-guard stays silent.
+    _discord_max_hops = (
+        discord_cfg["max_bot_hops"] if "max_bot_hops" in discord_cfg
+        else _discord_extra.get("max_bot_hops")
+    )
+    if _discord_max_hops is not None and not os.getenv("DISCORD_MAX_BOT_HOPS"):
+        os.environ["DISCORD_MAX_BOT_HOPS"] = str(_discord_max_hops).strip()
+    # Bridge voice/auto-join keys into PlatformConfig.extra.
+    _voice_keys_to_bridge = (
+        "auto_join_user_id", "auto_join_text_channel_id",
+        "auto_join_channel_id", "auto_join_delay_seconds",
+        "auto_join_greeting_text", "auto_join_send_text_greeting",
+        "auto_leave_on_user_exit", "voice_timeout_seconds",
+        "multi_agent_voice_channel_id", "voice_floor_ttl_seconds",
+    )
+    extra_out = {}
+    for k in _voice_keys_to_bridge:
+        v = discord_cfg.get(k) if k in discord_cfg else _discord_extra.get(k)
+        if v is not None:
+            extra_out[k] = v
+    return extra_out if extra_out else None
 
 
 def _is_connected(config) -> bool:
