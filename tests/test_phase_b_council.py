@@ -273,13 +273,14 @@ class TestCouncilGate:
         assert "Missing error handling" in result
 
     def test_council_gate_missing_artifact(self, tmp_path):
-        """Gate returns error when verdict artifact is missing."""
+        """Gate is pure: missing verdict returns the COUNCIL_PENDING sentinel.
+
+        Deliberation is launched by the dispatcher (_maybe_launch_council),
+        never inside the gate, so the gate never blocks the dispatcher tick.
+        """
+        from hermes_cli.feature_pipeline import COUNCIL_PENDING
         result = validate_council_artifact(str(tmp_path))
-        assert result is not None
-        # Without a PRD, the deliberation will fail — which is correct
-        # The error message should indicate what went wrong
-        assert "Council" in result
-        assert any(phrase in result.lower() for phrase in ("failed", "missing", "prd"))
+        assert result == COUNCIL_PENDING
 
     def test_council_gate_empty_artifact(self, tmp_path):
         """Gate returns error when verdict artifact is empty."""

@@ -147,42 +147,26 @@ def validate_spec_artifact(artifact_dir: str) -> Optional[str]:
     return _check_body_markers(content, _SPEC_MARKERS)
 
 
+# Sentinel reason returned while the council is still deliberating. The
+# dispatcher recognises this to launch/await the background run rather than
+# bouncing the task to spec (which a normal REVISE reason would do).
+COUNCIL_PENDING = "Council deliberation pending"
+
+
 def validate_council_artifact(artifact_dir: str) -> Optional[str]:
     """Gate: council-verdict.md must exist and contain APPROVED.
 
-    If the verdict artifact doesn't exist yet, this runs the council
-    deliberation (LLM calls). This is intentionally expensive — it only
-    fires once per council stage entry.
+    This gate is PURE: it never runs the (expensive, multi-LLM) deliberation
+    itself, so it is safe to call inside the dispatcher tick. When the verdict
+    is missing it returns the ``COUNCIL_PENDING`` sentinel; the dispatcher is
+    responsible for launching the deliberation in the background.
 
-    Returns None if APPROVED, reason string if REVISE or error.
+    Returns None if APPROVED, reason string if REVISE/pending/error.
     """
     verdict_path = os.path.join(artifact_dir, "council-verdict.md")
 
     if not os.path.exists(verdict_path):
-        # No verdict yet — run the deliberation
-        import logging
-        _log = logging.getLogger(__name__)
-        # Extract task_id from artifact_dir (last path component)
-        task_id = os.path.basename(os.path.normpath(artifact_dir))
-        try:
-            from hermes_cli.council import deliberate as run_council
-            verdict = run_council(task_id, artifact_dir)
-            if verdict.verdict == "APPROVED":
-                return None
-            else:
-                # Build REVISE reason from issues
-                issue_lines = []
-                for issue in verdict.issues:
-                    sev = issue.get("severity", "medium")
-                    desc = issue.get("description", "")
-                    issue_lines.append(f"[{sev.upper()}] {desc}")
-                reason = "Council REVISE. Issues:\n" + "\n".join(issue_lines)
-                if verdict.chairman_rationale:
-                    reason += f"\n\nChairman: {verdict.chairman_rationale}"
-                return reason
-        except Exception as exc:
-            _log.exception("Council deliberation failed for %s", task_id)
-            return f"Council deliberation failed: {exc}"
+        return COUNCIL_PENDING
 
     # Verdict artifact exists — read and check
     try:
@@ -485,12 +469,24 @@ def time_in_stage_hours(conn: "sqlite3.Connection", task_id: str, stage: str) ->
         "ORDER BY created_at DESC LIMIT 1",
         (task_id, stage),
     ).fetchone()
-    if not row:
+    if not row or row[0] is None:
         return 0.0
+    # created_at is epoch-seconds (int) in the live schema, but tests may
+    # insert an ISO-8601 string. Handle both.
     import datetime
-    created = datetime.datetime.fromisoformat(row[0])
-    now = datetime.datetime.now(datetime.timezone.utc)
-    return (now - created).total_seconds() / 3600.0
+    raw = row[0]
+    try:
+        created_epoch = float(raw)
+    except (TypeError, ValueError):
+        try:
+            dt = datetime.datetime.fromisoformat(str(raw))
+        except ValueError:
+            return 0.0
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=datetime.timezone.utc)
+        created_epoch = dt.timestamp()
+    import time as _time
+    return max(0.0, (_time.time() - created_epoch) / 3600.0)
 
 
 # ---------------------------------------------------------------------------
@@ -594,27 +590,88 @@ def get_skipped_stages(pipeline_mode: str = "full") -> list[str]:
 
 
 def get_pipeline_status(task_id: str, artifact_base_dir: str) -> dict:
-    """Return the current pipeline status for a task.
+    """Return the current pipeline status for a task (DB-backed).
 
     Returns dict with keys:
         task_id: str
         current_stage: Optional[str]  # None if not in pipeline
-        gate_status: str  # "pass", "fail", "pending", "unknown"
+        pipeline_mode: str            # "full" or "express"
+        gate_status: str  # "pass", "fail", "pending", "not_in_pipeline", "unknown"
         gate_message: Optional[str]  # reason if gate fails
         next_stage: Optional[str]  # next stage if gate passes
     """
-    # This is a stub — real implementation reads from DB
-    return {
+    base = {
         "task_id": task_id,
         "current_stage": None,
+        "pipeline_mode": "full",
         "gate_status": "unknown",
         "gate_message": None,
         "next_stage": None,
     }
+    try:
+        from hermes_cli.kanban_db import connect, get_task
+    except Exception:
+        return base
+
+    try:
+        with connect() as conn:
+            task = get_task(conn, task_id)
+    except Exception:
+        return base
+    if task is None:
+        return base
+
+    stage = task.pipeline_stage
+    mode = get_pipeline_mode({"pipeline_mode": task.pipeline_mode})
+    base["pipeline_mode"] = mode
+    base["current_stage"] = stage
+
+    if not stage:
+        base["gate_status"] = "not_in_pipeline"
+        return base
+
+    base["next_stage"] = get_next_stage(stage, mode)
+
+    if stage in HUMAN_GATE_STAGES:
+        try:
+            from hermes_cli.kanban_db import connect as _c
+            with _c() as conn:
+                approved = check_human_approved(conn, task_id, stage)
+        except Exception:
+            approved = False
+        base["gate_status"] = "pass" if approved else "pending"
+        if not approved:
+            base["gate_message"] = "Awaiting human sign-off"
+        return base
+
+    if stage in PASS_THROUGH_STAGES:
+        base["gate_status"] = "pending"
+        base["gate_message"] = "Work in progress (no artifact gate)"
+        return base
+
+    gate_fn = GATE_FUNCTIONS.get(stage)
+    if gate_fn is None:
+        base["gate_status"] = "pass"
+        return base
+
+    artifact_dir = os.path.join(artifact_base_dir, task_id)
+    result = gate_fn(artifact_dir)
+    if result is None:
+        base["gate_status"] = "pass"
+    else:
+        base["gate_status"] = "fail"
+        base["gate_message"] = result
+    return base
 
 
-def advance_pipeline(task_id: str, current_stage: str, artifact_base_dir: str) -> dict:
+def advance_pipeline(
+    task_id: str, current_stage: str, artifact_base_dir: str,
+    pipeline_mode: str = "full",
+) -> dict:
     """Try to advance a task to the next pipeline stage.
+
+    ``pipeline_mode`` ("full"/"express") selects the stage set so express
+    tasks correctly skip PRD/Council/Tech Review.
 
     Returns dict with keys:
         advanced: bool
@@ -626,7 +683,7 @@ def advance_pipeline(task_id: str, current_stage: str, artifact_base_dir: str) -
     gate_fn = GATE_FUNCTIONS.get(current_stage)
     if gate_fn is None:
         # No gate for this stage (e.g. council — Phase B)
-        next_stage = get_next_stage(current_stage)
+        next_stage = get_next_stage(current_stage, pipeline_mode)
         return {
             "advanced": next_stage is not None,
             "from_stage": current_stage,
@@ -640,7 +697,7 @@ def advance_pipeline(task_id: str, current_stage: str, artifact_base_dir: str) -
 
     if gate_result is None:
         # Gate passed
-        next_stage = get_next_stage(current_stage)
+        next_stage = get_next_stage(current_stage, pipeline_mode)
         return {
             "advanced": next_stage is not None,
             "from_stage": current_stage,

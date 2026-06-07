@@ -62,6 +62,19 @@ def tmp_hermes(tmp_path: Path) -> Path:
     return home
 
 
+# ---- Unit: watcher script --------------------------------------------------
+
+class TestWatcherScript:
+    def test_track_paths_contains_feature_artifacts(self):
+        text = WATCHER.read_text()
+        assert '"feature-artifacts"' in text, "TRACK_PATHS in hermes-auto-commit.sh missing feature-artifacts"
+
+    def test_track_paths_contains_core_paths(self):
+        text = WATCHER.read_text()
+        for path in ["config.yaml", "profiles", "cron", "governance", "scripts", "skills", "runbooks"]:
+            assert f'"{path}"' in text, f"TRACK_PATHS missing {path!r}"
+
+
 # ---- Unit: template --------------------------------------------------------
 
 class TestGitignoreTemplate:
@@ -72,8 +85,15 @@ class TestGitignoreTemplate:
         text = TEMPLATE.read_text()
         assert "/*" in text, "template missing default-deny at top level"
         # Each curated path must have a `!`-allow line.
-        for path in ["config.yaml", "profiles", "cron", "governance", "scripts", "skills", "runbooks"]:
+        for path in ["config.yaml", "profiles", "cron", "governance", "scripts", "skills", "runbooks", "feature-artifacts"]:
             assert f"!/{path}" in text, f"template missing allow for {path!r}"
+
+    def test_feature_artifacts_md_only(self):
+        """feature-artifacts must allow *.md and deny everything else (no secret exposure)."""
+        text = TEMPLATE.read_text()
+        assert "!/feature-artifacts" in text, "template missing whitelist for feature-artifacts"
+        assert "!feature-artifacts/**/*.md" in text, "template missing *.md allow inside feature-artifacts"
+        assert "feature-artifacts/**\n" in text, "template missing deny-all inside feature-artifacts"
 
     def test_blocks_python_junk(self):
         text = TEMPLATE.read_text()

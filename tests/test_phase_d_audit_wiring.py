@@ -342,10 +342,11 @@ class TestDenjiEventWiring:
             body="## Problem\nx\n## Success Criteria\ny", triage=True,
         )
         kb._record_pipeline_spawn(conn, tid, stage="research", assignee="remii")
-        # Force the created_at to 30 days ago
+        # Force created_at to 30 days ago. created_at is epoch-seconds (int).
+        import time as _t
         conn.execute(
-            "UPDATE task_events SET created_at = datetime('now', '-30 days') "
-            "WHERE task_id = ?", (tid,),
+            "UPDATE task_events SET created_at = ? WHERE task_id = ?",
+            (int(_t.time()) - 30 * 86400, tid),
         )
         result = kb.get_spawn_frequency(conn, days=7)
         assert result == []

@@ -75,6 +75,63 @@ def run_validate_config(args) -> int:
                 f"got {type(stage_owners).__name__}."
             )
 
+    # Validate council config — panel diversity (D4) + types.
+    user_council = user_config.get("council", {})
+    if isinstance(user_council, dict):
+        panel = user_council.get("panel")
+        if panel is not None:
+            if not isinstance(panel, list) or not panel:
+                warnings.append(
+                    "  WARNING: council.panel must be a non-empty list of "
+                    "members, each with provider + model."
+                )
+            else:
+                providers: list[str] = []
+                for i, member in enumerate(panel):
+                    if not isinstance(member, dict):
+                        warnings.append(
+                            f"  WARNING: council.panel[{i}] must be a dict with "
+                            f"provider + model."
+                        )
+                        continue
+                    if not str(member.get("provider", "")).strip():
+                        warnings.append(
+                            f"  WARNING: council.panel[{i}] missing provider."
+                        )
+                    if not str(member.get("model", "")).strip():
+                        warnings.append(
+                            f"  WARNING: council.panel[{i}] missing model."
+                        )
+                    prov = str(member.get("provider", "")).strip()
+                    if prov:
+                        providers.append(prov)
+                    if not member.get("fallback"):
+                        warnings.append(
+                            f"  WARNING: council.panel[{i}] ({prov}) has no "
+                            f"fallback chain — a provider outage drops this "
+                            f"panellist."
+                        )
+                # D4: warn on same-provider panellists (single point of failure).
+                dupes = {p for p in providers if providers.count(p) > 1}
+                for p in sorted(dupes):
+                    warnings.append(
+                        f"  WARNING: council.panel has {providers.count(p)} "
+                        f"members on provider '{p}'. Diversity across providers "
+                        f"is recommended; an outage drops multiple panellists."
+                    )
+        token_cap = user_council.get("token_cap")
+        if token_cap is not None and (not isinstance(token_cap, int) or token_cap < 1):
+            warnings.append(
+                f"  WARNING: council.token_cap must be null or a positive "
+                f"integer, got {token_cap!r}."
+            )
+        max_revise = user_council.get("max_revise_loops")
+        if max_revise is not None and (not isinstance(max_revise, int) or max_revise < 1):
+            warnings.append(
+                f"  WARNING: council.max_revise_loops must be a positive "
+                f"integer, got {max_revise!r}."
+            )
+
     if warnings:
         for w in warnings:
             print(w)

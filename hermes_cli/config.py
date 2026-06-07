@@ -2066,10 +2066,16 @@ DEFAULT_CONFIG = {
         # returns a transient error (402, 429, connection failure).
         # Diversity across providers is recommended — lint warns on
         # same-family panels.
+        # Fallbacks are cross-provider so an opencode-go outage cannot drop two
+        # of three panellists. Slugs are limited to the already-approved panel
+        # models; adjust to taste in config.yaml.
         "panel": [
-            {"provider": "opencode-go",  "model": "minimax-m3",       "fallback": []},
-            {"provider": "opencode-go",  "model": "mimo-2.5-pro",     "fallback": []},
-            {"provider": "ollama-cloud", "model": "kimi-k2.6",        "fallback": []},
+            {"provider": "opencode-go",  "model": "minimax-m3",
+             "fallback": [{"provider": "ollama-cloud", "model": "kimi-k2.6"}]},
+            {"provider": "opencode-go",  "model": "mimo-2.5-pro",
+             "fallback": [{"provider": "ollama-cloud", "model": "kimi-k2.6"}]},
+            {"provider": "ollama-cloud", "model": "kimi-k2.6",
+             "fallback": [{"provider": "opencode-go", "model": "minimax-m3"}]},
         ],
         # Chairman model: reads all critiques + rankings and emits the
         # final APPROVED or REVISE verdict. No fallback — if the chairman
@@ -2082,6 +2088,11 @@ DEFAULT_CONFIG = {
         # Limits total tokens consumed across all three phases.
         # None = no cap (uses provider-level limits).
         "token_cap": 200_000,
+        # Max times the council can REVISE a spec before the dispatcher
+        # escalates to the operator. This is the canonical home for the
+        # cap (design doc §4); ``pipeline.max_revise_loops`` is read as a
+        # legacy fallback for back-compat.
+        "max_revise_loops": 4,
         # Max seconds for the entire council deliberation before timeout.
         "timeout_seconds": 600,
         # Per-member LLM call timeout in seconds.

@@ -26,6 +26,7 @@ TRACK_PATHS=(
   "scripts"
   "skills"
   "runbooks"
+  "feature-artifacts"
 )
 
 mkdir -p "$STATE_DIR"

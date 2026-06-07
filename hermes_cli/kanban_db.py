@@ -778,6 +778,9 @@ class Task:
     current_step_key: Optional[str] = None
     # Feature pipeline stage: research, prd, spec, council, or None
     pipeline_stage: Optional[str] = None
+    # Feature pipeline mode: "full" or "express" (None = full). Drives
+    # which stage set get_next_stage walks for this task.
+    pipeline_mode: Optional[str] = None
     # Force-loaded skills for the worker on this task (appended to the
     # dispatcher's built-in `kanban-worker` via --skills). Stored as a
     # JSON array of skill names. None = use only the defaults; empty
@@ -878,6 +881,9 @@ class Task:
             skills=skills_value,
             pipeline_stage=(
                 row["pipeline_stage"] if "pipeline_stage" in keys else None
+            ),
+            pipeline_mode=(
+                row["pipeline_mode"] if "pipeline_mode" in keys else None
             ),
             model_override=row["model_override"] if "model_override" in keys and row["model_override"] else None,
             max_retries=(
@@ -1068,7 +1074,10 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- Phase A: current stage within the feature pipeline ('research', 'prd',
     -- 'spec', 'council'). NULL = not in pipeline (fast-tier or pre-pipeline).
     -- Used by the dispatcher to route tasks to the correct gate function.
-    pipeline_stage       TEXT
+    pipeline_stage       TEXT,
+    -- Phase A: pipeline mode ('full' or 'express'; NULL = full). Express
+    -- skips PRD/Council/Tech Review. Migrated onto existing boards too.
+    pipeline_mode        TEXT
 );
 
 CREATE TABLE IF NOT EXISTS task_links (
@@ -4114,7 +4123,7 @@ def complete_task(
 
         revoke_grants_for_task(task_id, "completed")
     except Exception:  # noqa: BLE001
-        logger.debug("skill grant auto-revoke failed for %s", task_id, exc_info=True)
+        _log.debug("skill grant auto-revoke failed for %s", task_id, exc_info=True)
     # Clean up the scratch workspace and any stale tmux session for the worker.
     _cleanup_workspace(conn, task_id)
     return True
@@ -7553,10 +7562,63 @@ def dispatch_once(
                     )
             result.pipeline_advanced.append((row["id"], stage, next_stage))
             continue
+        if stage in HUMAN_GATE_STAGES:
+            # Human gate (sign_off, final_sign_off) — check events table.
+            # Gate passes when Sahil approves via CLI/Discord. No lead spawn;
+            # tasks wait passively. Stale-nudge after configurable idle hours
+            # (throttled to once per stale window so a stuck gate cannot spam).
+            approved = check_human_approved(conn, row["id"], stage)
+            if approved:
+                next_stage = get_next_stage(stage, mode)
+                if not dry_run:
+                    with write_txn(conn):
+                        if next_stage:
+                            conn.execute(
+                                "UPDATE tasks SET pipeline_stage = ?, status = ? WHERE id = ?",
+                                (next_stage, next_stage, row["id"]),
+                            )
+                            _append_event(
+                                conn, row["id"], "pipeline_advanced",
+                                {"from_stage": stage, "to_stage": next_stage,
+                                 "approved_by": "human", "mode": mode},
+                            )
+                        else:
+                            conn.execute(
+                                "UPDATE tasks SET pipeline_stage = ?, status = ? WHERE id = ?",
+                                (stage, "todo", row["id"]),
+                            )
+                            _append_event(
+                                conn, row["id"], "pipeline_complete",
+                                {"stage": stage, "approved_by": "human", "mode": mode},
+                            )
+                result.pipeline_advanced.append((row["id"], stage, next_stage or "todo"))
+            else:
+                hours = time_in_stage_hours(conn, row["id"], stage)
+                stale_hours = _get_sign_off_timeout_hours()
+                if hours > stale_hours and not dry_run:
+                    last_nudge = _hours_since_last_event(
+                        conn, row["id"], "human_gate_stale_nudge", stage
+                    )
+                    if last_nudge is None or last_nudge >= stale_hours:
+                        with write_txn(conn):
+                            _append_event(
+                                conn, row["id"], "human_gate_stale_nudge",
+                                {"stage": stage, "hours_idle": round(hours, 1)},
+                            )
+                _log.debug("Human gate %s waiting for approval: %s (%.1f hrs)",
+                             stage, row["id"], hours)
+            continue
         if stage not in GATE_FUNCTIONS:
             # Unknown stage — skip
             continue
         gate_fn = GATE_FUNCTIONS[stage]
+        # Council deliberation is expensive (multi-LLM). Run it in the
+        # background, never inside the dispatcher tick: when the verdict is
+        # missing the gate returns COUNCIL_PENDING and we launch/await the
+        # background run here instead of blocking.
+        if stage == "council":
+            if _maybe_launch_council(conn, row["id"], dry_run=dry_run):
+                continue
         # Determine artifact directory
         artifact_base = os.path.join(
             os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes")),
@@ -7623,7 +7685,7 @@ def dispatch_once(
             # Don't spawn a lead; the spec author continues working.
             if not dry_run:
                 with write_txn(conn):
-                    revise_count = _get_council_revise_count(conn, row["id"])
+                    revise_count = _get_council_revise_count(conn, row["id"], "council")
                     max_loops = _get_max_revise_loops()
                     if revise_count >= max_loops:
                         conn.execute(
@@ -7648,7 +7710,7 @@ def dispatch_once(
                              "bounced_to": "spec",
                              "revise_count": revise_count + 1},
                         )
-                    _record_council_revise(conn, row["id"])
+                        _record_council_revise(conn, row["id"], "council")
             result.pipeline_advanced.append((row["id"], stage, "spec"))
         elif stage == "audit":
             # Audit BLOCKED — bounce to spec (capped). Same loop cap policy
@@ -7656,7 +7718,7 @@ def dispatch_once(
             # max_revise_loops we escalate to operator.
             if not dry_run:
                 with write_txn(conn):
-                    revise_count = _get_council_revise_count(conn, row["id"])
+                    revise_count = _get_council_revise_count(conn, row["id"], "audit")
                     max_loops = _get_max_revise_loops()
                     if revise_count >= max_loops:
                         conn.execute(
@@ -7681,51 +7743,8 @@ def dispatch_once(
                              "bounced_to": "spec",
                              "revise_count": revise_count + 1},
                         )
-                        _record_council_revise(conn, row["id"])
+                        _record_council_revise(conn, row["id"], "audit")
             result.pipeline_advanced.append((row["id"], stage, "spec"))
-        elif stage in HUMAN_GATE_STAGES:
-            # Human gate (sign_off, final_sign_off) — check events table.
-            # Gate passes when Sahil approves via CLI/Discord.
-            # No lead spawn — tasks wait passively for human action.
-            # Stale-nudge after configurable idle hours.
-            approved = check_human_approved(conn, row["id"], stage)
-            if approved:
-                next_stage = get_next_stage(stage, mode)
-                if not dry_run:
-                    with write_txn(conn):
-                        if next_stage:
-                            conn.execute(
-                                "UPDATE tasks SET pipeline_stage = ?, status = ? WHERE id = ?",
-                                (next_stage, next_stage, row["id"]),
-                            )
-                            _append_event(
-                                conn, row["id"], "pipeline_advanced",
-                                {"from_stage": stage, "to_stage": next_stage,
-                                 "approved_by": "human", "mode": mode},
-                            )
-                        else:
-                            conn.execute(
-                                "UPDATE tasks SET pipeline_stage = ?, status = ? WHERE id = ?",
-                                (stage, "todo", row["id"]),
-                            )
-                            _append_event(
-                                conn, row["id"], "pipeline_complete",
-                                {"stage": stage, "approved_by": "human", "mode": mode},
-                            )
-                result.pipeline_advanced.append((row["id"], stage, next_stage or "todo"))
-            else:
-                # Not yet approved — check for stale timeout
-                hours = time_in_stage_hours(conn, row["id"], stage)
-                stale_hours = _get_sign_off_timeout_hours()
-                if hours > stale_hours and not dry_run:
-                    with write_txn(conn):
-                        _append_event(
-                            conn, row["id"], "human_gate_stale_nudge",
-                            {"stage": stage, "hours_idle": round(hours, 1)},
-                        )
-                # Don't spawn a lead for human gates — passive wait
-                logger.debug("Human gate %s waiting for approval: %s (%.1f hrs)",
-                            stage, row["id"], hours)
         else:
             # Gate failed — record event then dispatch lead to continue working
             if not dry_run:
@@ -7795,14 +7814,40 @@ def dispatch_once(
 
 
 def _get_max_revise_loops() -> int:
-    """Return the council max_revise_loops from config, default 4."""
+    """Return max_revise_loops, preferring council.* then legacy pipeline.*."""
     try:
         from hermes_cli.config import load_config_readonly
         cfg = load_config_readonly()
-        loops = cfg.get("pipeline", {}).get("max_revise_loops", 4)
+        loops = cfg.get("council", {}).get("max_revise_loops")
+        if loops is None:
+            loops = cfg.get("pipeline", {}).get("max_revise_loops", 4)
         return int(loops) if loops is not None else 4
     except Exception:
         return 4
+
+
+def _hours_since_last_event(
+    conn: sqlite3.Connection, task_id: str, kind: str, stage: str,
+) -> Optional[float]:
+    """Hours since the most recent event of ``kind`` for ``stage``.
+
+    Returns None if no such event exists. Used to throttle repeat nudges.
+    """
+    row = conn.execute(
+        "SELECT created_at FROM task_events "
+        "WHERE task_id = ? AND kind = ? "
+        "AND json_extract(payload, '$.stage') = ? "
+        "ORDER BY created_at DESC LIMIT 1",
+        (task_id, kind, stage),
+    ).fetchone()
+    if not row or row[0] is None:
+        return None
+    # created_at is an epoch-seconds integer (see _append_event).
+    try:
+        created = int(row[0])
+    except (TypeError, ValueError):
+        return None
+    return max(0.0, (time.time() - created) / 3600.0)
 
 
 def _get_sign_off_timeout_hours() -> int:
@@ -7815,22 +7860,107 @@ def _get_sign_off_timeout_hours() -> int:
         return 48
 
 
-def _get_council_revise_count(conn: sqlite3.Connection, task_id: str) -> int:
-    """Count how many times the council has REVISEd this task."""
+def _revise_event_kind(loop_kind: str) -> str:
+    """Event kind used to track a given revise loop.
+
+    Council REVISE and audit BLOCKED have independent caps (design doc §3),
+    so each gets its own event kind and counter.
+    """
+    return "audit_revise" if loop_kind == "audit" else "council_revise"
+
+
+def _get_council_revise_count(
+    conn: sqlite3.Connection, task_id: str, loop_kind: str = "council"
+) -> int:
+    """Count revise loops of ``loop_kind`` ("council" or "audit") for a task."""
     row = conn.execute(
-        "SELECT COUNT(*) FROM task_events "
-        "WHERE task_id = ? AND kind = 'council_revise'",
-        (task_id,),
+        "SELECT COUNT(*) FROM task_events WHERE task_id = ? AND kind = ?",
+        (task_id, _revise_event_kind(loop_kind)),
     ).fetchone()
     return row[0] if row else 0
 
 
-def _record_council_revise(conn: sqlite3.Connection, task_id: str) -> None:
-    """Record a council REVISE event for loop tracking."""
-    conn.execute(
-        "INSERT INTO task_events (task_id, kind, payload, created_at) VALUES (?, ?, ?, datetime('now'))",
-        (task_id, "council_revise", '{"stage": "council"}'),
+def _record_council_revise(
+    conn: sqlite3.Connection, task_id: str, loop_kind: str = "council"
+) -> None:
+    """Record a revise event for loop tracking (epoch created_at via _append_event)."""
+    kind = _revise_event_kind(loop_kind)
+    _append_event(conn, task_id, kind, {"stage": loop_kind})
+
+
+def _council_artifact_dir(task_id: str) -> str:
+    base = os.path.join(
+        os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes")),
+        "feature-artifacts",
     )
+    return os.path.join(base, task_id)
+
+
+def _write_fallback_council_verdict(artifact_dir: str, task_id: str, error: str) -> None:
+    """Write a REVISE verdict when the council fails irrecoverably.
+
+    Keeps a failed deliberation bounded: the gate bounces the task to spec
+    (capped by max_revise_loops) instead of relaunching the council forever.
+    """
+    try:
+        os.makedirs(artifact_dir, exist_ok=True)
+        path = os.path.join(artifact_dir, "council-verdict.md")
+        with open(path, "w") as f:
+            f.write(
+                f"# Council Verdict — {task_id}\n\n"
+                f"**Verdict: REVISE**\n\n"
+                f"## Issues\n\n"
+                f"- **[CRITICAL]** Council deliberation failed: {error}\n\n"
+                f"## Chairman Rationale\n\n"
+                f"Deliberation could not complete; manual review required.\n"
+            )
+    except OSError:
+        _log.exception("Could not write fallback council verdict for %s", task_id)
+
+
+def _maybe_launch_council(
+    conn: sqlite3.Connection, task_id: str, *, dry_run: bool = False
+) -> bool:
+    """Launch (or await) the council deliberation off the dispatcher thread.
+
+    Returns True if the dispatcher should skip this task this tick (verdict
+    not ready yet), False if a verdict exists and the gate should evaluate it.
+    """
+    artifact_dir = _council_artifact_dir(task_id)
+    if os.path.exists(os.path.join(artifact_dir, "council-verdict.md")):
+        return False  # verdict ready — let the gate parse it
+
+    if dry_run:
+        return True
+
+    # Resolve the deliberation timeout so a crashed run can be relaunched.
+    try:
+        from hermes_cli.config import get_council_config
+        timeout_s = int(get_council_config().timeout_seconds)
+    except Exception:
+        timeout_s = 600
+    relaunch_after_h = (timeout_s / 3600.0) + 0.25  # timeout + 15min buffer
+
+    last_run = _hours_since_last_event(conn, task_id, "council_running", "council")
+    if last_run is not None and last_run < relaunch_after_h:
+        return True  # already deliberating
+
+    with write_txn(conn):
+        _append_event(conn, task_id, "council_running", {"stage": "council"})
+
+    import threading
+
+    def _worker() -> None:
+        try:
+            from hermes_cli.council import deliberate
+            deliberate(task_id, artifact_dir)
+        except Exception as exc:  # noqa: BLE001 — bound the failure to a verdict
+            _log.exception("Council deliberation failed for %s", task_id)
+            _write_fallback_council_verdict(artifact_dir, task_id, str(exc)[:300])
+
+    threading.Thread(target=_worker, name=f"council-{task_id}", daemon=True).start()
+    _log.info("Council deliberation launched (background) for %s", task_id)
+    return True
 
 
 def _record_pipeline_spawn(
@@ -7843,12 +7973,8 @@ def _record_pipeline_spawn(
     group on ``assignee`` and surface recurring spawn patterns to be
     promoted to persistent profiles (D6 in the design doc).
     """
-    import json as _json
-    payload = _json.dumps({"stage": stage, "assignee": assignee or ""})
-    conn.execute(
-        "INSERT INTO task_events (task_id, kind, payload, created_at) VALUES (?, ?, ?, datetime('now'))",
-        (task_id, "pipeline_spawn", payload),
-    )
+    _append_event(conn, task_id, "pipeline_spawn",
+                  {"stage": stage, "assignee": assignee or ""})
 
 
 def _record_denji_review_signal(
@@ -7860,12 +7986,8 @@ def _record_denji_review_signal(
     flag on completion events. Denji's review-cycle scripts scan for these
     events to generate audit follow-up reviews (Phase D, #15 in the design).
     """
-    import json as _json
-    payload = _json.dumps({"signal_type": signal_type, **details})
-    conn.execute(
-        "INSERT INTO task_events (task_id, kind, payload, created_at) VALUES (?, ?, ?, datetime('now'))",
-        (task_id, "denji_review_signal", payload),
-    )
+    _append_event(conn, task_id, "denji_review_signal",
+                  {"signal_type": signal_type, **details})
 
 
 def _get_spawn_frequency_threshold() -> int:
@@ -7896,11 +8018,12 @@ def get_spawn_frequency(
     (default 8) is the trigger for Denji to file a promotion proposal.
     """
     import json as _json
+    # created_at is epoch-seconds (int); compare against an epoch cutoff.
+    cutoff = int(time.time()) - int(days) * 86400
     rows = conn.execute(
         "SELECT payload FROM task_events "
-        "WHERE kind = 'pipeline_spawn' "
-        "AND created_at >= datetime('now', ?)",
-        (f"-{int(days)} days",),
+        "WHERE kind = 'pipeline_spawn' AND created_at >= ?",
+        (cutoff,),
     ).fetchall()
     agg: dict[tuple[str, str], dict] = {}
     for row in rows:
@@ -7926,6 +8049,59 @@ def get_spawn_frequency(
         })
     out.sort(key=lambda r: (-r["spawn_count"], r["assignee"], r["stage"]))
     return out
+
+
+def build_denji_report(conn: sqlite3.Connection, *, days: int = 7) -> dict:
+    """Consume the pipeline governance signals into one report for Denji.
+
+    This is the consumer side of the Denji wiring (design doc build #15):
+    spawn-frequency promotion proposals, audit review signals, and express
+    bypass-records over the rolling window. Denji's review-cycle cron calls
+    this (via ``hermes feature denji-report``) instead of the signals sitting
+    unread in the events table.
+    """
+    import json as _json
+    cutoff = int(time.time()) - int(days) * 86400
+
+    spawn = get_spawn_frequency(conn, days=days)
+    threshold = _get_spawn_frequency_threshold()
+    promotion_proposals = [
+        {**r, "threshold": threshold}
+        for r in spawn if r["spawn_count"] >= threshold
+    ]
+
+    def _load(kind: str) -> list[dict]:
+        rows = conn.execute(
+            "SELECT task_id, payload, created_at FROM task_events "
+            "WHERE kind = ? AND created_at >= ? ORDER BY created_at DESC",
+            (kind, cutoff),
+        ).fetchall()
+        items = []
+        for r in rows:
+            try:
+                data = _json.loads(r[1]) if r[1] else {}
+            except (TypeError, ValueError):
+                data = {}
+            items.append({"task_id": r[0], "created_at": r[2], **data})
+        return items
+
+    review_signals = _load("denji_review_signal")
+    signal_counts: dict[str, int] = {}
+    for s in review_signals:
+        signal_counts[s.get("signal_type", "unknown")] = (
+            signal_counts.get(s.get("signal_type", "unknown"), 0) + 1
+        )
+    bypasses = _load("bypass_record")
+
+    return {
+        "window_days": days,
+        "spawn_frequency": spawn,
+        "promotion_proposals": promotion_proposals,
+        "review_signals": review_signals,
+        "review_signal_counts": signal_counts,
+        "bypass_records": bypasses,
+        "bypass_count": len(bypasses),
+    }
 
 
 def _create_audit_followup_task(
@@ -7963,13 +8139,16 @@ def _create_audit_followup_task(
             f"**{audit_verdict}**",
         ]
         body = "\n".join(body_lines)
+        # The follow-up is written on the same connection as the parent, so
+        # it lands on the parent's board automatically (boards are separate
+        # DB files). board=None resolves the current board's default_workdir.
         new_id = create_task(
             conn,
             title=title,
             body=body,
             assignee="octacon",
             tier="fast",
-            board=parent[2] if len(parent) > 2 and parent[2] else None,
+            board=None,
         )
         # Link the follow-up to the parent
         conn.execute(
@@ -7996,16 +8175,11 @@ def _record_bypass_record(
     launcher, and the timestamp. Denji samples these for governance
     review (design doc §4a).
     """
-    import json as _json
-    payload = _json.dumps({
+    _append_event(conn, task_id, "bypass_record", {
         "skipped_stages": skipped_stages,
         "launched_by": launched_by,
         "mode": mode,
     })
-    conn.execute(
-        "INSERT INTO task_events (task_id, kind, payload, created_at) VALUES (?, ?, ?, datetime('now'))",
-        (task_id, "bypass_record", payload),
-    )
 
 
 def _positive_int(value: Any, default: int, *, minimum: int = 1) -> int:

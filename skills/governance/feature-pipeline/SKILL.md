@@ -51,7 +51,7 @@ Each stage has a deterministic gate function in `hermes_cli/feature_pipeline.py`
 - `validate_spec_artifact(artifact_path)` — checks required sections
 - `validate_council_artifact(artifact_path)` — checks verdict field
 
-Gate returns: `(passed: bool, reason: str)`
+Gate returns: `Optional[str]` — `None` means the gate passed; a non-empty string is the human-readable failure reason.
 
 ## CLI Commands
 

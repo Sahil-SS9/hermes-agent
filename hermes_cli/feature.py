@@ -24,12 +24,15 @@ from hermes_cli.kanban_db import (
     create_task,
     get_task,
     promote_task,
+    _append_event,
 )
 from hermes_cli.feature_pipeline import (
     PIPELINE_STAGES,
     GATE_FUNCTIONS,
     HUMAN_GATE_STAGES,
     get_next_stage,
+    get_pipeline_mode,
+    get_skipped_stages,
     validate_intake_brief,
     check_human_approved,
     get_artifact_path,
@@ -37,16 +40,22 @@ from hermes_cli.feature_pipeline import (
     read_artifact,
 )
 
+# Every stage a pipeline task can sit at. Used for the board-level status
+# view so the listing is not blind past the council stage.
+_ALL_PIPELINE_STATUSES = tuple(PIPELINE_STAGES)
+
 
 def _get_pipeline_tasks(board: Optional[str] = None) -> list[dict]:
-    """Get all tasks in pipeline stages (research/prd/spec/council)."""
+    """Get all tasks currently sitting in any pipeline stage."""
     try:
         with connect(board=board) as conn:
             conn.row_factory = sqlite3.Row
+            placeholders = ",".join("?" for _ in _ALL_PIPELINE_STATUSES)
             rows = conn.execute(
                 "SELECT id, title, status, pipeline_stage, assignee, tier "
-                "FROM tasks WHERE status IN ('research', 'prd', 'spec', 'council') "
-                "ORDER BY priority DESC, created_at ASC"
+                "FROM tasks WHERE pipeline_stage IN (" + placeholders + ") "
+                "ORDER BY priority DESC, created_at ASC",
+                _ALL_PIPELINE_STATUSES,
             ).fetchall()
             return [dict(row) for row in rows]
     except Exception:
@@ -59,6 +68,7 @@ def cmd_feature_create(args: argparse.Namespace) -> int:
     body = args.body or ""
     assignee = args.assignee
     board = args.board
+    express = getattr(args, "express", False)
 
     # Validate intake format
     gate_fail = validate_intake_brief(body)
@@ -68,6 +78,8 @@ def cmd_feature_create(args: argparse.Namespace) -> int:
         print("  ## Problem — what problem does this solve?", file=sys.stderr)
         print("  ## Success Criteria — how do we know it's done?", file=sys.stderr)
         return 1
+
+    pipeline_mode = "express" if express else "full"
 
     # Create task in triage with tier=full
     try:
@@ -80,12 +92,27 @@ def cmd_feature_create(args: argparse.Namespace) -> int:
                 triage=True,
                 tier="full",
                 board=board,
+                pipeline_mode=pipeline_mode,
             )
+            # Express launches skip PRD/Council/Tech Review. Record the
+            # bypass so Denji can sample it for governance (design doc §4a).
+            if express:
+                from hermes_cli.kanban_db import _record_bypass_record
+                _record_bypass_record(
+                    conn, task_id,
+                    skipped_stages=get_skipped_stages("express"),
+                    launched_by=assignee or "cli",
+                    mode="express",
+                )
+                conn.commit()
             print(f"Created feature task: {task_id}")
             print(f"Title: {title}")
             if assignee:
                 print(f"Assignee: {assignee}")
-            print("Status: triage (tier=full)")
+            print(f"Status: triage (tier=full, mode={pipeline_mode})")
+            if express:
+                print("Express path: skips PRD, Council, Tech Review "
+                      "(bypass logged for Denji)")
             print("Next: triage processor will promote to 'research'")
             return 0
     except Exception as exc:
@@ -167,7 +194,8 @@ def cmd_feature_advance(args: argparse.Namespace) -> int:
                 print(f"Task {task_id} is not in the pipeline", file=sys.stderr)
                 return 1
 
-            next_stage = get_next_stage(current_stage)
+            mode = get_pipeline_mode({"pipeline_mode": task.pipeline_mode})
+            next_stage = get_next_stage(current_stage, mode)
             if not next_stage:
                 print(f"Task {task_id} is at the end of the pipeline ({current_stage})", file=sys.stderr)
                 return 1
@@ -192,6 +220,10 @@ def cmd_feature_advance(args: argparse.Namespace) -> int:
                 "UPDATE tasks SET status = ?, pipeline_stage = ? WHERE id = ?",
                 (next_stage, next_stage, task_id),
             )
+            _append_event(conn, task_id, "pipeline_advanced", {
+                "from_stage": current_stage, "to_stage": next_stage,
+                "mode": mode, "manual": True, "forced": bool(force),
+            })
             conn.commit()
             print(f"Advanced {task_id}: {current_stage} → {next_stage}")
             return 0
@@ -224,6 +256,10 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
     create_parser.add_argument("--body", "-b", help="Feature body (must have ## Problem and ## Success Criteria)")
     create_parser.add_argument("--assignee", "-a", help="Assign to a profile")
     create_parser.add_argument("--board", "-B", help="Board name (default: current)")
+    create_parser.add_argument(
+        "--express", action="store_true",
+        help="Express path: skip PRD, Council, Tech Review (logged as a bypass for Denji)",
+    )
 
     # hermes feature status
     status_parser = feature_subparsers.add_parser(
@@ -248,6 +284,14 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
     )
     signoff_parser.add_argument("task_id", help="Task ID to approve")
     signoff_parser.add_argument("--note", "-n", help="Optional approval note")
+
+    # hermes feature denji-report — governance report (consumes pipeline signals)
+    denji_parser = feature_subparsers.add_parser(
+        "denji-report",
+        help="Governance report: spawn-frequency promotions, review signals, express bypasses",
+    )
+    denji_parser.add_argument("--days", type=int, default=7, help="Rolling window in days")
+    denji_parser.add_argument("--json", action="store_true", help="Emit raw JSON")
 
     # hermes feature reject — reject a human-gate stage
     reject_parser = feature_subparsers.add_parser(
@@ -274,9 +318,44 @@ def cmd_feature(args: argparse.Namespace) -> int:
         return cmd_feature_signoff(args)
     elif action == "reject":
         return cmd_feature_reject(args)
+    elif action == "denji-report":
+        return cmd_feature_denji_report(args)
     else:
-        print("Usage: hermes feature {create|status|advance|sign-off|reject}", file=sys.stderr)
+        print("Usage: hermes feature {create|status|advance|sign-off|reject|denji-report}",
+              file=sys.stderr)
         return 1
+
+
+def cmd_feature_denji_report(args: argparse.Namespace) -> int:
+    """Print the Denji governance report (consumes pipeline signals)."""
+    from hermes_cli.kanban_db import build_denji_report
+    try:
+        with connect() as conn:
+            report = build_denji_report(conn, days=args.days)
+    except Exception as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    if getattr(args, "json", False):
+        print(json.dumps(report, indent=2))
+        return 0
+
+    print(f"Denji governance report — last {report['window_days']} days")
+    print("-" * 60)
+    proposals = report["promotion_proposals"]
+    if proposals:
+        print(f"Promotion proposals ({len(proposals)}):")
+        for p in proposals:
+            print(f"  {p['assignee']} @ {p['stage']}: {p['spawn_count']} spawns "
+                  f"(>= {p['threshold']}) — consider a persistent profile")
+    else:
+        print("Promotion proposals: none")
+    print(f"Review signals: {report['review_signal_counts'] or 'none'}")
+    print(f"Express bypasses: {report['bypass_count']}")
+    for b in report["bypass_records"]:
+        print(f"  {b.get('task_id')}: skipped {', '.join(b.get('skipped_stages', []))} "
+              f"(by {b.get('launched_by', '?')})")
+    return 0
 
 
 def cmd_feature_signoff(args: argparse.Namespace) -> int:
@@ -299,11 +378,8 @@ def cmd_feature_signoff(args: argparse.Namespace) -> int:
                 return 1
 
             # Write human_approved event
-            payload = json.dumps({"stage": stage, "note": note or ""})
-            conn.execute(
-                "INSERT INTO task_events (task_id, kind, payload) VALUES (?, ?, ?)",
-                (task_id, "human_approved", payload),
-            )
+            _append_event(conn, task_id, "human_approved",
+                          {"stage": stage, "note": note or ""})
             conn.commit()
             print(f"Approved {task_id} at {stage} stage.")
             print("The dispatcher will advance the task on the next tick.")
@@ -332,11 +408,8 @@ def cmd_feature_reject(args: argparse.Namespace) -> int:
                 return 1
 
             # Write human_rejected event
-            payload = json.dumps({"stage": stage, "reason": reason})
-            conn.execute(
-                "INSERT INTO task_events (task_id, kind, payload) VALUES (?, ?, ?)",
-                (task_id, "human_rejected", payload),
-            )
+            _append_event(conn, task_id, "human_rejected",
+                          {"stage": stage, "reason": reason})
 
             # Bounce back: sign_off → spec, final_sign_off → tech_review
             bounce_stage = "spec" if stage == "sign_off" else "tech_review"

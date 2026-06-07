@@ -20,6 +20,8 @@
 !/skills/**
 !/runbooks
 !/runbooks/**
+!/feature-artifacts
+!/feature-artifacts/**
 
 # --- 3. Internal runtime junk inside curated paths ---
 # Python
@@ -45,6 +47,9 @@
 **/*.log
 # Cron outputs (the JSON config is what we track, the output dir is junk)
 cron/output/
+# Feature-artifacts: only .md files tracked; deny everything else inside.
+feature-artifacts/**
+!feature-artifacts/**/*.md
 
 # --- 4. Always allow these, regardless of position ---
 !.gitignore
