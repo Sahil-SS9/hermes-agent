@@ -8613,11 +8613,26 @@ def _kanban_worker_skill_available(hermes_home: Optional[str]) -> bool:
     the bundled skill (it ships in the *default* root home, not every
     profile-scoped skills dir). Preloading a missing skill is fatal at CLI
     startup (``ValueError: Unknown skill(s): kanban-worker``), aborting the
-    worker before the agent loop runs. Gate the flag on actual resolvability;
-    the kanban lifecycle contract is still injected via ``KANBAN_GUIDANCE``, so
-    omitting the flag only drops the supplementary pattern library.
+    worker before the agent loop runs.
+
+    For profiles that have ``kanban-worker`` in their ``always_skills`` config,
+    we skip the ``--skills`` flag entirely — the profile loads it naturally.
+    This avoids the ``--skills`` resolution bug on sub-profile workers.
     """
     base = Path(hermes_home) if hermes_home else (Path.home() / ".hermes")
+    # If profile has kanban-worker in always_skills, skip the flag
+    # -- always_skills resolution works where --skills flag fails.
+    config_path = base / "config.yaml"
+    if config_path.exists():
+        try:
+            from agent.skill_utils import yaml_load
+            cfg = yaml_load(config_path.read_text(encoding="utf-8"))
+            if isinstance(cfg, dict):
+                always = cfg.get("skills", {}).get("always_skills", [])
+                if isinstance(always, list) and "kanban-worker" in always:
+                    return False  # profile loads it, no --skills needed
+        except Exception:
+            pass
     return _worker_skill_visible_in_home("kanban-worker", base)
 
 
