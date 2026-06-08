@@ -7950,6 +7950,12 @@ def dispatch_once(
                              "revise_count": revise_count + 1},
                         )
                         _record_council_revise(conn, row["id"], "council")
+                        # Delete the stale council verdict so a fresh
+                        # deliberation runs when the task re-enters council
+                        # after the spec is revised.  Without this, re-entry
+                        # reads the old REVISE verdict and bounces immediately
+                        # without re-deliberating.
+                        _clear_council_verdict(artifact_dir, row["id"])
             result.pipeline_advanced.append((row["id"], stage, "spec"))
         elif stage == "audit":
             # Audit BLOCKED — bounce to spec (capped). Same loop cap policy
@@ -8257,6 +8263,18 @@ def _maybe_launch_council(
     threading.Thread(target=_worker, name=f"council-{task_id}", daemon=True).start()
     _log.info("Council deliberation launched (background) for %s", task_id)
     return True
+
+
+def _clear_council_verdict(artifact_dir: str, task_id: str) -> None:
+    """Delete the council verdict file so a fresh deliberation runs on re-entry."""
+    verdict_path = os.path.join(artifact_dir, "council-verdict.md")
+    try:
+        os.remove(verdict_path)
+        _log.info("Council verdict cleared for %s (bouncing to spec)", task_id)
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        _log.warning("Could not clear council verdict for %s: %s", task_id, exc)
 
 
 def _record_pipeline_spawn(
