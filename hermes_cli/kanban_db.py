@@ -7963,8 +7963,6 @@ def dispatch_once(
                 continue
             set_workspace_path(conn, claimed.id, str(workspace))
             _maybe_emit_scratch_tip(conn, claimed.id, claimed.workspace_kind)
-            # Set pipeline skill for the lead
-            claimed.skills = ["feature-pipeline"]
             _spawn = spawn_fn if spawn_fn is not None else _default_spawn
             try:
                 import inspect

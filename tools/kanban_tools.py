@@ -601,6 +601,45 @@ def _handle_complete(args: dict, **kw) -> str:
         return tool_error(f"kanban_complete: {e}")
 
 
+
+def _handle_complete_pipeline(args: dict, **kw) -> str:
+    """Return a pipeline worker to its originating stage after writing the artifact."""
+    tid = _default_task_id(args.get("task_id"))
+    if not tid:
+        return tool_error(
+            "task_id is required (or set HERMES_KANBAN_TASK in the env)"
+        )
+    ownership_err = _enforce_worker_task_ownership(tid)
+    if ownership_err:
+        return ownership_err
+    summary = args.get("summary")
+    result = args.get("result")
+    if not (summary or result):
+        return tool_error(
+            "provide at least one of: summary (preferred), result"
+        )
+    board = args.get("board")
+    try:
+        kb_mod, conn = _connect(board=board)
+        try:
+            ok = kb_mod.complete_pipeline_task(
+                conn, tid,
+                result=result, summary=summary,
+            )
+            if not ok:
+                return tool_error(
+                    f"could not complete pipeline task {tid} (not running or not a pipeline task)"
+                )
+            run = kb_mod.latest_run(conn, tid)
+            return _ok(task_id=tid, run_id=run.id if run else None)
+        finally:
+            conn.close()
+    except ValueError as e:
+        return tool_error(f"kanban_complete_pipeline: {e}")
+    except Exception as e:
+        logger.exception("kanban_complete_pipeline failed")
+        return tool_error(f"kanban_complete_pipeline: {e}")
+
 def _handle_block(args: dict, **kw) -> str:
     """Transition the task to blocked with a reason a human will read."""
     tid = _default_task_id(args.get("task_id"))
@@ -1721,3 +1760,54 @@ registry.register(
     check_fn=_check_kanban_mode,
     emoji="↩️",
 )
+# Pipeline worker completion — returns a pipeline worker to its originating
+# stage (e.g. research, prd, spec) instead of marking the task done.
+KANBAN_COMPLETE_PIPELINE_SCHEMA = {
+    "name": "kanban_complete_pipeline",
+    "description": (
+        "Complete a pipeline-stage task (research/prd/spec audit) and "
+        "return it to its originating stage so the gate can re-check on "
+        "the next dispatcher tick.  Use this when you have written the "
+        "stage artifact (research-brief.md, prd.md, spec.md) and want "
+        "the pipeline to advance.  Do NOT use kanban_complete — that "
+        "would mark the task done and break the pipeline."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "task_id": {
+                "type": "string",
+                "description": (
+                    "The task id.  Defaults to HERMES_KANBAN_TASK."
+                ),
+            },
+            "summary": {
+                "type": "string",
+                "description": (
+                    "Human-readable summary of what was done (preferred "
+                    "over result for handoff context)."
+                ),
+            },
+            "result": {
+                "type": "string",
+                "description": (
+                    "The raw result / output produced by this stage."
+                ),
+            },
+            "board": {
+                "type": "string",
+                "description": "Board slug (e.g. apps, research). Auto-detected if omitted.",
+            },
+        },
+    },
+}
+
+registry.register(
+    name="kanban_complete_pipeline",
+    toolset="kanban",
+    schema=KANBAN_COMPLETE_PIPELINE_SCHEMA,
+    handler=_handle_complete_pipeline,
+    check_fn=_check_kanban_mode,
+    emoji="🔁",
+)
+
