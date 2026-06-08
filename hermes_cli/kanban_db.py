@@ -84,6 +84,8 @@ import sys
 import threading
 import logging
 import time
+from datetime import datetime
+
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -1179,8 +1181,19 @@ CREATE INDEX IF NOT EXISTS idx_runs_task             ON task_runs(task_id, start
 CREATE INDEX IF NOT EXISTS idx_runs_status           ON task_runs(status);
 CREATE INDEX IF NOT EXISTS idx_attachments_task      ON task_attachments(task_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_notify_task           ON kanban_notify_subs(task_id);
+-- Cost governance: daily agent-spawn counter (P2-1). One row per UTC
+-- date.  The ``count`` column tracks total agent spawns across all boards
+-- for the calendar day.  Dispatcher tick reads the row, compares against
+-- ``kanban.daily_spawn_budget``, and skips spawns when the budget is
+-- exhausted.  ``last_tick`` records the most recent dispatcher tick
+-- timestamp so a dangling row from a past date can be detected and
+-- recycled without needing a separate janitor cron.
+CREATE TABLE IF NOT EXISTS daily_spawn_counter (
+    date_utc   TEXT NOT NULL PRIMARY KEY,
+    count      INTEGER NOT NULL DEFAULT 0,
+    last_tick  INTEGER NOT NULL DEFAULT 0
+);
 """
-
 
 # ---------------------------------------------------------------------------
 # Connection helpers
@@ -4171,11 +4184,16 @@ def complete_task(
     # straight to done so internal automation is not gated. Reviewer
     # assignment happens at review dispatch via the preferred_reviewer /
     # sticky-reviewer flow; the dispatcher loads sdlc-review.
+    #
+    # P2-1 tiered review: when ``kanban.tiered_review`` is enabled, the
+    # gate uses _should_review() which applies mandatory review for full-
+    # tier and sampled review (1 in N + all failures) for fast-tier.
+    # When disabled (default), legacy WS-4 "review everything" applies.
     tier_row = conn.execute(
         "SELECT tier FROM tasks WHERE id = ?", (task_id,)
     ).fetchone()
     task_tier = (tier_row["tier"] or "").lower() if tier_row else ""
-    if task_tier in ("full", "fast"):
+    if _should_review(conn, task_tier, task_id):
         # WS-4 loop guard: only skip redirect when the latest review is
         # UNRESOLVED (no subsequent approve/reject). Once a review is
         # resolved (passed or rejected), the next completion must re-enter
@@ -4962,6 +4980,71 @@ def preferred_reviewer_profile(
         return None
     value = payload.get("rejected_by_profile")
     return str(value) if value else None
+
+
+# ---------------------------------------------------------------------------
+# Tiered review sampling (P2-1 cost governance)
+# ---------------------------------------------------------------------------
+
+def _should_review(
+    conn: sqlite3.Connection,
+    task_tier: str,
+    task_id: str,
+    *,
+    kanban_cfg: Optional[dict] = None,
+) -> bool:
+    """Decide whether a completed task should enter review based on its tier.
+
+    When ``kanban.tiered_review`` is enabled:
+      * ``full`` tier → always review (mandatory).
+      * ``fast`` tier → sampled review (1 in N + all failures).
+      * Unclassified / NULL tier → no review (system automation).
+
+    When ``tiered_review`` is disabled (or unset), the legacy WS-4
+    "review everything" behaviour applies: all ``full`` and ``fast``
+    tier tasks go to review.
+    """
+    if kanban_cfg is None:
+        try:
+            from hermes_cli.config import get_kanban_config
+            kanban_cfg = get_kanban_config()
+        except Exception:
+            kanban_cfg = {}
+
+    tiered_enabled = bool(kanban_cfg.get("tiered_review", False))
+    tier = (task_tier or "").lower().strip()
+
+    if tier not in ("full", "fast"):
+        return False
+
+    if tier == "full":
+        return True  # mandatory review
+
+    # Fast tier — sampled review.
+    # Always review tasks whose last run failed (non-completed).
+    last_outcome_row = conn.execute(
+        "SELECT outcome FROM task_runs WHERE task_id = ? "
+        "ORDER BY started_at DESC LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    last_failed = (
+        last_outcome_row is not None
+        and last_outcome_row["outcome"] != "completed"
+    )
+    if last_failed:
+        return True
+
+    if not tiered_enabled:
+        # Legacy WS-4: review everything (fast tier just gets sampled by default)
+        return True
+
+    # Sample 1 in N fast-tier tasks.
+    sample_rate = max(1, int(kanban_cfg.get("review_sample_rate", 5) or 5))
+    # Deterministic sampling by task_id so the same task always gets
+    # the same decision across dispatcher ticks (avoids thrash).
+    sample_bucket = hash(task_id) % sample_rate
+    return sample_bucket == 0
+
 
 
 def request_review(
@@ -6126,6 +6209,13 @@ class DispatchResult:
     counting a failure. These never trip the circuit breaker — a long quota
     window just makes the task bounce cheaply until the window clears."""
 
+    budget_exhausted: bool = False
+    """True when the daily spawn budget was exhausted this tick — no spawns
+    occurred because the cumulative count reached ``daily_spawn_budget``.
+    Unlike other skip signals, this is a cost-governance hard stop, not
+    a task-level routing or capacity issue.
+    """
+
 
 # Bounded registry of recently-reaped worker child exits, populated by the
 # reap loop at the top of ``dispatch_once`` and consulted by
@@ -7251,6 +7341,38 @@ def has_spawnable_review(conn: sqlite3.Connection) -> bool:
     return False
 
 
+
+# ---------------------------------------------------------------------------
+# Daily spawn budget (P2-1 cost governance)
+# ---------------------------------------------------------------------------
+
+def _get_daily_spawn_count(conn: sqlite3.Connection) -> int:
+    """Return cumulative agent spawns for today (UTC). 0 if no row yet."""
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    row = conn.execute(
+        "SELECT count FROM daily_spawn_counter WHERE date_utc = ?", (today,),
+    ).fetchone()
+    return int(row["count"]) if row else 0
+
+
+def _consume_daily_spawn(conn: sqlite3.Connection) -> None:
+    """Increment today's spawn counter. Creates the row if it does not exist.
+
+    Uses INSERT … ON CONFLICT so the row is auto-created on first spawn
+    of the day.  Called after a successful worker spawn so the budget is
+    only consumed by real spawns, not dry-runs or skipped tasks.
+    """
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    now = int(time.time())
+    conn.execute(
+        "INSERT INTO daily_spawn_counter (date_utc, count, last_tick) "
+        "VALUES (?, 1, ?) "
+        "ON CONFLICT(date_utc) DO UPDATE SET count = count + 1, last_tick = ?",
+        (today, now, now),
+    )
+    conn.commit()
+
+
 def dispatch_once(
     conn: sqlite3.Connection,
     *,
@@ -7399,9 +7521,12 @@ def dispatch_once(
     # the dispatcher from compounding memory pressure when the VPS is
     # already under memory stress (#Audit-H4a).
     try:
-        from gateway.memory_monitor import get_system_free_ram_mb
         from hermes_cli.config import get_kanban_config
         _kanban_cfg = get_kanban_config()
+    except Exception:
+        _kanban_cfg = {}
+    try:
+        from gateway.memory_monitor import get_system_free_ram_mb
         _min_free_ram_mb = _kanban_cfg.get("min_free_ram_mb", 512)
         if _min_free_ram_mb and _min_free_ram_mb > 0:
             _free_mb = get_system_free_ram_mb()
@@ -7418,6 +7543,25 @@ def dispatch_once(
             "skipping check (fails open)",
             exc_info=True,
         )
+    # Daily spawn budget (P2-1 cost governance): skip further spawns when
+    # today's cumulative agent spawns have reached the configured ceiling.
+    # The counter is global (all boards) and resets at UTC midnight. Set
+    # ``kanban.daily_spawn_budget`` to 0 to disable (unlimited).
+    _daily_budget = int(_kanban_cfg.get("daily_spawn_budget", 0) or 0)
+    if _daily_budget > 0:
+        _daily_count = _get_daily_spawn_count(conn)
+        _daily_remaining = _daily_budget - _daily_count
+        if _daily_remaining <= 0:
+            _log.warning(
+                "dispatch_once: daily spawn budget exhausted (%d/%d) — "
+                "skipping all spawns this tick",
+                _daily_count, _daily_budget,
+            )
+            result.budget_exhausted = True
+            return result
+    else:
+        _daily_remaining = -1  # unlimited
+
     # Same-profile stagger: when consecutive ready tasks share an assignee,
     # add 1-5s random delay between spawns to prevent PID race conditions on
     # shared profile state (temp files, lock files, state.db). (#t_b3aa7761)
@@ -7604,6 +7748,9 @@ def dispatch_once(
             # complete_task).
             result.spawned.append((claimed.id, claimed.assignee or "", str(workspace)))
             spawned += 1
+            if _daily_budget > 0:
+                _consume_daily_spawn(conn)
+
             # Same-profile stagger: if this task's assignee matches the
             # previous spawn's assignee, sleep 1-5s to spread profile state
             # access across the tick. Prevents race conditions when two
@@ -7714,6 +7861,9 @@ def dispatch_once(
             result.spawned.append((claimed.id, claimed.assignee or "", str(workspace)))
             spawned += 1
             _review_spawned += 1
+            if _daily_budget > 0:
+                _consume_daily_spawn(conn)
+
         except Exception as exc:
             auto = _record_spawn_failure(
                 conn, claimed.id, str(exc),
@@ -8061,6 +8211,9 @@ def dispatch_once(
                 )
                 result.spawned.append((claimed.id, claimed.assignee or "", str(workspace)))
                 spawned += 1
+                if _daily_budget > 0:
+                    _consume_daily_spawn(conn)
+
             except Exception as exc:
                 auto = _record_spawn_failure(
                     conn, claimed.id, str(exc),

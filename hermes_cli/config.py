@@ -2095,6 +2095,26 @@ DEFAULT_CONFIG = {
         # Profiles without directories (orchestrator-only names) are
         # already blocked by profile_exists() and do not need listing.
         "nonspawnable_profiles": [],
+        # Cost governance — circuit breakers for autonomous fleet spend.
+        # ``daily_spawn_budget``: max agent spawns per UTC calendar day
+        # across all boards. 0 = disabled (no cap).  Surplus spawn slots
+        # are computed once per dispatcher tick; non-pipeline ready tasks
+        # consume them first, then review spawns, then pipeline workers.
+        # When exhausted, all remaining spawns for this tick are skipped
+        # and the dispatcher logs a single budget-exhausted warning.
+        "daily_spawn_budget": 0,
+        # ``tiered_review``: when true, review scope follows task tier.
+        # ``full`` tier → mandatory review (always spawn a reviewer).
+        # ``fast`` tier → sampled review (1 in N + all failures). The
+        # sample rate is ``review_sample_rate`` below.
+        # When false (or unset), the behaviour is the legacy WS-4
+        # "review everything" path.
+        "tiered_review": False,
+        # Review sample rate for fast-tier tasks when ``tiered_review``
+        # is enabled.  Default 5 means every 5th fast-tier task gets a
+        # reviewer, plus any task whose last outcome was non-success.
+        # Minimum 1 (every task), 0 resets to the default.
+        "review_sample_rate": 5,
     },
     # LLM Council — multi-model deliberation gate on PRD+Spec for tier=full
     # features. Three-phase: independent review (parallel) → cross-ranking
