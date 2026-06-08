@@ -169,6 +169,28 @@ class TestReplay:
             # Just verify no crash
             assert isinstance(result, ReplayResult)
 
+    def test_replay_with_tick_calls_dispatch_once(self):
+        """trigger_tick=True calls dispatch_once with stub spawn_fn."""
+        with tempfile.TemporaryDirectory() as staging, tempfile.TemporaryDirectory() as data:
+            db_path = os.path.join(data, "kanban.db")
+            make_kanban_db(db_path, [
+                {"task_id": "t_1", "status": "ready", "assignee": "test-profile"},
+            ])
+
+            harness = StagingHarness(staging_dir=staging, kanban_db=db_path)
+            snap_id = harness.snapshot()
+
+            # Mock dispatch_once at the kanban_db module level
+            with patch("hermes_cli.kanban_db.dispatch_once") as mock_dispatch:
+                result = harness.replay(snap_id, trigger_tick=True)
+
+                # Verify dispatch_once was called
+                assert mock_dispatch.called
+                # Verify it's a valid result
+                assert isinstance(result, ReplayResult)
+                # Should have captured pre/post state
+                assert result.total_tasks == 1
+
 
 # ---------------------------------------------------------------------------
 # Snapshot diff

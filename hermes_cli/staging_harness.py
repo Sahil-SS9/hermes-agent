@@ -483,17 +483,36 @@ class StagingHarness:
     def _simulate_dispatch_tick(self, db_path: str) -> None:
         """Simulate a single dispatch tick on the staging DB.
 
-        This is a lightweight simulation — it queries for tasks
-        in pipeline-eligible states and checks whether they'd
-        advance.  For full fidelity, call dispatch_once() directly
-        via the kanban_db module with the staging DB path.
+        Calls dispatch_once() with the staging DB and a stub spawn_fn
+        that records what would have spawned without launching real
+        worker processes.  No side effects outside the staging DB.
         """
-        # For now, just count how many tasks are in active pipeline
-        # states.  Full dispatch simulation requires the full
-        # hermes_cli.kanban_db module which may have side effects.
-        # This stub provides the scaffolding; real replay uses
-        # the dispatch_once function directly.
-        pass
+        import sqlite3 as _sqlite3
+        from hermes_cli.kanban_db import dispatch_once
+
+        staging_conn = _sqlite3.connect(db_path)
+        staging_conn.row_factory = _sqlite3.Row
+
+        try:
+            # Stub spawn: records the task ID + assignee without
+            # launching a real subprocess.  Returns a fake PID.
+            spawned_tasks: list[str] = []
+
+            def _stub_spawn(task, workspace_path, *, board=None):
+                spawned_tasks.append(task.id)
+                return 99999  # fake PID
+
+            dispatch_once(
+                staging_conn,
+                spawn_fn=_stub_spawn,
+            )
+
+            # Store the list of would-be spawns on the harness
+            # instance so callers can inspect it.
+            self._last_spawned = spawned_tasks
+
+        finally:
+            staging_conn.close()
 
     def _meta_to_dict(self, meta: SnapshotMeta) -> dict:
         return {
