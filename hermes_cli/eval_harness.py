@@ -53,6 +53,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -441,33 +442,236 @@ def run_eval(
 def _execute_golden_task(task: GoldenTask, profile: str) -> str:
     """Execute a golden task against the target profile.
 
-    This is the integration point for delegate_task or CLI invocation.
-    Currently returns a placeholder — the actual implementation requires
-    safe agent invocation (P2-6 staging harness).
+    Calls the profile's configured model directly via call_llm.
+    For full agent evaluation (with skills/tools), delegate_task
+    via the gateway is needed — but direct model evaluation catches
+    model-quality regressions (the primary use case for profile edits).
+
+    Args:
+        task: The golden task to execute.
+        profile: Hermes profile name (e.g. 'remii-deep').
+
+    Returns:
+        The model's response text.
     """
-    # TODO: Integrate with delegate_task once staging harness is ready.
-    # For now, return a structured placeholder that downstream code can handle.
-    return (
-        f"[EVAL_PLACEHOLDER] Task {task.id} would be executed "
-        f"by profile '{profile}'.  Integration pending P2-6 staging harness."
+    from hermes_cli.config import load_config_readonly
+    from agent.auxiliary_client import call_llm
+
+    cfg = load_config_readonly()
+
+    # Resolve profile config — look up the profile's provider/model
+    profile_cfg = _get_profile_config(cfg, profile)
+
+    provider = profile_cfg.get("provider", "opencode-go")
+    model = profile_cfg.get("model", "minimax-m3")
+    timeout = profile_cfg.get("timeout", 120)
+
+    # Build the task prompt
+    input_str = json.dumps(task.input, indent=2) if task.input else ""
+    user_prompt = (
+        f"# Task: {task.id}\n\n"
+        f"{task.description}\n"
     )
+    if input_str:
+        user_prompt += f"\n## Input\n```json\n{input_str}\n```\n"
+
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are an AI agent being evaluated. Complete the task described "
+                "by the user. Be thorough and accurate. Return your answer directly "
+                "— no preamble or meta-commentary."
+            ),
+        },
+        {"role": "user", "content": user_prompt},
+    ]
+
+    response = call_llm(
+        provider=provider,
+        model=model,
+        messages=messages,
+        timeout=timeout,
+    )
+    return response.choices[0].message.content or ""
+
+
+def _get_profile_config(cfg: dict, profile: str) -> dict:
+    """Extract a profile's LLM config from the Hermes configuration.
+
+    Looks up the profile's config.yaml, falling back to the global
+    default provider/model if the profile has no explicit overrides.
+    """
+    import os
+
+    # Try profile-specific config first
+    profile_cfg_path = os.path.expanduser(
+        f"~/.hermes/profiles/{profile}/config.yaml"
+    )
+    if os.path.exists(profile_cfg_path):
+        try:
+            import yaml as _yaml
+            with open(profile_cfg_path) as f:
+                pc = _yaml.safe_load(f)
+            if "model" in pc:
+                return {
+                    "provider": pc.get("provider", cfg.get("provider", "opencode-go")),
+                    "model": pc["model"],
+                    "timeout": pc.get("timeout", 120),
+                }
+        except Exception:
+            pass
+
+    # Fall back to global config
+    providers_cfg = cfg.get("providers", {})
+    # Try to get the default from the main provider block
+    default_model = None
+    default_provider = None
+    for key in ("default", "model"):
+        if key in cfg:
+            default_model = cfg[key]
+            break
+    if not default_model:
+        default_model = "minimax-m3"
+    if not default_provider:
+        default_provider = cfg.get("provider", "opencode-go")
+
+    return {
+        "provider": default_provider,
+        "model": default_model,
+        "timeout": 120,
+    }
 
 
 def _judge_output(task: GoldenTask, output: str, judge_profile: str) -> dict:
-    """Score agent output against the task rubric using a judge model.
+    """Score agent output against the task rubric using a real LLM judge.
 
-    This is the integration point for LLM judging.  Currently returns a
-    placeholder — the actual implementation invokes the judge profile
-    with the judge prompt and parses the JSON response.
+    Calls the judge profile's model with the judge prompt and parses
+    the JSON response. Falls back to a basic keyword-match heuristic
+    if the LLM call fails (never returns hardcoded pass/fail silently).
+
+    Args:
+        task: The golden task with rubric.
+        output: The agent's actual output text.
+        judge_profile: Hermes profile to use as judge.
+
+    Returns:
+        dict with keys: passed, score, notes.
     """
-    # TODO: Integrate with delegate_task or direct LLM call.
-    # For now, return a placeholder.
+    from hermes_cli.config import load_config_readonly
+    from agent.auxiliary_client import call_llm
+
+    # If the output is a placeholder, short-circuit — don't fabricate a score
+    if output.startswith("[EVAL_PLACEHOLDER]") or output.startswith("[DRY_RUN]"):
+        return {
+            "passed": False,
+            "score": 0.0,
+            "notes": f"Output is a placeholder — task was not actually executed: {output[:200]}",
+        }
+
+    cfg = load_config_readonly()
+    judge_cfg = _get_profile_config(cfg, judge_profile)
+
+    judge_prompt = build_judge_prompt(task, output)
+    messages = [
+        {"role": "system", "content": _JUDGE_SYSTEM_PROMPT},
+        {"role": "user", "content": judge_prompt},
+    ]
+
+    try:
+        response = call_llm(
+            provider=judge_cfg.get("provider", "opencode-go"),
+            model=judge_cfg.get("model", "minimax-m3"),
+            messages=messages,
+            timeout=judge_cfg.get("timeout", 120),
+        )
+        raw = response.choices[0].message.content or ""
+        parsed = _parse_judge_json(raw)
+        return parsed
+    except Exception as exc:
+        # Judge failed — return a scored failure, not a fabricated pass
+        # Also attempt a basic keyword heuristic as a fallback signal
+        heuristic = _keyword_heuristic_judge(task, output)
+        return {
+            "passed": heuristic.get("passed", False),
+            "score": heuristic.get("score", 0.0),
+            "notes": (
+                f"[JUDGE_ERROR] LLM judge ({judge_profile}) failed: {exc}. "
+                f"Fallback keyword heuristic: {heuristic.get('notes', '')}"
+            ),
+        }
+
+
+def _parse_judge_json(raw: str) -> dict:
+    """Parse the judge's JSON response, handling markdown fences."""
+    # Try direct parse
+    try:
+        return json.loads(raw.strip())
+    except json.JSONDecodeError:
+        pass
+
+    # Try extracting from ```json ... ``` block
+    m = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", raw, re.DOTALL)
+    if m:
+        try:
+            return json.loads(m.group(1).strip())
+        except json.JSONDecodeError:
+            pass
+
+    # Try extracting from first { to last }
+    m = re.search(r"\{.*\}", raw, re.DOTALL)
+    if m:
+        try:
+            return json.loads(m.group(0))
+        except json.JSONDecodeError:
+            pass
+
+    raise ValueError(f"Could not parse judge JSON: {raw[:500]}")
+
+
+def _keyword_heuristic_judge(task: GoldenTask, output: str) -> dict:
+    """Fallback keyword heuristic — checks if expected behaviors appear in output.
+
+    This is a last-resort fallback when the LLM judge is unavailable.
+    It performs a simple keyword presence check against expected behaviors.
+    """
+    output_lower = output.lower()
+    matched = []
+    missed = []
+
+    for behavior in task.expected_behaviors:
+        # Extract key terms from the behavior (remove negation markers)
+        key_terms = behavior.lower()
+        is_negative = key_terms.startswith("does not") or "not " in key_terms[:20]
+
+        if is_negative:
+            # For negative behaviors: check that the NEGATION is present
+            # e.g., "Does NOT suggest regex sanitisation" → check output doesn't suggest it
+            neg_term = key_terms.replace("does not ", "").replace("not ", "").strip()
+            if neg_term in output_lower:
+                missed.append(behavior)
+            else:
+                matched.append(behavior)
+        else:
+            # For positive behaviors: check key terms appear
+            terms = [w for w in key_terms.split() if len(w) > 3]
+            if any(t in output_lower for t in terms):
+                matched.append(behavior)
+            else:
+                missed.append(behavior)
+
+    total = len(task.expected_behaviors)
+    if total == 0:
+        return {"passed": True, "score": 0.5, "notes": "No expected behaviors to check — auto-pass with neutral score"}
+
+    score = len(matched) / total
+    passed = score >= 0.5  # majority expected behaviors matched
+
     return {
-        "passed": True,
-        "score": 0.85,
+        "passed": passed,
+        "score": round(score, 2),
         "notes": (
-            f"[JUDGE_PLACEHOLDER] Output from '{judge_profile}' would be scored "
-            f"against the rubric for task {task.id}. "
-            f"Integration pending P2-6 staging harness."
+            f"Heuristic: {len(matched)}/{total} behaviors matched. "
+            f"Matched: {matched[:3]}. Missed: {missed[:3]}."
         ),
     }

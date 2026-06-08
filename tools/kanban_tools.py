@@ -1466,7 +1466,11 @@ import subprocess as _sp
 import json as _json
 
 def _handle_profile_edit(args: dict, **kw) -> str:
-    """Edit a profile file with git-backed version control."""
+    """Edit a profile file with git-backed version control.
+
+    Gated by blast-radius (P2-3) for autonomous edits: edit caps,
+    fleet-health tripwire, and canary validation.
+    """
     profile = args.get("profile")
     file = args.get("file")
     key_path = args.get("key_path") or ""
@@ -1475,6 +1479,28 @@ def _handle_profile_edit(args: dict, **kw) -> str:
 
     if not all([profile, file, new_value, reason]):
         return tool_error("profile, file, new_value, and reason are required")
+
+    # ── Blast-radius gate (P2-3) ──
+    try:
+        from hermes_cli.blast_radius import EditGuard
+        guard = EditGuard()
+        result = guard.try_edit(
+            profile=profile,
+            patch=f"{file}:{key_path}={new_value}",
+            patch_summary=reason,
+        )
+        if not result.allowed:
+            return tool_error(
+                f"Blast-radius guard blocked profile edit: {result.reason}. "
+                f"{'Deferred until ' + result.defer_until if result.defer_until else ''}"
+            )
+        # Apply to canary — records the edit for observation
+        if result.canary:
+            guard.apply_canary(result.canary)
+    except ImportError:
+        pass  # blast_radius module not available — skip guard
+    except Exception as exc:
+        return tool_error(f"Blast-radius guard error: {exc}")
 
     script = str(Path(os.environ.get(
         "HERMES_HOME", "/home/kensei/.hermes"

@@ -308,10 +308,47 @@ class TestRunEval:
         finally:
             os.unlink(path)
 
-    def test_live_run_returns_not_run_placeholder(self):
-        """Live eval returns placeholder until P2-6 staging harness is ready."""
+    def test_live_run_calls_real_llm_and_handles_failure(self):
+        """Live eval attempts real LLM call, gracefully handles unavailability."""
         tasks = [GoldenTask(id="t1", domain="code", description="task")]
+        # Without API keys in test env, _execute_golden_task raises → caught
         result = run_eval(tasks, profile="test", dry_run=False)
         assert result.task_count == 1
-        # Placeholder output from _execute_golden_task
-        assert "EVAL_PLACEHOLDER" in result.results[0].model_output
+        # Task should have failed gracefully with an error message
+        assert not result.results[0].passed
+        assert result.results[0].error is not None
+        assert result.results[0].score == 0.0
+
+    def test_keyword_heuristic_fallback(self):
+        """_keyword_heuristic_judge matches expected behaviors in output."""
+        from hermes_cli.eval_harness import _keyword_heuristic_judge
+        task = GoldenTask(
+            id="t1", domain="code", description="Find SQL injection",
+            expected_behaviors=[
+                "Identifies the SQL injection vulnerability",
+                "Suggests parameterised queries",
+                "Does NOT suggest regex-based sanitisation",
+            ],
+        )
+        good_output = (
+            "I found a SQL injection vulnerability on line 42. "
+            "I recommend using parameterised queries with prepared statements. "
+            "Do not use regex sanitisation — it's brittle."
+        )
+        result = _keyword_heuristic_judge(task, good_output)
+        assert result["passed"] is True
+        assert result["score"] >= 0.5
+
+        bad_output = "Use regex to sanitise the input: re.sub(r'[;\\'\\\"]', '', user_input)"
+        result = _keyword_heuristic_judge(task, bad_output)
+        # Should score low — regex sanitisation is the anti-pattern
+        assert result["score"] <= 0.5
+
+    def test_judge_output_short_circuits_placeholder(self):
+        """_judge_output returns failed/0.0 for placeholder input."""
+        from hermes_cli.eval_harness import _judge_output
+        task = GoldenTask(id="t1", domain="code", description="task")
+        result = _judge_output(task, "[EVAL_PLACEHOLDER] not executed", "test")
+        assert result["passed"] is False
+        assert result["score"] == 0.0
+        assert "placeholder" in result["notes"].lower()
