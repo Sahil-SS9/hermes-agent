@@ -1342,11 +1342,23 @@ def _cmd_create(args: argparse.Namespace) -> int:
         )
         return 2
     with kb.connect_closing() as conn:
+        # ── P2-9 Routing: auto-suggest assignee for triage tasks ──
+        assignee = args.assignee
+        if not assignee and getattr(args, "triage", False):
+            try:
+                from hermes_cli.routing import RoutingEngine
+                engine = RoutingEngine()
+                best = engine.route_best(args.title, args.body or "")
+                if best:
+                    assignee = best.specialist
+            except ImportError:
+                pass
+
         task_id = kb.create_task(
             conn,
             title=args.title,
             body=args.body,
-            assignee=args.assignee,
+            assignee=assignee,
             created_by=args.created_by or _profile_author(),
             workspace_kind=ws_kind,
             workspace_path=ws_path,
@@ -1365,6 +1377,22 @@ def _cmd_create(args: argparse.Namespace) -> int:
             theme=getattr(args, "theme", None),
         )
         task = kb.get_task(conn, task_id)
+        # ── P2-10 Feedback + P2-9 routing-feedback: record routing decision ──
+        if assignee:
+            try:
+                from hermes_cli.routing import RoutingEngine
+                from hermes_cli.feedback_loop import FeedbackLoop, classify_message
+                # Record routing decision for historical learning
+                re_engine = RoutingEngine()
+                re_engine.record_feedback(task_id, assignee, "accepted")
+                # Classify task content for initial signal
+                body_text = args.body or ""
+                signal = classify_message(body_text, linked_task_id=task_id)
+                if signal.signal_type.value != "unknown":
+                    loop = FeedbackLoop()
+                    loop.record(signal)
+            except ImportError:
+                pass
     if getattr(args, "json", False):
         print(json.dumps(_task_to_dict(task), indent=2, ensure_ascii=False))
     else:
