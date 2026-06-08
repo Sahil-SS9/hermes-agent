@@ -6968,13 +6968,28 @@ def _record_task_failure(
             # Below threshold.
             if release_claim:
                 # Spawn path: transition running → ready + clear claim.
-                conn.execute(
-                    "UPDATE tasks SET status = 'ready', claim_lock = NULL, "
-                    "claim_expires = NULL, worker_pid = NULL, "
-                    "consecutive_failures = ?, last_failure_error = ? "
-                    "WHERE id = ? AND status = 'running'",
-                    (failures, error[:500], task_id),
-                )
+                # For pipeline tasks, return to the pipeline stage so the
+                # next dispatcher tick re-checks the gate — the worker may
+                # have produced the artifact before timing out.
+                _pipeline_stage = _task_pipeline_stage(conn, task_id)
+                if _pipeline_stage:
+                    conn.execute(
+                        "UPDATE tasks SET status = ?, pipeline_stage = ?, "
+                        "claim_lock = NULL, claim_expires = NULL, "
+                        "worker_pid = NULL, "
+                        "consecutive_failures = ?, last_failure_error = ? "
+                        "WHERE id = ? AND status = 'running'",
+                        (_pipeline_stage, _pipeline_stage,
+                         failures, error[:500], task_id),
+                    )
+                else:
+                    conn.execute(
+                        "UPDATE tasks SET status = 'ready', claim_lock = NULL, "
+                        "claim_expires = NULL, worker_pid = NULL, "
+                        "consecutive_failures = ?, last_failure_error = ? "
+                        "WHERE id = ? AND status = 'running'",
+                        (failures, error[:500], task_id),
+                    )
             else:
                 # Timeout/crash path: task is already at ``ready`` via
                 # its own UPDATE. Just bookkeep the counter + last error.
@@ -6998,6 +7013,16 @@ def _record_task_failure(
                 )
             # Timeout/crash path's caller already emitted its own event.
     return blocked
+
+
+def _task_pipeline_stage(conn: sqlite3.Connection, task_id: str) -> Optional[str]:
+    """Return the pipeline_stage for a task, or None if not a pipeline task."""
+    row = conn.execute(
+        "SELECT pipeline_stage FROM tasks WHERE id = ?", (task_id,)
+    ).fetchone()
+    if row is None:
+        return None
+    return row["pipeline_stage"] or None
 
 
 # Backward-compat alias. Old name is referenced from tests and possibly
