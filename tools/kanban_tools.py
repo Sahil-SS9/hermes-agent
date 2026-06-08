@@ -1498,7 +1498,10 @@ def _handle_profile_edit(args: dict, **kw) -> str:
         if result.canary:
             guard.apply_canary(result.canary)
     except ImportError:
-        pass  # blast_radius module not available — skip guard
+        import logging
+        logging.getLogger("kanban_tools").warning(
+            "Blast-radius guard unavailable — profile edit proceeding unguarded"
+        )
     except Exception as exc:
         return tool_error(f"Blast-radius guard error: {exc}")
 

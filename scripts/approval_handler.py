@@ -149,6 +149,20 @@ def main():
         print(f"approved: {len(approved)}")
         for r, t in approved:
             print(f"  {r} → {t}")
+        # P2-10 Feedback: record approval signals
+        try:
+            from hermes_cli.feedback_loop import FeedbackLoop, classify_message
+            loop = FeedbackLoop()
+            for repo, _ in approved:
+                signal = classify_message(
+                    f"Approve {repo}",
+                    linked_task_id=None,
+                )
+                if signal.signal_type.value != "unknown":
+                    loop.record(signal)
+            print(f"  feedback: {len(approved)} signals recorded")
+        except ImportError:
+            pass
 
 if __name__ == "__main__":
     main()

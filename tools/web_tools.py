@@ -912,6 +912,12 @@ def web_search_tool(query: str, limit: int = 5) -> str:
         debug_call_data["final_response_size"] = len(result_json)
         _debug.log_call("web_search_tool", debug_call_data)
         _debug.save()
+        # P2-4 Content trust: fence external content at ingestion
+        try:
+            from hermes_cli.content_trust import UNTRUSTED_BEGIN, UNTRUSTED_END
+            result_json = f"{UNTRUSTED_BEGIN}\n{result_json}\n{UNTRUSTED_END}"
+        except ImportError:
+            pass
         return result_json
 
     except Exception as e:
@@ -1197,7 +1203,13 @@ async def web_extract_tool(
         # Log debug information
         _debug.log_call("web_extract_tool", debug_call_data)
         _debug.save()
-        
+
+        # P2-4 Content trust: fence external content at ingestion
+        try:
+            from hermes_cli.content_trust import UNTRUSTED_BEGIN, UNTRUSTED_END
+            cleaned_result = f"{UNTRUSTED_BEGIN}\n{cleaned_result}\n{UNTRUSTED_END}"
+        except ImportError:
+            pass
         return cleaned_result
             
     except Exception as e:

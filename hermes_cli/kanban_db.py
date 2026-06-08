@@ -7415,8 +7415,13 @@ def dispatch_once(
     ``board`` pins workspace/log/db resolution for this tick to a specific
     board. When omitted, the current-board resolution chain is used.
     """
-    # Reap zombie children from previously spawned workers. See
-    # reap_worker_zombies() for the full rationale.
+    # Guarantee schema is current before any query.  Idempotent — the
+    # per-tick cost is a single PRAGMA on an already-current DB.
+    # Prevents crashes when a cached connection predates an additive
+    # column migration (ztest-promote2-del, 2026-06-08).
+    _migrate_add_optional_columns(conn)
+
+    # Reap zombie children from previously spawned workers.
     reap_worker_zombies()
 
     result = DispatchResult()
@@ -7906,31 +7911,13 @@ def dispatch_once(
     # after a worker crash — making them permanently invisible to the
     # pipeline dispatch query below (which requires claim_lock IS NULL).
     clear_stale_pipeline_claims(conn)
-    # Self-healing schema guard: the pipeline query references columns
-    # (pipeline_stage, pipeline_mode) that may not exist on legacy boards
-    # whose cached connection predates the additive-column migration
-    # (ztest-promote2-del crash 2026-06-08). Catch any missing-column
-    # OperationalError, run the migration once, and retry instead of
-    # blowing up the entire dispatcher tick.
-    for _attempt in range(2):
-        try:
-            pipeline_rows = conn.execute(
-                f"SELECT id, assignee, skills, pipeline_stage, pipeline_mode "
-                f"FROM tasks WHERE status IN ({_placeholders}) "
-                f"AND claim_lock IS NULL "
-                f"ORDER BY priority DESC, created_at ASC",
-                _PIPELINE_STATUSES,
-            ).fetchall()
-            break
-        except sqlite3.OperationalError as exc:
-            if _attempt == 0 and "no such column" in str(exc).lower():
-                _log.warning(
-                    "dispatch_once: pipeline query failed with missing column — "
-                    "running additive migration then retrying (%s)", exc,
-                )
-                _migrate_add_optional_columns(conn)
-                continue
-            raise
+    pipeline_rows = conn.execute(
+        f"SELECT id, assignee, skills, pipeline_stage, pipeline_mode "
+        f"FROM tasks WHERE status IN ({_placeholders}) "
+        f"AND claim_lock IS NULL "
+        f"ORDER BY priority DESC, created_at ASC",
+        _PIPELINE_STATUSES,
+    ).fetchall()
     for row in pipeline_rows:
         # Gate checks, council launches, and human-gate handling are
         # near-zero-cost (file stat + regex).  Only the spawn-on-failure
