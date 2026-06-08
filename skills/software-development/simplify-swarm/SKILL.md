@@ -1,7 +1,7 @@
 ---
 name: simplify-swarm
 description: Use when code has been written or modified and needs multi-pass simplification. Dispatches 3 parallel sub-agents (Hygiene, Clarity, Correctness) then consolidates findings and applies in SAFE→CAREFUL→RISKY tier order.
-version: 1.0.0
+version: 1.1.0
 author: KENSEI (Sahil 1000x)
 license: MIT
 metadata:
@@ -101,7 +101,7 @@ Dispatch all three agents simultaneously using `delegate_task` with the `tasks` 
 delegate_task(
     tasks=[
         {
-            "goal": "Hygiene agent: Analyze code for dead code, AI slop, redundant abstractions, stale state, and utility discovery opportunities.",
+            "goal": "Hygiene agent: Analyze code for dead code, AI slop (any casts, redundant guards, comments that restate code), redundant abstractions (pass-through wrappers, single-use helpers), stale state (feature flags always true/false, unreachable branches), and utility discovery opportunities.",
             "context": """<file_list>{newline-separated file paths}</file_list>
 <git_diff>{git diff output for these files}</git_diff>
 <instructions>{Load from references/hygiene-agent.md}</instructions>""",
@@ -187,8 +187,8 @@ Apply all SAFE findings directly. These are changes proven not to affect behavio
 - Remove commented-out code blocks
 - Inline pass-through wrappers
 - Remove redundant type assertions
-- Delete stale feature flags
-- Remove AI slop comments (comments that restate obvious code)
+- Delete stale feature flags (check: is the flag always true or always false? If always false, flag the UNREACHABLE BRANCHES, not the import itself — the import IS used in the dead branches)
+- Remove AI slop comments (comments that restate WHAT the code does. KEEP comments that explain WHY — intent, workaround rationale, domain context. Check 2 lines of surrounding code: if the comment adds no information beyond the code itself, flag it for removal)
 
 ```bash
 # After applying all SAFE changes
