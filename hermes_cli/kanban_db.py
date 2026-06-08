@@ -3788,6 +3788,53 @@ def release_stale_claims(
     return reclaimed
 
 
+def clear_stale_pipeline_claims(conn: sqlite3.Connection) -> int:
+    """Clear stale claim locks on pipeline-stage tasks.
+
+    ``release_stale_claims`` only looks at ``status='running'``, but
+    pipeline tasks sit in stage statuses (research, prd, spec, etc.)
+    with ``claim_lock`` still set after a worker crash.  The pipeline
+    dispatch query at line ~7684 requires ``claim_lock IS NULL``, so
+    those tasks become permanently invisible to the dispatcher.
+
+    This function targets pipeline-stage tasks whose claim has expired
+    and clears the lock fields so they re-enter the gate-check loop.
+    """
+    try:
+        from hermes_cli.feature_pipeline import PIPELINE_STAGES
+    except ImportError:
+        return 0
+    _pipeline_statuses = tuple(PIPELINE_STAGES)
+    if not _pipeline_statuses:
+        return 0
+    now = int(time.time())
+    _placeholders = ",".join("?" * len(_pipeline_statuses))
+    rows = conn.execute(
+        f"SELECT id FROM tasks "
+        f"WHERE status IN ({_placeholders}) "
+        f"  AND claim_lock IS NOT NULL "
+        f"  AND claim_expires IS NOT NULL "
+        f"  AND claim_expires < ?",
+        (*_pipeline_statuses, now),
+    ).fetchall()
+    if not rows:
+        return 0
+    cleared = 0
+    with write_txn(conn):
+        for r in rows:
+            conn.execute(
+                "UPDATE tasks SET claim_lock = NULL, claim_expires = NULL, "
+                "worker_pid = NULL WHERE id = ?",
+                (r["id"],),
+            )
+            _append_event(
+                conn, r["id"], "claim_stale_cleared",
+                {"reason": "pipeline claim expired, clearing for gate re-entry"},
+            )
+            cleared += 1
+    return cleared
+
+
 def reclaim_task(
     conn: sqlite3.Connection,
     task_id: str,
@@ -7678,6 +7725,12 @@ def dispatch_once(
     # Build a placeholder list for the IN (...) clause; the dispatcher loops
     # over rows but filters in Python where the IN list is large.
     _placeholders = ",".join("?" * len(_PIPELINE_STATUSES))
+    # Clear stale claim locks on pipeline tasks so they re-enter the
+    # gate-check loop.  release_stale_claims only looks at status='running',
+    # but pipeline tasks sit in stage statuses with claim_lock still set
+    # after a worker crash — making them permanently invisible to the
+    # pipeline dispatch query below (which requires claim_lock IS NULL).
+    clear_stale_pipeline_claims(conn)
     pipeline_rows = conn.execute(
         f"SELECT id, assignee, skills, pipeline_stage, pipeline_mode "
         f"FROM tasks WHERE status IN ({_placeholders}) "
@@ -7918,33 +7971,28 @@ def dispatch_once(
                 result.skipped_unassigned.append(row["id"])
                 continue
             assignee = row["assignee"]
-            if not _is_profile_spawnable(assignee):
-                # Assignee is nonspawnable - try the configured stage owner.
-                # Prevents silent deadlock when a task is assigned to an
-                # orchestrator profile (e.g. 'kensei') that has no worker
-                # instance. Stage owners are in config.yaml's
-                # pipeline.stage_owners map (research: remii, spec: octacon).
-                _stage_owner = _get_stage_owner(stage)
-                if _stage_owner and _stage_owner != assignee:
-                    _log.info(
-                        "gate_failed: assignee '%s' is nonspawnable - "
-                        "falling back to stage owner '%s' for stage '%s' (%s)",
-                        assignee, _stage_owner, stage, row["id"],
+            _stage_owner = _get_stage_owner(stage)
+            # Always reassign to the configured stage owner for this stage
+            # when the current assignee doesn't match.  The old assignee from
+            # a previous stage may still be spawnable (e.g. kensei-review
+            # carried over from the prd stage) but is the wrong profile for
+            # the current stage's artifact (e.g. spec → octacon-frontend).
+            if _stage_owner and _stage_owner != assignee:
+                if not dry_run:
+                    conn.execute(
+                        "UPDATE tasks SET assignee = ? WHERE id = ?",
+                        (_stage_owner, row["id"]),
                     )
-                    if not dry_run:
-                        conn.execute(
-                            "UPDATE tasks SET assignee = ? WHERE id = ?",
-                            (_stage_owner, row["id"]),
-                        )
-                        _append_event(
-                            conn, row["id"], "assigned",
-                            {"assignee": _stage_owner,
-                             "reason": "nonspawnable assignee -> stage owner"},
-                        )
-                    assignee = _stage_owner
-                else:
-                    result.skipped_nonspawnable.append(row["id"])
-                    continue
+                    _append_event(
+                        conn, row["id"], "assigned",
+                        {"assignee": _stage_owner,
+                         "reason": f"stage owner ({_stage_owner}) for stage '{stage}'"},
+                    )
+                assignee = _stage_owner
+            if not _is_profile_spawnable(assignee):
+                # Stage owner is also nonspawnable — this is a config error.
+                result.skipped_nonspawnable.append(row["id"])
+                continue
             if dry_run:
                 result.spawned.append((row["id"], row["assignee"], ""))
                 continue
