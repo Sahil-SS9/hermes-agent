@@ -3453,6 +3453,172 @@ def claim_review_task(
         return get_task(conn, task_id)
 
 
+def claim_pipeline_task(
+    conn,
+    task_id,
+    *,
+    ttl_seconds=None,
+    claimer=None,
+):
+    """Atomically transition a pipeline-stage task to ``running``.
+
+    Pipeline tasks live in stage-specific statuses (``research``,
+    ``prd``, ``spec``, ``council``) rather than ``ready``.  A worker
+    spawned on a gate-failure needs to move the task to ``running``
+    so it can work on the artifact, then return it to its original
+    stage on completion.
+
+    Returns the claimed ``Task`` on success, ``None`` if the task was
+    already claimed or is not in a pipeline stage.
+
+    Stores the originating stage in the claim event payload so
+    ``complete_pipeline_task`` knows which status to restore.
+    """
+    import time
+    from hermes_cli.feature_pipeline import PIPELINE_STAGES
+    # All helpers are module-level in this file — no circular import.
+
+    now = int(time.time())
+    lock = claimer or _claimer_id()
+    expires = now + _resolve_claim_ttl_seconds(ttl_seconds)
+
+    _pipeline_statuses = tuple(PIPELINE_STAGES)
+
+    # Read the current pipeline stage BEFORE the CAS, so we can
+    # record it in the claim event.  The status column will be
+    # `running` after the CAS — we want the originating stage.
+    origin_row = conn.execute(
+        "SELECT status, pipeline_stage FROM tasks WHERE id = ?", (task_id,)
+    ).fetchone()
+    origin_stage = (
+        origin_row["pipeline_stage"] if origin_row else None
+    ) or (origin_row["status"] if origin_row else None)
+
+    with write_txn(conn):
+        cur = conn.execute(
+            f"""\
+            UPDATE tasks
+               SET status        = 'running',
+                   claim_lock    = ?,
+                   claim_expires = ?,
+                   started_at    = COALESCE(started_at, ?)
+             WHERE id = ?
+               AND status IN ({','.join('?' * len(_pipeline_statuses))})
+               AND claim_lock IS NULL
+            """,
+            (lock, expires, now, task_id, *_pipeline_statuses),
+        )
+        if cur.rowcount != 1:
+            return None
+
+        trow = conn.execute(
+            "SELECT assignee, max_runtime_seconds, current_step_key "
+            "FROM tasks WHERE id = ?",
+            (task_id,),
+        ).fetchone()
+        run_cur = conn.execute(
+            """\
+            INSERT INTO task_runs (
+                task_id, profile, step_key, status,
+                claim_lock, claim_expires, max_runtime_seconds,
+                started_at
+            ) VALUES (?, ?, ?, 'running', ?, ?, ?, ?)
+            """,
+            (
+                task_id,
+                trow["assignee"] if trow else None,
+                trow["current_step_key"] if trow else None,
+                lock,
+                expires,
+                trow["max_runtime_seconds"] if trow else None,
+                now,
+            ),
+        )
+        run_id = run_cur.lastrowid
+        conn.execute(
+            "UPDATE tasks SET current_run_id = ? WHERE id = ?",
+            (run_id, task_id),
+        )
+        _append_event(
+            conn, task_id, "claimed",
+            {"lock": lock, "expires": expires, "run_id": run_id,
+             "source_status": "pipeline",
+             "pipeline_stage": origin_stage},
+            run_id=run_id,
+        )
+        return get_task(conn, task_id)
+
+
+def complete_pipeline_task(
+    conn,
+    task_id,
+    *,
+    result=None,
+    summary=None,
+    metadata=None,
+):
+    """Return a pipeline-stage worker to its original stage.
+
+    After a pipeline worker finishes writing its artifact (e.g.
+    research-brief.md), the task MUST go back to its pipeline stage
+    — NOT ``done`` — so the gate re-checks on the next dispatcher
+    tick and advances naturally.
+
+    Reads the originating ``pipeline_stage`` from the most recent
+    ``claimed`` event whose ``source_status`` = ``"pipeline"``.
+    Falls back to the current ``tasks.pipeline_stage`` column.
+    """
+    import time
+
+    now = int(time.time())
+    row = conn.execute(
+        "SELECT id, pipeline_stage FROM tasks WHERE id = ? AND status = 'running'",
+        (task_id,),
+    ).fetchone()
+    if not row:
+        return False
+
+    # Recover the originating stage from the latest pipeline claim event.
+    origin = conn.execute(
+        """SELECT json_extract(payload, '$.pipeline_stage')
+             FROM task_events
+            WHERE task_id = ?
+              AND kind = 'claimed'
+              AND json_extract(payload, '$.source_status') = 'pipeline'
+            ORDER BY id DESC LIMIT 1""",
+        (task_id,),
+    ).fetchone()
+    origin_stage = origin[0] if origin else None
+
+    # Belt-and-braces: fall back to the column if the event is missing.
+    stage = origin_stage or row["pipeline_stage"]
+    if not stage:
+        stage = "research"
+
+    with write_txn(conn):
+        conn.execute(
+            """UPDATE tasks
+                 SET status        = ?,
+                     pipeline_stage = ?,
+                     claim_lock    = NULL,
+                     claim_expires = NULL,
+                     worker_pid    = NULL,
+                     result        = ?,
+                     completed_at  = ?
+               WHERE id = ?
+                 AND status = 'running'""",
+            (stage, stage, result, now, task_id),
+        )
+        _append_event(
+            conn, task_id, "completed",
+            {"result_len": len(result) if result else 0,
+             "summary": summary or None,
+             "source_status": "pipeline",
+             "returned_to_stage": stage,
+             "pipeline_stage": stage},
+        )
+    return True
+
 def heartbeat_claim(
     conn: sqlite3.Connection,
     task_id: str,
@@ -7782,7 +7948,7 @@ def dispatch_once(
             if dry_run:
                 result.spawned.append((row["id"], row["assignee"], ""))
                 continue
-            claimed = claim_task(conn, row["id"], ttl_seconds=ttl_seconds)
+            claimed = claim_pipeline_task(conn, row["id"], ttl_seconds=ttl_seconds)
             if claimed is None:
                 continue
             try:
