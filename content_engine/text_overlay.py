@@ -69,6 +69,32 @@ def _fit_headline(draw, text: str, max_w: int, start_px: int, min_px: int = 40):
     return font, textwrap.wrap(text, width=max(8, int(max_w / max(1, draw.textlength("AVERAGEglyph", font=font) / 12)))) or [text]
 
 
+def _spaced(text: str) -> str:
+    """Crude letter-spacing for the kicker (Pillow has no tracking)."""
+    return " ".join(text)
+
+
+def _draw_words(draw, line, x, y, font, base_fill, accent_fill, hl_words):
+    """Draw a line word by word, colouring highlighted words in the accent."""
+    space = draw.textlength(" ", font=font)
+    cx = x
+    for word in line.split():
+        clean = word.strip(".,!?;:'\"()").lower()
+        draw.text((cx, y), word, fill=(accent_fill if clean in hl_words else base_fill), font=font)
+        cx += draw.textlength(word, font=font) + space
+
+
+def _highlight_set(headline: str, highlight: str) -> set:
+    """Words to render in the accent colour. Explicit highlight wins; otherwise
+    accent the last 1-2 words so every headline gets colour differentiation."""
+    if highlight.strip():
+        return {w.strip(".,!?;:'\"()").lower() for w in highlight.split() if w.strip()}
+    words = [w.strip(".,!?;:'\"()").lower() for w in headline.split() if w.strip()]
+    if not words:
+        return set()
+    return set(words[-2:]) if len(words) >= 4 else {words[-1]}
+
+
 def compose(
     background_path: str,
     brand: str,
@@ -76,6 +102,8 @@ def compose(
     platform: str = "twitter",
     badge: Optional[str] = None,
     sub: str = "",
+    eyebrow: str = "",
+    highlight: str = "",
     out_path: Optional[str] = None,
 ) -> str:
     visuals = for_brand(brand)
@@ -83,32 +111,49 @@ def compose(
     w, h = SIZES.get(platform, (1200, 1200))
 
     img = _fit_cover(Image.open(background_path), w, h)
-    img = _bottom_scrim(img, colours["scrim"])
+    img = _bottom_scrim(img, colours["scrim"], frac=0.6, strength=0.94)
     draw = ImageDraw.Draw(img)
 
     margin = int(w * 0.06)
     max_w = w - 2 * margin
+    hl_words = _highlight_set(headline.strip(), highlight)
 
     # ── brand badge (top-left) ──
     badge_text = (badge or visuals.get("badge") or brand).upper()
     badge_font = _font("bold", max(20, int(h * 0.022)))
     draw.text((margin, margin), badge_text, fill=colours["badge"], font=badge_font)
 
-    # ── headline (bottom block) ──
+    # ── measure the bottom message block (kicker + headline + sub) ──
     head_font, lines = _fit_headline(draw, headline.strip(), max_w, start_px=int(h * 0.085))
-    line_h = int((head_font.getbbox("Ay")[3] - head_font.getbbox("Ay")[1]) * 1.18)
+    line_h = int((head_font.getbbox("Ay")[3] - head_font.getbbox("Ay")[1]) * 1.16)
 
-    sub_font = _font("medium", max(22, int(h * 0.026)))
-    sub_h = (line_h + int(h * 0.02)) if sub else 0
+    kicker = (eyebrow or "").strip().upper()
+    kick_font = _font("bold", max(20, int(h * 0.023)))
+    kick_h = int(h * 0.052) if kicker else 0
 
-    block_h = len(lines) * line_h + sub_h
+    sub_font = _font("medium", max(22, int(h * 0.027)))
+    sub_h = int(line_h * 0.9) if sub else 0
+
+    block_h = kick_h + len(lines) * line_h + sub_h
     y = h - margin - block_h
 
+    # ── kicker: accent bar + uppercase spaced label ──
+    if kicker:
+        bar_w, bar_h = int(w * 0.05), max(4, int(h * 0.006))
+        draw.rectangle([margin, y + int(h * 0.006), margin + bar_w, y + int(h * 0.006) + bar_h],
+                       fill=colours["badge"])
+        draw.text((margin + bar_w + int(w * 0.02), y), _spaced(kicker),
+                  fill=colours["badge"], font=kick_font)
+        y += kick_h
+
+    # ── headline with highlighted key word(s) ──
     for ln in lines:
-        draw.text((margin, y), ln, fill=colours["headline"], font=head_font)
+        _draw_words(draw, ln, margin, y, head_font, colours["headline"], colours["sub"], hl_words)
         y += line_h
+
+    # ── subhead ──
     if sub:
-        y += int(h * 0.012)
+        y += int(h * 0.010)
         draw.text((margin, y), sub.strip(), fill=colours["sub"], font=sub_font)
 
     out_dir = OUTPUT_ROOT / (brand or "misc") / (platform or "x")

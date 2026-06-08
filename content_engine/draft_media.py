@@ -47,9 +47,9 @@ def build_prompt(brand: str, body_text: str, visual_description: str = "") -> st
     )
 
 
-# Cheapest competent textless base. z-image (~£0.004/MP) is great for
-# photographic scenes; the brand treatment + Pillow headline do the rest.
-BASE_MODEL = os.getenv("CONTENT_BASE_MODEL", "z_image").strip()
+# Default illustrated base. krea-class beats z-image turbo decisively; the prompt
+# engine (Track A) supplies the art direction. Overridable via env.
+from model_config import BASE_MODEL  # noqa: E402
 
 
 def generate_draft_image(
@@ -134,42 +134,84 @@ def generate_post_image(
     platform = draft.get("platform") or "twitter"
     draft_id = draft.get("id") or uuid.uuid4().hex[:8]
 
-    prompt = scene_prompt or build_scene_prompt(
-        brand,
-        visual_brief=draft.get("visual_description", ""),
-        pillar=draft.get("pillar", ""),
-        body_text=draft.get("body_text", ""),
-    )
+    # Route: data/comparison/list posts become AI infographics (text rendered by
+    # the model, no overlay). Scene/hero posts stay illustrated. scene_prompt
+    # (legacy/repurpose) always takes the illustrated path.
+    if scene_prompt is None:
+        from content_router import is_infographic
 
-    # Budget gate: a paid hero model (e.g. gpt_image_2) only runs if the month's
-    # £10 cap allows it -- otherwise degrade silently to the cheap base model.
-    chosen = model
-    if chosen and chosen != BASE_MODEL:
-        import budget
-        from fal_client import MODEL_COST_GBP
+        if is_infographic(draft):
+            import infographic_ai
+            from infographic_content import build_ig_fields
 
-        cost = MODEL_COST_GBP.get(chosen, 0.04)
-        if cost > 0.01:
-            if budget.can_spend(cost):
-                budget.record(cost, label=f"{chosen}:{draft_id}")
-            else:
-                print(f"[draft_media] budget cap hit; {chosen} -> {BASE_MODEL}")
-                chosen = None  # fall back to cheap base
+            # Structure the flat draft text into layout-aware labels (left/right
+            # sides, do/don't, ordered points) so the infographic reads cleanly.
+            fields = build_ig_fields(draft)
+            content = {
+                "title": (draft.get("title") or draft.get("topic") or "").strip(),
+                "body": (draft.get("body_text") or "")[:300],
+                "labels": (draft.get("ig_labels") or fields["labels"]).strip(),
+            }
+            ig = infographic_ai.generate_infographic(
+                brand, content, draft_id=draft_id, platform=platform,
+                layout=draft.get("ig_layout") or fields["layout"],
+            )
+            if ig:
+                print(f"[draft_media] infographic image: {ig}")
+                return ig
+            print("[draft_media] infographic path failed; falling back to illustrated")
+
+    import budget
+    from fal_client import MODEL_COST_GBP
+    from model_config import HERO_COST_THRESHOLD_GBP, HERO_MODEL
+
+    # Track A art direction. An explicit scene_prompt (e.g. repurpose cron) wins;
+    # otherwise the prompt engine builds a rich per-post illustrated prompt from a
+    # single subject hook, replacing the old constant per-brand visual_descs.
+    if scene_prompt:
+        prompt, neg = scene_prompt, negative_prompt()
+        chosen = model or BASE_MODEL
+    else:
+        from prompt_engine import build_illustrated_prompt
+
+        subject = (draft.get("visual_description") or draft.get("title")
+                   or draft.get("topic") or (draft.get("body_text", "") or "")[:80]).strip()
+        prompt, neg, eng_model = build_illustrated_prompt(
+            brand, subject, draft_id=draft_id,
+            force_hero=bool(model and model == HERO_MODEL),
+        )
+        chosen = model or eng_model
+
+    # Budget gate: a hero model only runs if the month's cap allows it; otherwise
+    # degrade to the cheap base. All successful paid gens are recorded.
+    cost = MODEL_COST_GBP.get(chosen, 0.02)
+    if cost > HERO_COST_THRESHOLD_GBP and not budget.can_spend(cost):
+        print(f"[draft_media] budget cap hit; {chosen} -> {BASE_MODEL}")
+        chosen = BASE_MODEL
+        cost = MODEL_COST_GBP.get(chosen, 0.02)
 
     base = generate_draft_image(
         prompt, brand=brand, platform=platform, draft_id=draft_id,
-        model=chosen, negative_prompt=negative_prompt(),
+        model=chosen, negative_prompt=neg,
     )
     if not base or not os.path.exists(base):
         return None
+    if cost > 0:
+        budget.record(cost, label=f"{chosen}:{draft_id}")
 
     try:
         treated = postprocess.process_file(base, base.replace(".png", "_t.png"), brand)
         headline = _headline_from(draft)
         sub = draft.get("visual_sub", "") or ""
+        # Kicker gives the post a message anchor; highlight gives colour pop on
+        # the headline. Both optional; eyebrow falls back to the pillar label.
+        eyebrow = (draft.get("eyebrow") or (draft.get("pillar", "") or "").replace("_", " ")
+                   or draft.get("topic", "")).strip()
+        highlight = (draft.get("highlight") or "").strip()
         final = text_overlay.compose(
             treated, brand, headline, platform=platform,
             badge=for_brand(brand).get("badge"), sub=sub,
+            eyebrow=eyebrow, highlight=highlight,
         )
         print(f"[draft_media] branded image: {final}")
         return final

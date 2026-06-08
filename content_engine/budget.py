@@ -13,7 +13,7 @@ from pathlib import Path
 from threading import Lock
 
 _LEDGER = Path(__file__).resolve().parent / "output" / "spend_ledger.json"
-_CAP_GBP = 10.0
+_CAP_GBP = 5.0
 _lock = Lock()
 
 

@@ -25,6 +25,8 @@ IMAGE_MODELS = {
     "krea_large": "fal-ai/krea/v2/large/text-to-image",    # ~£0.03/img, max detail
     "flux_pro": "fal-ai/flux-2-pro",             # £0.024/img, quality
     "ideogram": "fal-ai/ideogram/v3",            # £0.024/img, typography
+    "seedream": "fal-ai/bytedance/seedream/v4/text-to-image",       # ~£0.024, strong text
+    "seedream45": "fal-ai/bytedance/seedream/v4.5/text-to-image",   # ~£0.032, best text/value
     "nano_banana": "fal-ai/nano-banana-pro",     # £0.12/img, text+reasoning
     "gpt_image_2": "fal-ai/gpt-image-2",         # ~£0.04/img, SOTA text/layout (hero fallback)
 }
@@ -34,6 +36,7 @@ MODEL_COST_GBP = {
     "z_image": 0.004, "flux_klein": 0.004, "krea_medium": 0.016,
     "krea_large": 0.024, "flux_pro": 0.024, "ideogram": 0.024,
     "gpt_image_2": 0.04, "nano_banana": 0.12,
+    "seedream": 0.024, "seedream45": 0.032,
 }
 
 VIDEO_MODELS = {
@@ -73,97 +76,108 @@ def _poll_queue_result(model_id: str, request_id: str, timeout: int = 120) -> Op
     return None
 
 
+_ASPECT_MAP = {"square": "square_hd", "landscape": "landscape_16_9", "portrait": "portrait_16_9"}
+
+
+def _images_from(result: dict) -> list:
+    images = result.get("images", [])
+    if not images and "output" in result:
+        images = result["output"].get("images", [])
+    if not images and "image" in result:
+        images = [result["image"]]
+    return images
+
+
+def _download(url: str, out_dir: str, model: str, filename: Optional[str]) -> Optional[str]:
+    img_r = requests.get(url, timeout=90)
+    if img_r.status_code != 200:
+        print(f"FAL image download failed: {img_r.status_code}")
+        return None
+    out_path = Path(out_dir) / "fal_images"
+    out_path.mkdir(parents=True, exist_ok=True)
+    fpath = out_path / (filename or f"{model}_{str(uuid.uuid4())[:8]}.png")
+    fpath.write_bytes(img_r.content)
+    print(f"FAL image saved: {fpath} ({len(img_r.content)} bytes)")
+    return str(fpath)
+
+
 def generate_image(
     prompt: str,
-    model: str = "flux_klein",
+    model: str = "krea_medium",
     aspect: str = "square",
     output_dir: str = "/home/kensei/repos/KenseiAgent/content_engine/output",
     filename: Optional[str] = None,
     negative_prompt: str = "",
+    attempts: int = 3,
 ) -> Optional[str]:
-    """Generate image via fal.ai. Returns file path or None."""
+    """Generate an image via fal.ai with retries and queue-first for slow models.
+
+    Slow models (nano-banana, krea-large, flux-pro) always use the async queue,
+    which is the only reliable path from this box; fast models try sync then fall
+    back to the queue. Network timeouts are retried with backoff rather than
+    silently failing.
+    """
     if not FAL_KEY or requests is None:
         print("FAL_KEY not set or requests unavailable. Skipping image generation.")
         return None
 
-    model_id = IMAGE_MODELS.get(model, IMAGE_MODELS["flux_klein"])
+    try:
+        from model_config import SLOW_MODELS
+    except Exception:
+        SLOW_MODELS = {"nano_banana", "krea_large", "flux_pro", "ideogram"}
 
-    # Aspect mapping per fal.ai spec
-    aspect_map = {
-        "square": "square_hd",
-        "landscape": "landscape_16_9",
-        "portrait": "portrait_16_9",
-    }
-    image_size = aspect_map.get(aspect, "square_hd")
-
-    # Try sync endpoint first (for fast models)
-    sync_url = f"https://fal.run/{model_id}"
-    payload = {
-        "prompt": prompt,
-        "image_size": image_size,
-        "num_images": 1,
-        "enable_safety_checker": False,
-    }
-    if negative_prompt:
+    model_id = IMAGE_MODELS.get(model, IMAGE_MODELS["krea_medium"])
+    payload = {"prompt": prompt, "image_size": _ASPECT_MAP.get(aspect, "square_hd"), "num_images": 1}
+    # negative_prompt only helps diffusion models; reasoning models reject/ignore it.
+    if negative_prompt and model not in ("nano_banana",):
         payload["negative_prompt"] = negative_prompt
 
-    try:
-        r = requests.post(sync_url, json=payload, headers=_headers(), timeout=60)
-        if r.status_code == 200:
-            result = r.json()
-        elif r.status_code in (202, 429):
-            # Rate limited or queued — fall back to async
-            print("FAL sync queued, switching to async poll...")
-            queue_url = f"https://queue.fal.run/{model_id}"
-            qr = requests.post(queue_url, json=payload, headers=_headers(), timeout=30)
+    # The sync endpoint is the reliable path from this box; the async queue is
+    # flaky/slow here, so it is only a fallback. Slow models just get a longer
+    # sync timeout rather than being forced onto the queue.
+    sync_timeout = 220 if model in SLOW_MODELS else 100
+
+    for attempt in range(1, attempts + 1):
+        try:
+            r = requests.post(f"https://fal.run/{model_id}", json=payload,
+                              headers=_headers(), timeout=sync_timeout)
+            if r.status_code == 200:
+                imgs = _images_from(r.json())
+                if imgs:
+                    url = imgs[0].get("url") if isinstance(imgs[0], dict) else imgs[0]
+                    return _download(url, output_dir, model, filename) if url else None
+                print(f"FAL sync: no images (keys {list(r.json().keys())[:8]})")
+                return None
+            if r.status_code not in (202, 429):
+                print(f"FAL sync failed: {r.status_code} {r.text[:160]}")
+            # 202/429/other -> queue fallback below
+
+            qr = requests.post(f"https://queue.fal.run/{model_id}", json=payload,
+                              headers=_headers(), timeout=30)
             if qr.status_code != 200:
-                print(f"FAL queue submit failed: {qr.status_code}")
-                return None
-            qdata = qr.json()
-            request_id = qdata.get("request_id")
-            if not request_id:
-                print("FAL queue: no request_id")
-                return None
-            result = _poll_queue_result(model_id, request_id, timeout=120)
+                print(f"FAL queue submit failed: {qr.status_code} {qr.text[:120]}")
+                raise RuntimeError("queue submit non-200")
+            rid = qr.json().get("request_id")
+            if not rid:
+                raise RuntimeError("no request_id")
+            result = _poll_queue_result(model_id, rid, timeout=240)
             if not result:
+                raise RuntimeError("poll returned nothing")
+            imgs = _images_from(result)
+            if not imgs:
+                print(f"FAL queue: no images (keys {list(result.keys())[:8]})")
                 return None
-        else:
-            print(f"FAL image failed: {r.status_code} {r.text[:200]}")
-            return None
+            url = imgs[0].get("url") if isinstance(imgs[0], dict) else imgs[0]
+            return _download(url, output_dir, model, filename) if url else None
 
-        # Extract image URL from response
-        images = result.get("images", [])
-        if not images and "output" in result:
-            images = result["output"].get("images", [])
-        if not images and "image" in result:
-            images = [result["image"]]
+        except Exception as e:  # noqa: BLE001 (retry transient failures)
+            wait = 2 ** attempt
+            print(f"FAL {model} attempt {attempt}/{attempts} error: {e}; retry in {wait}s")
+            if attempt < attempts:
+                time.sleep(wait)
 
-        if not images:
-            print(f"FAL image: no images in response. Keys: {list(result.keys())[:10]}")
-            return None
-
-        image_url = images[0].get("url") if isinstance(images[0], dict) else images[0]
-        if not image_url:
-            print("FAL image: no URL in first image")
-            return None
-
-        # Download
-        img_r = requests.get(image_url, timeout=60)
-        if img_r.status_code != 200:
-            print(f"FAL image download failed: {img_r.status_code}")
-            return None
-
-        out_path = Path(output_dir) / "fal_images"
-        out_path.mkdir(parents=True, exist_ok=True)
-        fname = filename or f"{model}_{str(uuid.uuid4())[:8]}.png"
-        fpath = out_path / fname
-        fpath.write_bytes(img_r.content)
-        print(f"FAL image saved: {fpath} ({len(img_r.content)} bytes)")
-        return str(fpath)
-
-    except Exception as e:
-        print(f"FAL image generation error: {e}")
-        return None
+    print(f"FAL {model}: all {attempts} attempts failed")
+    return None
 
 
 def generate_video(
