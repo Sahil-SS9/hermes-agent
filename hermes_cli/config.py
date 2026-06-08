@@ -2131,19 +2131,48 @@ DEFAULT_CONFIG = {
         # models; adjust to taste in config.yaml.
         "panel": [
             {"provider": "opencode-go",  "model": "minimax-m3",
-             "fallback": [{"provider": "ollama-cloud", "model": "kimi-k2.6"}]},
-            {"provider": "opencode-go",  "model": "mimo-2.5-pro",
-             "fallback": [{"provider": "ollama-cloud", "model": "kimi-k2.6"}]},
-            {"provider": "ollama-cloud", "model": "kimi-k2.6",
-             "fallback": [{"provider": "opencode-go", "model": "minimax-m3"}]},
+             "fallback": [
+                 {"provider": "custom:CommandCode", "model": "minimax-m3"},
+             ]},
+            {"provider": "opencode-go",  "model": "mimo-v2.5-pro",
+             "fallback": [
+                 {"provider": "custom:CommandCode", "model": "mimo-v2.5-pro"},
+                 {"provider": "opencode-go", "model": "qwen3.6-plus"},
+             ]},
+            {"provider": "ollama-cloud", "model": "glm-5.1",
+             "fallback": [
+                 {"provider": "opencode-go", "model": "deepseek-v4-flash"},
+             ]},
         ],
         # Chairman model: reads all critiques + rankings and emits the
-        # final APPROVED or REVISE verdict. No fallback — if the chairman
-        # fails, the council fails and the operator is notified.
+        # final APPROVED or REVISE verdict. Falls back through the shared
+        # pool if the primary is unavailable.
         "chairman": {
-            "provider": "ollama-cloud",
+            "provider": "custom:CommandCode",
             "model": "deepseek-v4-pro",
+            "fallback": [
+                {"provider": "opencode-go", "model": "deepseek-v4-pro"},
+                {"provider": "custom:CommandCode", "model": "qwen3.7-plus"},
+            ],
         },
+        # Shared fallback pool — tried in order after each member's own
+        # fallbacks. Models already in use by another active member are
+        # skipped. Provider diversity: OpenCode-Go, CommandCode, OpenCode-Zen, Ollama-Cloud.
+        "fallback_pool": [
+            {"provider": "opencode-go",    "model": "deepseek-v4-pro"},
+            {"provider": "opencode-go",    "model": "qwen3.7-plus"},
+            {"provider": "opencode-go",    "model": "qwen3.6-plus"},
+            {"provider": "custom:CommandCode",    "model": "deepseek-v4-pro"},
+            {"provider": "custom:CommandCode",    "model": "minimax-m3"},
+            {"provider": "custom:CommandCode",    "model": "mimo-v2.5-pro"},
+            {"provider": "custom:CommandCode",    "model": "qwen3.7-plus"},
+            {"provider": "custom:CommandCode",    "model": "qwen3.6-plus"},
+            {"provider": "ollama-cloud",   "model": "deepseek-v4-flash"},
+            {"provider": "ollama-cloud",   "model": "glm-5.1"},
+            {"provider": "opencode-zen",   "model": "deepseek-v4-flash-free"},
+            {"provider": "opencode-zen",   "model": "mimo-v2.5-free"},
+            {"provider": "opencode-zen",   "model": "minimax-m3-free"},
+        ],
         # Per-council token cap (backstop for cost governance).
         # Limits total tokens consumed across all three phases.
         # None = no cap (uses provider-level limits).

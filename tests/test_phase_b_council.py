@@ -160,7 +160,7 @@ class TestCouncilService:
         })
         mock_call.return_value = (phase1_json, 500)
 
-        critiques, tokens = _run_phase_1(panel, "PRD content", "Spec content", 180, None)
+        critiques, tokens, _ = _run_phase_1(panel, "PRD content", "Spec content", 180, None)
         assert len(critiques) == 2
         assert all(c.verdict == "APPROVED" for c in critiques)
         assert tokens == 1000
@@ -191,7 +191,7 @@ class TestCouncilService:
         })
         mock_call.side_effect = [(approve, 300), (revise, 400)]
 
-        critiques, tokens = _run_phase_1(panel, "PRD", "Spec", 180, None)
+        critiques, tokens, _ = _run_phase_1(panel, "PRD", "Spec", 180, None)
         assert len(critiques) == 2
         verdicts = {c.verdict for c in critiques}
         assert "APPROVED" in verdicts

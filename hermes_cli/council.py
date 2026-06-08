@@ -61,6 +61,9 @@ class CouncilConfig:
     token_cap: Optional[int]
     timeout_seconds: int
     member_timeout_seconds: int
+    fallback_pool: List[Dict[str, str]] = field(default_factory=list)
+    """Shared fallback pool — entries tried after per-member fallbacks.
+    Models already in use by other active members are skipped."""
 
     @classmethod
     def from_config(cls, cfg: dict) -> "CouncilConfig":
@@ -70,7 +73,70 @@ class CouncilConfig:
             token_cap=cfg.get("token_cap"),
             timeout_seconds=cfg.get("timeout_seconds", 600),
             member_timeout_seconds=cfg.get("member_timeout_seconds", 180),
+            fallback_pool=cfg.get("fallback_pool", []),
         )
+
+    def validate_diversity(self) -> List[str]:
+        """Check for duplicate models across the panel + chairman.
+
+        Returns a list of human-readable warnings. Empty list = clean.
+        """
+        warnings = []
+        # Collect all primary + per-member fallback model names
+        seen_models: Dict[str, List[str]] = {}  # model → [owner label]
+
+        for i, member in enumerate(self.panel):
+            label = f"Member {i + 1}"
+            for entry in [{"model": member.model, "label": f"{label} primary"}] + [
+                {"model": fb["model"], "label": f"{label} fallback"}
+                for fb in (member.fallback or [])
+            ]:
+                model = entry["model"]
+                if model not in seen_models:
+                    seen_models[model] = []
+                seen_models[model].append(entry["label"])
+
+        # Check chairman
+        chair_label = "Chairman"
+        for entry in [{"model": self.chairman.model, "label": f"{chair_label} primary"}] + [
+            {"model": fb["model"], "label": f"{chair_label} fallback"}
+            for fb in (self.chairman.fallback or [])
+        ]:
+            model = entry["model"]
+            if model not in seen_models:
+                seen_models[model] = []
+            seen_models[model].append(entry["label"])
+
+        # Check pool entries (listed once, no owner label duplication concern)
+        for fb in (self.fallback_pool or []):
+            model = fb.get("model", "")
+            if model and model not in seen_models:
+                seen_models[model] = []
+            # Pool entries are shared — only flag if they duplicate a primary
+
+        # Generate warnings for duplicates across different owners
+        for model, owners in seen_models.items():
+            unique_owners = set(o.split(" ")[0] for o in owners)  # "Member 1 primary" → "Member"
+            if len(unique_owners) > 1:
+                warnings.append(
+                    f"Model '{model}' appears in multiple roles: {', '.join(owners)}. "
+                    f"Consider diversifying fallback models so no single model-family "
+                    f"dominates the panel."
+                )
+
+        # Check for same-provider concentration
+        providers: Dict[str, int] = {}
+        for member in self.panel:
+            providers[member.provider] = providers.get(member.provider, 0) + 1
+        providers[self.chairman.provider] = providers.get(self.chairman.provider, 0) + 1
+        for prov, count in providers.items():
+            if count >= 3:
+                warnings.append(
+                    f"Provider '{prov}' used by {count} of {len(self.panel) + 1} roles. "
+                    f"A single-provider outage could drop the entire council."
+                )
+
+        return warnings
 
 
 @dataclass
@@ -248,14 +314,28 @@ def _call_llm_with_fallback(
     timeout: int,
     token_cap: Optional[int],
     current_total_tokens: int,
+    active_models: Optional[set] = None,
+    fallback_pool: Optional[List[Dict[str, str]]] = None,
 ) -> Tuple[str, int]:
     """Call a council member's LLM, trying fallback chain on transient errors.
+
+    Resolution order:
+    1. Primary (member.provider / member.model)
+    2. Per-member fallbacks (member.fallback, in order)
+    3. Shared fallback_pool (council-wide, in order)
+
+    At each step, if ``active_models`` is provided, entries whose model
+    name is already in the active set are skipped to prevent duplicate
+    models across the panel. The resolved model is added to
+    ``active_models`` so subsequent members exclude it.
 
     Returns (response_text, tokens_used).
 
     Raises RuntimeError if all providers in the chain fail.
     """
     from agent.auxiliary_client import call_llm
+
+    active = active_models.copy() if active_models else set()
 
     # Pre-check the cap so an oversized call cannot blow the backstop by a
     # whole call's worth of tokens before the post-call guard fires.
@@ -265,12 +345,25 @@ def _call_llm_with_fallback(
             f"({current_total_tokens:,}) — refusing further calls"
         )
 
+    # Build the ordered chain: primary → per-member fallbacks → shared pool
     providers_to_try: List[Dict[str, str]] = [
         {"provider": member.provider, "model": member.model}
-    ] + member.fallback
+    ]
+    providers_to_try.extend(member.fallback or [])
+    if fallback_pool:
+        providers_to_try.extend(fallback_pool)
 
     last_error: Optional[str] = None
     for attempt in providers_to_try:
+        model_name = attempt["model"]
+        # Skip if this model is already in use by another active member
+        if model_name in active:
+            logger.debug(
+                "Council: skipping %s/%s — model already in use by another member",
+                attempt["provider"], model_name,
+            )
+            continue
+
         try:
             response = call_llm(
                 provider=attempt["provider"],
@@ -281,6 +374,10 @@ def _call_llm_with_fallback(
             content = response.choices[0].message.content or ""
             usage = response.usage
             tokens_used = usage.total_tokens if usage else 0
+            # Mark this model as in-use for dedup
+            active.add(model_name)
+            if active_models is not None:
+                active_models.add(model_name)
             return content, tokens_used
         except Exception as exc:
             last_error = str(exc)
@@ -374,12 +471,14 @@ def _run_phase_1(
     spec_content: str,
     member_timeout: int,
     token_cap: Optional[int],
-) -> Tuple[List[CouncilCritique], int]:
+    fallback_pool: Optional[List[Dict[str, str]]] = None,
+) -> Tuple[List[CouncilCritique], int, set]:
     """Phase 1: Independent review (parallel).
 
     Each panel model reviews PRD+Spec alone and returns a structured critique.
 
-    Returns (critiques, total_tokens).
+    Returns (critiques, total_tokens, active_models).  active_models tracks
+    which models were resolved so subsequent phases can continue dedup.
     """
     user_prompt = (
         _DATA_PREAMBLE
@@ -396,6 +495,7 @@ def _run_phase_1(
 
     critiques: List[CouncilCritique] = []
     total_tokens = 0
+    active_models: set = set()
 
     with ThreadPoolExecutor(max_workers=len(panel)) as executor:
         future_to_member = {}
@@ -404,6 +504,7 @@ def _run_phase_1(
             future = executor.submit(
                 _call_llm_with_fallback,
                 member, messages, member_timeout, token_cap, total_tokens,
+                active_models, fallback_pool,
             )
             future_to_member[future] = (member, label)
 
@@ -451,7 +552,7 @@ def _run_phase_1(
                     raw_response=error_msg,
                 ))
 
-    return critiques, total_tokens
+    return critiques, total_tokens, active_models
 
 
 def _run_phase_2(
@@ -460,6 +561,8 @@ def _run_phase_2(
     member_timeout: int,
     token_cap: Optional[int],
     current_tokens: int,
+    active_models: Optional[set] = None,
+    fallback_pool: Optional[List[Dict[str, str]]] = None,
 ) -> Tuple[str, int]:
     """Phase 2: Cross-ranking (anonymised).
 
@@ -497,6 +600,7 @@ Review each one and rank them.
             future = executor.submit(
                 _call_llm_with_fallback,
                 member, messages, member_timeout, token_cap, total_tokens,
+                active_models, fallback_pool,
             )
             future_to_member[future] = (member, anon)
 
@@ -525,6 +629,8 @@ def _run_phase_3(
     member_timeout: int,
     token_cap: Optional[int],
     current_tokens: int,
+    active_models: Optional[set] = None,
+    fallback_pool: Optional[List[Dict[str, str]]] = None,
 ) -> Tuple[Dict, int]:
     """Phase 3: Chairman synthesis.
 
@@ -554,6 +660,7 @@ def _run_phase_3(
     try:
         raw, tokens = _call_llm_with_fallback(
             chairman, messages, member_timeout, token_cap, current_tokens,
+            active_models, fallback_pool,
         )
         parsed = _parse_json_response(raw, "Chairman")
         logger.info("Council chairman verdict: %s (tokens: %d)",
@@ -631,13 +738,16 @@ def deliberate(task_id: str, artifact_dir: str) -> CouncilVerdict:
     if remaining <= 0:
         raise TimeoutError(f"Council timed out before Phase 1 could start ({total_timeout}s)")
 
-    critiques, tokens_used = _run_phase_1(
+    fallback_pool = council_cfg.fallback_pool or None
+
+    critiques, tokens_used, active_models = _run_phase_1(
         council_cfg.panel, prd_content, spec_content,
         member_timeout=min(member_timeout, int(remaining)),
         token_cap=token_cap,
+        fallback_pool=fallback_pool,
     )
-    logger.info("Council Phase 1 complete: %d critiques, %d tokens",
-                len(critiques), tokens_used)
+    logger.info("Council Phase 1 complete: %d critiques, %d tokens — active models: %s",
+                len(critiques), tokens_used, active_models)
 
     # Phase 2 — Cross-ranking (parallel on all members)
     elapsed = time.monotonic() - start_time
@@ -647,6 +757,8 @@ def deliberate(task_id: str, artifact_dir: str) -> CouncilVerdict:
         member_timeout=min(member_timeout, int(remaining)),
         token_cap=token_cap,
         current_tokens=tokens_used,
+        active_models=active_models,
+        fallback_pool=fallback_pool,
     )
     tokens_used += phase2_tokens
     logger.info("Council Phase 2 complete: +%d tokens (total: %d)",
@@ -666,6 +778,8 @@ def deliberate(task_id: str, artifact_dir: str) -> CouncilVerdict:
         member_timeout=min(member_timeout, int(max(remaining, 30))),
         token_cap=token_cap,
         current_tokens=tokens_used,
+        active_models=active_models,
+        fallback_pool=fallback_pool,
     )
     tokens_used += phase3_tokens
 
