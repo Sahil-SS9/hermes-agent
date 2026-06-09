@@ -371,3 +371,74 @@ class TestRegister:
             "prompt-analytics",
             "prompt-stats",
         ])
+
+
+# ---------------------------------------------------------------------------
+# Group 6 — skill invocation skip + hard rewrite timeout
+# ---------------------------------------------------------------------------
+
+
+SKILL_PROMPT = (
+    '[IMPORTANT: The user has invoked the "simplify-swarm" skill, '
+    "indicating they want you to simplify the current diff.]"
+)
+
+
+class TestSkillInvocationSkip:
+    def test_pre_user_message_skips_skill_invocations(self, plugin, monkeypatch):
+        monkeypatch.setattr(
+            plugin, "_run_optimizer_bridge",
+            lambda *a, **k: pytest.fail("optimizer must not run for skill invocations"))
+        assert plugin._on_pre_user_message(message=SKILL_PROMPT, session_id="s1") is None
+
+    def test_pre_gateway_dispatch_skips_skill_invocations(self, plugin, monkeypatch):
+        monkeypatch.setattr(
+            plugin, "_run_optimizer_bridge",
+            lambda *a, **k: pytest.fail("optimizer must not run for skill invocations"))
+        event = SimpleNamespace(text=SKILL_PROMPT)
+        assert plugin._on_pre_gateway_dispatch(event=event) is None
+
+    def test_get_tui_preview_bypasses_skill_invocations(self, plugin, monkeypatch):
+        monkeypatch.setattr(
+            plugin, "_run_optimizer_bridge",
+            lambda *a, **k: pytest.fail("optimizer must not run for skill invocations"))
+        out = plugin.get_tui_preview("sess", SKILL_PROMPT)
+        assert out == {"status": "bypass", "reason": "skill_invocation"}
+
+    def test_ordinary_prompts_still_optimised(self, plugin, monkeypatch):
+        record = _fake_record(plugin)
+        monkeypatch.setattr(plugin, "_run_optimizer_bridge", lambda *a, **k: record)
+        out = plugin._on_pre_user_message(message="raw prompt", session_id="s1")
+        assert out == {"action": "rewrite", "text": record.rewritten}
+
+
+class TestRewriteWallClockTimeout:
+    def test_hung_llm_call_fails_open(self, plugin, monkeypatch):
+        """A provider call that ignores its timeout must not block the turn."""
+        engine = sys.modules["hermes_plugins.prompt_optimizer.engine"]
+        monkeypatch.setattr(engine, "OPTIMIZER_TIMEOUT_S", 0.2)
+
+        class HungLLM:
+            def complete(self, **kw):
+                time.sleep(5)
+                return SimpleNamespace(text="should never be used")
+
+        start = time.monotonic()
+        result = engine._try_rewrite_sync("some prompt", HungLLM())
+        elapsed = time.monotonic() - start
+        assert result is None
+        assert elapsed < 2, f"wall-clock cap not enforced ({elapsed:.1f}s)"
+
+    def test_fast_llm_call_still_works(self, plugin):
+        engine = sys.modules["hermes_plugins.prompt_optimizer.engine"]
+
+        class FastLLM:
+            def complete(self, **kw):
+                return SimpleNamespace(text=(
+                    "better prompt\n---SCORES---\n"
+                    '{"clarity": 80, "specificity": 80, "terminology": 80, '
+                    '"actionability": 80, "structure": 80}'
+                ))
+
+        result = engine._try_rewrite_sync("some prompt", FastLLM())
+        assert result == ("better prompt", 80.0)
