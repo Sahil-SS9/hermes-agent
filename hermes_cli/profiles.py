@@ -452,7 +452,14 @@ def find_alias_for_profile(profile_name: str) -> Optional[str]:
             continue
         if not is_windows and entry.suffix:
             continue
+        # Our wrapper scripts are tiny shebang files. The wrapper dir also holds
+        # large tool binaries (uv, bun, node) with no suffix; reading those as
+        # text costs ~100-200ms each and, across every profile, made list_profiles
+        # take 30s+ and trip the dashboard proxy timeout. Skip anything too big to
+        # be one of our wrappers before touching its contents.
         try:
+            if entry.stat().st_size > 8192:
+                continue
             content = entry.read_text()
         except (OSError, UnicodeDecodeError):
             continue

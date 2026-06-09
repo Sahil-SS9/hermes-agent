@@ -7382,8 +7382,13 @@ def _write_profile_model(profile_dir: Path, provider: str, model: str) -> None:
 @app.get("/api/profiles")
 async def list_profiles_endpoint():
     from hermes_cli import profiles as profiles_mod
+    # list_profiles does blocking filesystem work (yaml parsing, wrapper scans,
+    # stat calls per profile). Run it off the event loop so it never serialises
+    # other concurrent requests on this single-loop dashboard.
+    loop = asyncio.get_running_loop()
     try:
-        return {"profiles": [_profile_to_dict(p) for p in profiles_mod.list_profiles()]}
+        infos = await loop.run_in_executor(None, profiles_mod.list_profiles)
+        return {"profiles": [_profile_to_dict(p) for p in infos]}
     except Exception:
         _log.exception("GET /api/profiles failed; falling back to profile directory scan")
         return {"profiles": _fallback_profile_dicts(profiles_mod)}
