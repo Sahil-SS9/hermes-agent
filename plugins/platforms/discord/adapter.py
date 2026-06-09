@@ -198,18 +198,22 @@ class VoiceReceiver:
         self._ssrc_to_user: Dict[int, int] = {}
         self._lock = threading.Lock()
 
-        # Per-user audio buffers
-        self._buffers: Dict[int, bytearray] = defaultdict(bytearray)
-        self._last_packet_time: Dict[int, float] = {}
-
         # Opus decoder per SSRC (each user needs own decoder state)
         self._decoders: Dict[int, object] = {}
 
         # Pause flag: don't capture while bot is playing TTS
         self._paused = False
 
-        # Debug logging counter (instance-level to avoid cross-instance races)
-        self._packet_debug_count = 0
+        # Per-user audio buffers
+        self._buffers: Dict[int, bytearray] = defaultdict(bytearray)
+        self._last_packet_time: Dict[int, float] = {}
+        self._last_speech_time: Dict[int, float] = {}  # VAD-verified speech timestamp
+
+        # VAD (Silero) — per-SSRC so simultaneous speakers don't mix state
+        self._vad_enabled: bool = True
+        self._vad: Dict[int, Any] = {}             # SSRC -> SileroVAD instance
+        self._vad_buf: Dict[int, bytearray] = defaultdict(bytearray)  # 16kHz mono int16 accumulator
+        self._vad_speech_end_timeout: float = 0.25  # seconds of VAD grace after speech stops
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -237,8 +241,11 @@ class VoiceReceiver:
         with self._lock:
             self._buffers.clear()
             self._last_packet_time.clear()
+            self._last_speech_time.clear()
             self._decoders.clear()
             self._ssrc_to_user.clear()
+            self._vad.clear()
+            self._vad_buf.clear()
         logger.info("VoiceReceiver stopped")
 
     def pause(self):
@@ -414,14 +421,11 @@ class VoiceReceiver:
             # Opus decode directly — audio may be in passthrough mode.
             # Buffer will get a user_id when SPEAKING event arrives later.
 
-        # --- Opus decode -> PCM ---
+        # --- Opus decode → PCM ---
         try:
             if ssrc not in self._decoders:
                 self._decoders[ssrc] = discord.opus.Decoder()
-            pcm = self._decoders[ssrc].decode(decrypted)
-            with self._lock:
-                self._buffers[ssrc].extend(pcm)
-                self._last_packet_time[ssrc] = time.monotonic()
+            pcm_bytes = self._decoders[ssrc].decode(decrypted)
         except Exception as e:
             with self._lock:
                 self._decoders.pop(ssrc, None)
@@ -431,6 +435,82 @@ class VoiceReceiver:
                 e,
             )
             return
+
+        # --- VAD gate: only buffer verified speech ---
+        if self._vad_enabled:
+            self._vad_gate(ssrc, pcm_bytes)
+        else:
+            with self._lock:
+                self._buffers[ssrc].extend(pcm_bytes)
+
+        with self._lock:
+            self._last_packet_time[ssrc] = time.monotonic()
+
+    # ------------------------------------------------------------------
+    # VAD gating (Silero) — only buffer verified speech
+    # ------------------------------------------------------------------
+
+    def _vad_gate(self, ssrc: int, pcm_bytes: bytes) -> None:
+        """Run decoded 48kHz stereo PCM through Silero VAD; only buffer speech segments.
+
+        Steps:
+        1. Downsample 48kHz stereo -> 16kHz mono int16 (Silero wants 16kHz).
+        2. Accumulate in a per-SSRC scratch buffer.
+        3. Feed to Silero VAD in 30ms chunks.
+        4. If VAD says speech -> copy scratch buffer to main audio buffer.
+        5. If VAD says non-speech -> drop scratch buffer.
+        6. Track _last_speech_time for early end-of-utterance detection.
+        """
+        try:
+            import numpy as np
+        except ImportError:
+            # numpy missing — fall through to ungated buffering
+            with self._lock:
+                self._buffers[ssrc].extend(pcm_bytes)
+            return
+
+        # Lazily create VAD instance per SSRC on first packet
+        if ssrc not in self._vad:
+            try:
+                from .vad import SileroVAD
+                self._vad[ssrc] = SileroVAD()
+            except Exception:
+                logger.warning("Silero VAD init failed for ssrc=%d; disabling VAD", ssrc)
+                self._vad_enabled = False
+                with self._lock:
+                    self._buffers[ssrc].extend(pcm_bytes)
+                return
+
+        # Convert 48kHz stereo s16le -> 16kHz mono s16le
+        # pcm_bytes = 192000 bytes/sec at 48kHz stereo s16le
+        # Each frame: 4 bytes (2 ch × 2 bytes).
+        # Simple averaging of L+R, then decimate 3:1.
+        buf_np = np.frombuffer(pcm_bytes, dtype=np.int16).reshape(-1, 2)
+        mono = ((buf_np[:, 0].astype(np.int32) + buf_np[:, 1].astype(np.int32)) // 2).astype(np.int16)
+        # Decimate 48kHz -> 16kHz: take every 3rd sample
+        mono_16k = mono[::3]
+        if len(mono_16k) == 0:
+            return
+
+        vad = self._vad[ssrc]
+        now = time.monotonic()
+
+        # Feed to VAD in 30ms (480-sample) ONNX frames
+        with self._lock:
+            self._vad_buf[ssrc].extend(mono_16k.tobytes())
+
+        while len(self._vad_buf[ssrc]) >= 960:  # 480 samples × 2 bytes
+            frame_bytes = bytes(self._vad_buf[ssrc][:960])
+            del self._vad_buf[ssrc][:960]
+            frame = np.frombuffer(frame_bytes, dtype=np.int16)
+            speech = vad.feed(frame)
+            if speech:
+                self._last_speech_time[ssrc] = now
+
+        # If currently speech -> promote gated PCM into main buffer.
+        if vad.is_speech():
+            with self._lock:
+                self._buffers[ssrc].extend(pcm_bytes)
 
     # ------------------------------------------------------------------
     # Silence detection
@@ -463,7 +543,16 @@ class VoiceReceiver:
         return 0
 
     def check_silence(self) -> list:
-        """Return list of (user_id, pcm_bytes) for completed utterances."""
+        """Return list of (user_id, pcm_bytes) for completed utterances.
+
+        Uses Silero VAD end-of-speech signal when available (VAD_SPEECH_END_TIMEOUT=0.25s
+        after the last positive speech detection), otherwise falls back to the
+        packet-level silence timer (SILENCE_THRESHOLD=0.8s).
+
+        This dual-path design means:
+          • VAD-positive utterances end quickly (0.25s after last speech).
+          • VAD-never-fired packets still fall back to the original timer.
+        """
         now = time.monotonic()
         completed = []
 
@@ -472,13 +561,28 @@ class VoiceReceiver:
             ssrc_list = list(self._buffers.keys())
 
             for ssrc in ssrc_list:
-                last_time = self._last_packet_time.get(ssrc, now)
-                silence_duration = now - last_time
                 buf = self._buffers[ssrc]
+                if not buf:
+                    continue
+
+                # --- Determine effective silence duration ---
+                # Priority 1: VAD-verified last speech timestamp (tight, accurate)
+                # Priority 2: last packet receive time (fallback, coarse)
+                last_speech = self._last_speech_time.get(ssrc)
+                if last_speech is not None:
+                    # VAD has fired for this utterance: tighten end-detection
+                    voice_end_timeout = self._vad_speech_end_timeout
+                    silence_duration = now - last_speech
+                else:
+                    # VAD never fired — fall back to packet-level timer
+                    last_time = self._last_packet_time.get(ssrc, now)
+                    silence_duration = now - last_time
+                    voice_end_timeout = self.SILENCE_THRESHOLD
+
                 # 48kHz, 16-bit, stereo = 192000 bytes/sec
                 buf_duration = len(buf) / (self.SAMPLE_RATE * self.CHANNELS * 2)
 
-                if silence_duration >= self.SILENCE_THRESHOLD and buf_duration >= self.MIN_SPEECH_DURATION:
+                if silence_duration >= voice_end_timeout and buf_duration >= self.MIN_SPEECH_DURATION:
                     user_id = ssrc_user_map.get(ssrc, 0)
                     if not user_id:
                         # SSRC not mapped (SPEAKING event missing after bot rejoin).
@@ -488,10 +592,22 @@ class VoiceReceiver:
                         completed.append((user_id, bytes(buf)))
                     self._buffers[ssrc] = bytearray()
                     self._last_packet_time.pop(ssrc, None)
+                    self._last_speech_time.pop(ssrc, None)
+                    self._vad_buf.pop(ssrc, None)
+                    # Reset VAD state for fresh utterance
+                    vad_inst = self._vad.pop(ssrc, None)
+                    if vad_inst is not None:
+                        try:
+                            vad_inst.reset()
+                        except Exception:
+                            pass
                 elif silence_duration >= self.SILENCE_THRESHOLD * 2:
-                    # Stale buffer with no valid user — discard
+                    # Stale buffer with no valid user or too short — discard
                     self._buffers.pop(ssrc, None)
                     self._last_packet_time.pop(ssrc, None)
+                    self._last_speech_time.pop(ssrc, None)
+                    self._vad_buf.pop(ssrc, None)
+                    self._vad.pop(ssrc, None)
 
         return completed
 
