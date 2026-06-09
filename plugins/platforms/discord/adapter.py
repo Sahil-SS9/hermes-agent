@@ -772,10 +772,14 @@ class DiscordAdapter(BasePlatformAdapter):
             # Set up intents.
             # Message Content is required for normal text replies.
             # Server Members is only needed when the allowlist contains usernames
-            # that must be resolved to numeric IDs. Requesting privileged intents
-            # that aren't enabled in the Discord Developer Portal can prevent the
-            # bot from coming online at all, so avoid requesting members intent
-            # unless it is actually necessary.
+            # that must be resolved to numeric IDs, OR when voice features are
+            # enabled (auto-join, multi-agent voice floor). discord.py discards
+            # VOICE_STATE_UPDATE events when members intent is False because
+            # Discord omits the 'member' field from the payload, causing
+            # Guild._update_voice_state to return member=None.
+            # Requesting privileged intents that aren't enabled in the Discord
+            # Developer Portal can prevent the bot from coming online at all,
+            # so only request members intent when actually needed.
             intents = Intents.default()
             intents.message_content = True
             intents.dm_messages = True
@@ -783,6 +787,8 @@ class DiscordAdapter(BasePlatformAdapter):
             intents.members = (
                 any(not entry.isdigit() for entry in self._allowed_user_ids)
                 or bool(self._allowed_role_ids)  # Need members intent for role lookup
+                or bool(self._auto_join_user_id)  # Need members intent for voice state member field
+                or bool(self._multi_agent_voice_channel_id)  # Need members intent for voice state member field
             )
             intents.voice_states = True
 
@@ -938,7 +944,13 @@ class DiscordAdapter(BasePlatformAdapter):
             @self._client.event
             async def on_voice_state_update(member, before, after):
                 """Track voice channel join/leave events."""
-                # Only track channels where the bot is connected
+                # ── Auto-join runs FIRST, before the bot-connected filter ──
+                # This must fire even when the bot isn't yet in a VC, otherwise
+                # the first auto-join event is silently dropped after every
+                # gateway restart (gate 2 of the voice event pipeline).
+                await adapter_self._handle_auto_join_voice_state(member, before, after)
+
+                # Only track/log channels where the bot is connected
                 bot_guild_ids = set(adapter_self._voice_clients.keys())
                 if not bot_guild_ids:
                     return
@@ -967,9 +979,6 @@ class DiscordAdapter(BasePlatformAdapter):
                         else f"moved {before.channel.name} -> {after.channel.name}",
                         guild_id,
                     )
-
-                # ── KENSEI CUSTOM: auto-join voice when configured user enters ──
-                await adapter_self._handle_auto_join_voice_state(member, before, after)
 
             # Register slash commands
             if self._slash_commands:
@@ -6857,7 +6866,23 @@ def _apply_yaml_config(yaml_cfg: dict, discord_cfg: dict) -> dict | None:
     if _discord_rtm is not None and not os.getenv("DISCORD_REPLY_TO_MODE"):
         _rtm_str = "off" if _discord_rtm is False else str(_discord_rtm).lower()
         os.environ["DISCORD_REPLY_TO_MODE"] = _rtm_str
-    return None  # all settings flow through env; nothing to merge into extras
+    # ── KENSEI CUSTOM: Bridge voice/auto-join keys into PlatformConfig.extra ──
+    # Without this bridge the voice keys in discord.extra.auto_join_user_id etc.
+    # never reach the adapter, so `_wire_auto_join_voice_callbacks` silently
+    # returns and the bot never auto-joins VC.
+    _voice_keys_to_bridge = (
+        "auto_join_user_id", "auto_join_text_channel_id",
+        "auto_join_channel_id", "auto_join_delay_seconds",
+        "auto_join_greeting_text", "auto_join_send_text_greeting",
+        "auto_leave_on_user_exit", "voice_timeout_seconds",
+        "multi_agent_voice_channel_id", "voice_floor_ttl_seconds",
+    )
+    extra_out = {}
+    for k in _voice_keys_to_bridge:
+        v = discord_cfg.get(k) if k in discord_cfg else _discord_extra.get(k)
+        if v is not None:
+            extra_out[k] = v
+    return extra_out if extra_out else None
 
 
 def _is_connected(config) -> bool:
