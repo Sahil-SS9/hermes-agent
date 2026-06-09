@@ -77,6 +77,11 @@ class GatewayKanbanWatchersMixin:
             return
 
         TERMINAL_KINDS = ("completed", "blocked", "gave_up", "crashed", "timed_out")
+        PIPELINE_KINDS = (
+            "pipeline_advanced", "pipeline_complete", "gate_failed",
+            "human_gate_stale_nudge",
+        )
+        NOTIFY_KINDS = TERMINAL_KINDS + PIPELINE_KINDS
         # Subscriptions are removed only when the task reaches a truly final
         # status (done / archived). We used to also unsub on any terminal
         # event kind (gave_up / crashed / timed_out / blocked), but that
@@ -184,7 +189,7 @@ class GatewayKanbanWatchersMixin:
                                     platform=sub["platform"],
                                     chat_id=sub["chat_id"],
                                     thread_id=sub.get("thread_id") or "",
-                                    kinds=TERMINAL_KINDS,
+                                    kinds=NOTIFY_KINDS,
                                 )
                                 if not events:
                                     continue
