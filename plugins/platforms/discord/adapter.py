@@ -643,6 +643,9 @@ class DiscordAdapter(BasePlatformAdapter):
         self._auto_leave_on_user_exit: bool = self._coerce_bool(
             extra.get("auto_leave_on_user_exit"), True
         )
+        self._voice_log_only: bool = self._coerce_bool(
+            extra.get("voice_log_only"), False
+        )
         self._voice_timeout_seconds: float = float(
             self._coerce_int(extra.get("voice_timeout_seconds"), self.VOICE_TIMEOUT)
             or self.VOICE_TIMEOUT
@@ -6876,6 +6879,7 @@ def _apply_yaml_config(yaml_cfg: dict, discord_cfg: dict) -> dict | None:
         "auto_join_greeting_text", "auto_join_send_text_greeting",
         "auto_leave_on_user_exit", "voice_timeout_seconds",
         "multi_agent_voice_channel_id", "voice_floor_ttl_seconds",
+        "voice_log_only",
     )
     extra_out = {}
     for k in _voice_keys_to_bridge:

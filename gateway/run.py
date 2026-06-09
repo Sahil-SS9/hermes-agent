@@ -12459,6 +12459,16 @@ class GatewayRunner:
         except Exception as exc:
             logger.warning("Misa-Misa intake: failed to write intake log: %s", exc)
 
+        # ── Log-only mode: skip LLM pipeline, just record the transcript ──
+        # Used when Misa-Misa co-exists with Kensei in the same VC so she
+        # takes notes without consuming LLM tokens or generating a response.
+        if getattr(adapter, '_voice_log_only', False):
+            logger.debug(
+                "voice_log_only: skipping LLM pipeline for voice input in guild %s",
+                guild_id,
+            )
+            return
+
         # Build a synthetic MessageEvent and feed through the normal pipeline
         # Use SimpleNamespace as raw_message so _get_guild_id() can extract
         # guild_id and _send_voice_reply() plays audio in the voice channel.
