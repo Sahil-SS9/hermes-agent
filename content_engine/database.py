@@ -23,6 +23,8 @@ CREATE TABLE IF NOT EXISTS drafts (
     visual_path        TEXT,
     ai_image_path      TEXT,
     ai_video_path      TEXT,
+    image_prompt       TEXT,
+    video_prompt       TEXT,
     status             TEXT NOT NULL DEFAULT 'draft',
     created_at         TEXT NOT NULL,
     approved_at        TEXT,
@@ -64,6 +66,8 @@ def init_db() -> None:
         ("visual_description", "TEXT"),
         ("ai_image_path", "TEXT"),
         ("ai_video_path", "TEXT"),
+        ("image_prompt", "TEXT"),
+        ("video_prompt", "TEXT"),
         ("rejected_at", "TEXT"),
         ("slop_score", "INTEGER"),
         ("slop_issues", "TEXT"),
@@ -269,6 +273,18 @@ def update_draft_ai_video_path(draft_id: str, ai_video_path: str) -> None:
             "UPDATE drafts SET ai_video_path = ? WHERE id = ?",
             (ai_video_path, draft_id),
         )
+
+def update_draft_image_prompt(draft_id: str, image_prompt: str) -> None:
+    """Persist the prompt fed to the image model, so the dashboard can show it."""
+    with sqlite3.connect(str(DB_PATH)) as conn:
+        conn.execute(
+            "UPDATE drafts SET image_prompt = ? WHERE id = ?",
+            (image_prompt, draft_id),
+        )
+
+# Note: the default video path is a free ffmpeg slideshow with no model prompt,
+# so nothing writes video_prompt yet. The column is kept as forward schema for a
+# future paid AI-video model; the dashboard renders the null case honestly.
 
 def truncate_drafts() -> None:
     conn = sqlite3.connect(str(DB_PATH))

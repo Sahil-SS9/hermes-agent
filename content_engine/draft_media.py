@@ -196,6 +196,13 @@ def generate_post_image(
     )
     if not base or not os.path.exists(base):
         return None
+    # Persist the exact prompt fed to the model so the dashboard drawer can show
+    # what generated this image. Best-effort; never fail media gen over it.
+    try:
+        from database import update_draft_image_prompt
+        update_draft_image_prompt(draft_id, prompt)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[draft_media] could not persist image prompt: {exc}")
     if cost > 0:
         budget.record(cost, label=f"{chosen}:{draft_id}")
 

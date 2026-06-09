@@ -179,5 +179,13 @@ def generate_infographic(brand, content: dict, draft_id="", platform="twitter",
                                          output_dir=out_dir, filename=fname)
         if path and os.path.exists(path):
             budget.record(cost, label=f"ig:{model}:{draft_id}")
+            # Record the model prompt so the dashboard can show how this
+            # infographic was generated. Best-effort.
+            try:
+                from database import update_draft_image_prompt
+                if draft_id:
+                    update_draft_image_prompt(draft_id, prompt)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[infographic_ai] could not persist image prompt: {exc}")
             return path
     return None
