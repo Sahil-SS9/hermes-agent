@@ -379,7 +379,12 @@ def main():
             })
 
     # ── Handle newly added skills ──
-    added = report.get("added", []) or []
+    added_raw = report.get("added", []) or []
+    # Backward-compatible: added is now [{"name":..., "created_by":...}] or [str]
+    added = [
+        entry["name"] if isinstance(entry, dict) else entry
+        for entry in added_raw
+    ]
     classifications = {}
     if added:
         print(f"\n📦 NEW SKILLS DETECTED ({len(added)}):")
