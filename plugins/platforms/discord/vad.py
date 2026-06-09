@@ -9,7 +9,6 @@ Per-frame latency: ~2ms on ARM Neoverse.
 import logging
 import os
 import urllib.request
-import typing
 
 logger = logging.getLogger(__name__)
 
@@ -30,11 +29,12 @@ ONNX_URL: str = (
     "https://github.com/snakers4/silero-vad/raw/refs/heads/master/models/silero_vad_mini.onnx"
 )
 WINDOW_SAMPLES: int = 480           # 30ms @ 16kHz
-STATE_SHAPE = (2, 1, 128)           # RNN state tensor shape
 RNN_HIDDEN_DIM: int = 128
+STATE_SHAPE = (2, 1, RNN_HIDDEN_DIM)  # derived from hidden dim
 SPEECH_THRESHOLD_ON: float = 0.50   # start  speech
 SPEECH_THRESHOLD_OFF: float = 0.35  # end    speech (hysteresis)
 HISTORY_FRAMES: int = 10            # 300ms smoothing window
+MAX_CONSECUTIVE_ERRORS: int = 5     # consecutive ONNX failures → degrade
 
 
 def _cache_dir() -> str:
@@ -88,23 +88,6 @@ def _ensure_model() -> str:
         raise
 
 
-class _VADFallback:
-    """Stub that always returns speech=True (i.e. let old threshold logic decide).
-
-    Used when Silero deps (numpy, onnxruntime) are missing so that the
-    Discord adapter can still import this module safely.
-    """
-
-    def reset(self) -> None:
-        pass
-
-    def is_speech(self) -> bool:
-        return True
-
-    def feed(self, _pcm: typing.Any) -> bool:
-        return True
-
-
 class SileroVAD:
     """CPU-only VAD wrapper around the Silero mini ONNX model."""
 
@@ -130,18 +113,21 @@ class SileroVAD:
         self._sr = np.array(16000, dtype=np.int64)  # sample rate for ONNX feed
         self._history: list[float] = []
         self._is_speech = False
-
-    def reset(self) -> None:
-        """Reset internal RNN state. Call on new utterance / reconnect."""
-        self._reset_state()
+        self._degraded = False
+        self._error_streak = 0
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
     def is_speech(self) -> bool:
-        """Current speech state after the most recent frame(s)."""
-        return self._is_speech
+        """Current speech state after the most recent frame(s).
+        Returns True when degraded (ONNX errors) to pass through audio unchanged."""
+        return True if self._degraded else self._is_speech
+
+    def reset(self) -> None:
+        """Reset internal RNN state. Call on new utterance / reconnect."""
+        self._reset_state()
 
     def feed(self, pcm) -> bool:
         """
@@ -170,16 +156,11 @@ class SileroVAD:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _normalize_pcm(pcm) -> typing.Any:
-        """Return float32 [-1,1] numpy array; empty if unsupported type."""
-        if _HAS_DEPS and isinstance(pcm, np.ndarray):
-            if pcm.dtype == np.int16:
-                return pcm.astype(np.float32) / 32768.0
-            return pcm.astype(np.float32)
-        # Python int list / buffer — unlikely here (VoiceReceiver uses bytes)
-        if _HAS_DEPS:
-            return np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0
-        return None
+    def _normalize_pcm(pcm) -> "np.ndarray":
+        """Return float32 [-1,1] numpy array."""
+        if pcm.dtype == np.int16:
+            return pcm.astype(np.float32) / 32768.0
+        return pcm.astype(np.float32)
 
     def _infer_frame(self, frame) -> float:
         """Run one 30ms frame through ONNX. Returns speech probability [0,1]."""
@@ -195,11 +176,21 @@ class SileroVAD:
                 },
             )
             # out[0] = probability, out[1] = next state
-            prob = float(out[0].item() if hasattr(out[0], "item") else out[0][0, 0])
+            prob = float(out[0].item())
             self._state = out[1] if len(out) > 1 else self._state
+            self._error_streak = 0  # reset on success
             return prob
         except Exception as exc:
-            logger.warning("Silero VAD inference error: %s", exc)
+            self._error_streak += 1
+            if self._error_streak >= MAX_CONSECUTIVE_ERRORS and not self._degraded:
+                logger.warning(
+                    "Silero VAD degraded after %d consecutive errors; "
+                    "passing through audio to threshold-based detection. Last error: %s",
+                    self._error_streak, exc,
+                )
+                self._degraded = True
+            else:
+                logger.warning("Silero VAD inference error: %s", exc)
             return 0.0
 
     def _update(self, prob: float) -> None:
@@ -214,14 +205,3 @@ class SileroVAD:
             self._is_speech = True
         elif self._is_speech and max_prob < SPEECH_THRESHOLD_OFF:
             self._is_speech = False
-
-    def reset(self) -> None:
-        """Reset internal RNN state. Call on new utterance / reconnect."""
-        self._reset_state()
-
-
-def get_vad(model_path: str | None = None, force_fallback: bool = False) -> typing.Any:
-    """Factory: return a SileroVAD if deps OK, otherwise a passthrough fallback."""
-    if force_fallback or not _HAS_DEPS:
-        return _VADFallback()
-    return SileroVAD(model_path=model_path)

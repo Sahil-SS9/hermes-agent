@@ -204,6 +204,9 @@ class VoiceReceiver:
         # Pause flag: don't capture while bot is playing TTS
         self._paused = False
 
+        # Debug logging counter (instance-level to avoid cross-instance races)
+        self._packet_debug_count = 0
+
         # Per-user audio buffers
         self._buffers: Dict[int, bytearray] = defaultdict(bytearray)
         self._last_packet_time: Dict[int, float] = {}
@@ -451,16 +454,7 @@ class VoiceReceiver:
     # ------------------------------------------------------------------
 
     def _vad_gate(self, ssrc: int, pcm_bytes: bytes) -> None:
-        """Run decoded 48kHz stereo PCM through Silero VAD; only buffer speech segments.
-
-        Steps:
-        1. Downsample 48kHz stereo -> 16kHz mono int16 (Silero wants 16kHz).
-        2. Accumulate in a per-SSRC scratch buffer.
-        3. Feed to Silero VAD in 30ms chunks.
-        4. If VAD says speech -> copy scratch buffer to main audio buffer.
-        5. If VAD says non-speech -> drop scratch buffer.
-        6. Track _last_speech_time for early end-of-utterance detection.
-        """
+        """Run decoded 48kHz stereo PCM through Silero VAD; only buffer speech segments."""
         try:
             import numpy as np
         except ImportError:
@@ -495,17 +489,21 @@ class VoiceReceiver:
         vad = self._vad[ssrc]
         now = time.monotonic()
 
-        # Feed to VAD in 30ms (480-sample) ONNX frames
+        # Feed to VAD in 30ms (480-sample) ONNX frames.
+        # Extract frames under lock to avoid racing with check_silence.
+        frames: list[bytes] = []
         with self._lock:
             self._vad_buf[ssrc].extend(mono_16k.tobytes())
+            while len(self._vad_buf[ssrc]) >= 960:  # 480 samples × 2 bytes
+                frames.append(bytes(self._vad_buf[ssrc][:960]))
+                del self._vad_buf[ssrc][:960]
 
-        while len(self._vad_buf[ssrc]) >= 960:  # 480 samples × 2 bytes
-            frame_bytes = bytes(self._vad_buf[ssrc][:960])
-            del self._vad_buf[ssrc][:960]
+        for frame_bytes in frames:
             frame = np.frombuffer(frame_bytes, dtype=np.int16)
             speech = vad.feed(frame)
             if speech:
-                self._last_speech_time[ssrc] = now
+                with self._lock:
+                    self._last_speech_time[ssrc] = now
 
         # If currently speech -> promote gated PCM into main buffer.
         if vad.is_speech():
@@ -541,6 +539,22 @@ class VoiceReceiver:
         except Exception:
             pass
         return 0
+
+    def _cleanup_ssrc(self, ssrc: int, *, keep_buffer: bool = False, reset_vad: bool = False) -> None:
+        """Remove per-SSRC state. keep_buffer resets to empty instead of popping."""
+        if keep_buffer:
+            self._buffers[ssrc] = bytearray()
+        else:
+            self._buffers.pop(ssrc, None)
+        self._last_packet_time.pop(ssrc, None)
+        self._last_speech_time.pop(ssrc, None)
+        self._vad_buf.pop(ssrc, None)
+        vad_inst = self._vad.pop(ssrc, None)
+        if reset_vad and vad_inst is not None:
+            try:
+                vad_inst.reset()
+            except Exception:
+                pass
 
     def check_silence(self) -> list:
         """Return list of (user_id, pcm_bytes) for completed utterances.
@@ -591,23 +605,10 @@ class VoiceReceiver:
                     if user_id:
                         completed.append((user_id, bytes(buf)))
                     self._buffers[ssrc] = bytearray()
-                    self._last_packet_time.pop(ssrc, None)
-                    self._last_speech_time.pop(ssrc, None)
-                    self._vad_buf.pop(ssrc, None)
-                    # Reset VAD state for fresh utterance
-                    vad_inst = self._vad.pop(ssrc, None)
-                    if vad_inst is not None:
-                        try:
-                            vad_inst.reset()
-                        except Exception:
-                            pass
+                    self._cleanup_ssrc(ssrc, keep_buffer=True, reset_vad=True)
                 elif silence_duration >= self.SILENCE_THRESHOLD * 2:
                     # Stale buffer with no valid user or too short — discard
-                    self._buffers.pop(ssrc, None)
-                    self._last_packet_time.pop(ssrc, None)
-                    self._last_speech_time.pop(ssrc, None)
-                    self._vad_buf.pop(ssrc, None)
-                    self._vad.pop(ssrc, None)
+                    self._cleanup_ssrc(ssrc)
 
         return completed
 
