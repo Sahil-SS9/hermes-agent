@@ -7,12 +7,11 @@ import { $overlayState, patchOverlayState } from '../app/overlayStore.js'
 import { $uiSessionId, $uiTheme } from '../app/uiStore.js'
 
 import { ActiveSessionSwitcher } from './activeSessionSwitcher.js'
-import { AskUserQuestionsTool } from './askUserQuestionsTool.js'
 import { FloatBox } from './appChrome.js'
 import { MaskedPrompt } from './maskedPrompt.js'
 import { ModelPicker } from './modelPicker.js'
 import { OverlayHint } from './overlayControls.js'
-import { PromptOptimizationOverlay } from './promptOptimizationOverlay.js'
+import { PluginsHub } from './pluginsHub.js'
 import { ApprovalPrompt, ClarifyPrompt, ConfirmPrompt } from './prompts.js'
 import { SkillsHub } from './skillsHub.js'
 
@@ -21,22 +20,12 @@ const COMPLETION_WINDOW = 16
 export function PromptZone({
   cols,
   onApprovalChoice,
-  onAskUserQuestionsAnswer,
   onClarifyAnswer,
-  onPromptOptimizationChoice,
   onSecretSubmit,
   onSudoSubmit
-}: Pick<AppOverlaysProps, 'cols' | 'onApprovalChoice' | 'onAskUserQuestionsAnswer' | 'onClarifyAnswer' | 'onPromptOptimizationChoice' | 'onSecretSubmit' | 'onSudoSubmit'>) {
+}: Pick<AppOverlaysProps, 'cols' | 'onApprovalChoice' | 'onClarifyAnswer' | 'onSecretSubmit' | 'onSudoSubmit'>) {
   const overlay = useStore($overlayState)
   const theme = useStore($uiTheme)
-
-  if (overlay.promptOptimization) {
-    return (
-      <Box flexDirection="column" flexShrink={0} paddingX={1} paddingY={1}>
-        <PromptOptimizationOverlay onChoice={onPromptOptimizationChoice} req={overlay.promptOptimization} t={theme} />
-      </Box>
-    )
-  }
 
   if (overlay.approval) {
     return (
@@ -59,23 +48,6 @@ export function PromptZone({
     return (
       <Box flexDirection="column" flexShrink={0} paddingX={1} paddingY={1}>
         <ConfirmPrompt onCancel={onCancel} onConfirm={onConfirm} req={req} t={theme} />
-      </Box>
-    )
-  }
-
-  // ── KENSEI CUSTOM: AskUserQuestionsTool (new mode system overlay) ──
-  // Per spec (2026-06-04): plan / UltraPlan / recon modes use this batched
-  // multi-question prompt instead of single ClarifyPrompt.  See skill
-  // `agent-modes`.  Must survive upstream merges.
-  if (overlay.askUserQuestions) {
-    return (
-      <Box flexDirection="column" flexShrink={0} paddingX={1} paddingY={1}>
-        <AskUserQuestionsTool
-          onAnswer={onAskUserQuestionsAnswer}
-          onCancel={() => onAskUserQuestionsAnswer({}, overlay.askUserQuestions!.requestId)}
-          req={overlay.askUserQuestions}
-          t={theme}
-        />
       </Box>
     )
   }
@@ -154,6 +126,7 @@ export function FloatingOverlays({
     overlay.pager ||
     overlay.sessions ||
     overlay.skillsHub ||
+    overlay.pluginsHub ||
     completions.length
 
   if (!hasAny) {
@@ -200,6 +173,12 @@ export function FloatingOverlays({
       {overlay.skillsHub && (
         <FloatBox color={theme.color.border}>
           <SkillsHub gw={gw} onClose={() => patchOverlayState({ skillsHub: false })} t={theme} />
+        </FloatBox>
+      )}
+
+      {overlay.pluginsHub && (
+        <FloatBox color={theme.color.border}>
+          <PluginsHub gw={gw} onClose={() => patchOverlayState({ pluginsHub: false })} t={theme} />
         </FloatBox>
       )}
 
