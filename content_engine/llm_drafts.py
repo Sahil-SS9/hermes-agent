@@ -700,8 +700,9 @@ def _audit_slop(body_text: str) -> dict:
     }
 
 
-def _select_and_fill_template(brand: str, pillar: str, variables: dict) -> tuple[str, dict]:
-    """Pick a template, inject variables, audit slop. Returns (body, audit)."""
+def _select_and_fill_template(brand: str, pillar: str, variables: dict) -> tuple[Optional[str], dict]:
+    """Pick a template, inject variables, audit slop. Returns (body, audit);
+    body is None when no candidate passed the audit."""
     templates = BRAND_TEMPLATES.get(brand, {}).get(pillar, [])
     if not templates:
         templates = [t for tlist in BRAND_TEMPLATES.get(brand, {}).values() for t in tlist]
@@ -721,10 +722,11 @@ def _select_and_fill_template(brand: str, pillar: str, variables: dict) -> tuple
             body = filled
             break
 
+    # Hard gate: nothing passed the slop audit, so nothing ships. A draft that
+    # failed every attempt is exactly the output that reads as low quality.
     if body is None:
-        candidate = random.choice(templates)
-        body = _fill_variables(candidate, variables) or candidate
-        audit_result = _audit_slop(body)
+        audit_result["passed"] = False
+        return None, audit_result
 
     return body, audit_result
 
@@ -823,18 +825,21 @@ def generate_drafts(brand, topics, platform=None, count_per_topic=1):
             # -- Static template path (all brands) --
             if draft is None:
                 body, audit_result = _select_and_fill_template(brand, pillar, variables)
+                if body is None:
+                    print(f"[llm_drafts] {brand}/{pillar}: no template passed slop audit; skipping topic")
+                    continue
 
-                # -- Stale tech gate --
+                # -- Stale tech gate (hard: a stale draft never ships) --
                 passed_gate, stale_match = _reject_stale_tech(body)
                 if not passed_gate:
-                    audit_result["issues"].append(f"Stale tech reference auto-rejected: {stale_match}")
-                    audit_result["slop_score"] = min(audit_result["slop_score"] + 3, 10)
-                    audit_result["passed"] = False
                     body2, audit2 = _select_and_fill_template(brand, pillar, variables)
-                    passed2, _ = _reject_stale_tech(body2)
-                    if passed2:
+                    passed2, _ = _reject_stale_tech(body2 or "")
+                    if body2 and passed2:
                         body = body2
                         audit_result = audit2
+                    else:
+                        print(f"[llm_drafts] {brand}/{pillar}: stale tech '{stale_match}' unresolved; skipping topic")
+                        continue
 
                 # Textless scene briefs only (no text/typography/UI/branding --
                 # the headline is added later as a crisp Pillow overlay).

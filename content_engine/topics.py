@@ -404,14 +404,17 @@ def fetch_fixtures() -> List[Dict]:
         print("fetch_fixtures: requests not installed", file=sys.stderr)
         return []
     try:
-        url = f"{FOOTBALL_API_BASE}/competitions/PL/matches?status=SCHEDULED&matchday=38"
+        # All upcoming scheduled matches, soonest first. The old query pinned
+        # matchday=38, which is empty or wrong-season for most of the year.
+        url = f"{FOOTBALL_API_BASE}/competitions/PL/matches?status=SCHEDULED"
         resp = requests.get(url, timeout=15)
         if resp.status_code != 200:
             print(f"fetch_fixtures: HTTP {resp.status_code}", file=sys.stderr)
             return []
         data = resp.json()
         matches = []
-        for m in data.get("matches", [])[:6]:
+        upcoming = sorted(data.get("matches", []), key=lambda m: m.get("utcDate", ""))
+        for m in upcoming[:6]:
             matches.append({
                 "home": m["homeTeam"]["shortName"],
                 "away": m["awayTeam"]["shortName"],

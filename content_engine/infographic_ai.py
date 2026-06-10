@@ -175,7 +175,8 @@ def generate_infographic(brand, content: dict, draft_id="", platform="twitter",
             print(f"[infographic_ai] budget cap; skip {model}")
             continue
         print(f"[infographic_ai] {brand} {style}/{layout} via {model}")
-        path = fal_client.generate_image(prompt, model=model, aspect="square",
+        from draft_media import aspect_for
+        path = fal_client.generate_image(prompt, model=model, aspect=aspect_for(platform),
                                          output_dir=out_dir, filename=fname)
         if path and os.path.exists(path):
             budget.record(cost, label=f"ig:{model}:{draft_id}")

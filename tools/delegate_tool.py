@@ -480,6 +480,16 @@ def _get_orchestrator_enabled() -> bool:
     return True
 
 
+def _get_synthesis_enabled() -> bool:
+    """Read delegation.synthesis_enabled config flag (default: False)."""
+    return is_truthy_value(_load_config().get("synthesis_enabled", False))
+
+
+def _get_verify_enabled() -> bool:
+    """Read delegation.verify_enabled config flag (default: False)."""
+    return is_truthy_value(_load_config().get("verify_enabled", False))
+
+
 def _get_inherit_mcp_toolsets() -> bool:
     """Whether narrowed child toolsets should keep the parent's MCP toolsets."""
     cfg = _load_config()
@@ -1370,6 +1380,83 @@ def _dump_subagent_timeout_diagnostic(
         return None
 
 
+
+def _extract_finding(summary: str) -> str:
+    """Extract the core finding from a producer summary, stripping reasoning.
+
+    Tries multiple strategies in order:
+    1. JSON block with named key (finding / answer / conclusion / claim)
+    2. Any JSON block — serialise whole block as the finding
+    3. Markdown heading '## Finding' or '## Conclusion'
+
+    Returns the extracted finding string, or empty string on failure.
+    When empty, verification is skipped and a warning is logged.
+    """
+    if not summary or not summary.strip():
+        return ""
+
+    text = summary.strip()
+    import re as _re
+
+    # --- Strategy 1: JSON extraction (two passes) ---
+
+    # 1a: JSON blocks with a named key (preferred — clean extraction)
+    key_pats = "finding|answer|conclusion|claim"
+    named_blocks = _re.findall(
+        r'\{[^{}]*"(?:' + key_pats + r')"[^{}]*\}',
+        text, _re.DOTALL,
+    )
+    for block in reversed(named_blocks):
+        try:
+            parsed = json.loads(block)
+            for key in ("finding", "answer", "conclusion", "claim"):
+                if key in parsed and parsed[key]:
+                    return str(parsed[key])
+        except (json.JSONDecodeError, TypeError, KeyError):
+            continue
+
+    # 1b: any JSON block (fence-stripped) — when the producer used
+    #     arbitrary keys, serialise the whole block so the skeptic has
+    #     the full claim to evaluate rather than skipping silently.
+    any_blocks = _re.findall(
+        r'(?:```(?:json)?\s*\n)?(\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\})',
+        text, _re.DOTALL,
+    )
+    for block_str in reversed(any_blocks):
+        block_str = block_str.strip()
+        try:
+            parsed = json.loads(block_str)
+            # Prefer a named key if one exists; otherwise serialise
+            for key in ("finding", "answer", "conclusion", "claim"):
+                if key in parsed and isinstance(parsed[key], str):
+                    return str(parsed[key])
+            return json.dumps(parsed, indent=2)
+        except (json.JSONDecodeError, TypeError):
+            continue
+
+    # 1c: whole-text JSON
+    if text.startswith("{") and text.endswith("}"):
+        try:
+            parsed = json.loads(text)
+            for key in ("finding", "answer", "conclusion", "claim"):
+                if key in parsed and parsed[key]:
+                    return str(parsed[key])
+            return json.dumps(parsed, indent=2)
+        except (json.JSONDecodeError, TypeError, KeyError):
+            pass
+
+    # --- Strategy 2: Markdown heading ---
+    for heading in ("Finding", "Conclusion", "Claim", "Result"):
+        m = _re.search(
+            rf"^##\s+{heading}\s*\n(.+?)(?:\n##|\Z)",
+            text, _re.DOTALL | _re.MULTILINE | _re.IGNORECASE,
+        )
+        if m:
+            return m.group(1).strip()
+
+    # Structured extraction failed.
+    return ""
+
 def _run_single_child(
     task_index: int,
     goal: str,
@@ -1977,6 +2064,11 @@ def delegate_task(
     acp_args: Optional[List[str]] = None,
     role: Optional[str] = None,
     parent_agent=None,
+    # KENSEI CUSTOM — synthesis and verification primitives (see v1.1 plan)
+    synthesize: bool = False,
+    synthesis_prompt: Optional[str] = None,
+    verify: bool = False,
+    verify_rubric: Optional[str] = None,
 ) -> str:
     """
     Spawn one or more child agents to handle delegated tasks.
@@ -1989,6 +2081,16 @@ def delegate_task(
     'leaf' (default) cannot; 'orchestrator' retains the delegation
     toolset and can spawn its own workers, bounded by
     delegation.max_spawn_depth.  Per-task role beats the top-level one.
+
+    Synthesis (synthesize=True): After all children complete, spawn a
+    synthesis agent that merges results into a single coherent output.
+    Gated by delegation.synthesis_enabled config flag (default False).
+
+    Verification (verify=True): After a single-task child produces a
+    finding, spawn a skeptic agent in CLEAN context (no access to
+    producer reasoning) that tries to refute it. Returns both finding
+    and skeptic verdict. Gated by delegation.verify_enabled config
+    flag (default False). Only available in single-task mode.
 
     Returns JSON with results array, one entry per task.
     """
@@ -2265,6 +2367,104 @@ def delegate_task(
         # Sort by task_index so results match input order
         results.sort(key=lambda r: r["task_index"])
 
+    # KENSEI CUSTOM — verification primitive (single-task mode only)
+    # Detect intent: either explicit verify=True OR verify_rubric provided.
+    # verify_rubric fallback is a structural defence against dispatch bugs
+    # where boolean verify is dropped between the model and the function.
+    _effective_verify = bool(verify or verify_rubric)
+    logger.info(
+        "delegate_task: verify=%s rubric_set=%s effective=%s n_tasks=%s gate=%s — will%s enter verify branch",
+        verify, bool(verify_rubric), _effective_verify, n_tasks, _get_verify_enabled(),
+        "" if (_effective_verify and n_tasks == 1 and _get_verify_enabled()) else " NOT",
+    )
+    if _effective_verify and n_tasks == 1 and _get_verify_enabled():
+        try:
+            entry = results[0]
+            producer_summary = entry.get("summary") or ""
+            finding = _extract_finding(producer_summary)
+            if not finding:
+                logger.warning(
+                    "delegate_task: verify=True but could not extract finding "
+                    "from child output (%d chars, preview: %s); "
+                    "skipping verification. Producer keys used may not match "
+                    "expected 'finding'/'answer'/'conclusion'/'claim'. "
+                    "If this is a false-negative, add the key to "
+                    "_extract_finding's Strategy 1 or instruct the producer "
+                    "to use the JSON key 'finding'.",
+                    len(producer_summary), producer_summary[:80].replace("\n", " "),
+                )
+            else:
+                rubric = verify_rubric or "Evaluate whether this finding is factually correct, logically sound, and well-supported."
+                # Build skeptic prompt — CRITICAL: must NOT contain producer reasoning
+                # (G5: isolation enforced structurally, not by prompt)
+                skeptic_goal = (
+                    "You are a skeptical reviewer. Your job is to find flaws "
+                    "in the following finding. Be rigorous and evidence-based.\n\n"
+                    f"FINDING TO EVALUATE:\n{finding}\n\n"
+                    f"RUBRIC:\n{rubric}\n\n"
+                    "Respond with a structured verdict:\n"
+                    '{"claim": "<restated claim>", '
+                    '"survived": true|false, '
+                    '"verdict": "<your assessment>", '
+                    '"reasoning": "<evidence-based reasoning>", '
+                    '"confidence": 0.0-1.0}'
+                )
+                # Spawn skeptic in CLEAN context (no parent history — guaranteed
+                # by existing subagent isolation: skip_context_files=True,
+                # skip_memory=True, ephemeral_system_prompt). The skeptic goal
+                # string contains ONLY the finding + rubric — never producer
+                # reasoning (G5 enforcement point).
+                skeptic_result = _run_single_child(
+                    task_index=0,
+                    goal=skeptic_goal,
+                    child=_build_child_agent(
+                        task_index=len(task_list),
+                        goal=skeptic_goal,
+                        context=None,
+                        toolsets=None,
+                        model=creds["model"],
+                        max_iterations=effective_max_iter,
+                        task_count=1,
+                        parent_agent=parent_agent,
+                        override_provider=creds["provider"],
+                        override_base_url=creds["base_url"],
+                        override_api_key=creds["api_key"],
+                        override_api_mode=creds["api_mode"],
+                    ),
+                    parent_agent=parent_agent,
+                )
+                sk_summary = skeptic_result.get("summary") or ""
+                # F4: strip JSON fences, default to None (unknown) on parse failure
+                cleaned = sk_summary.strip()
+                for fence in ("```json", "```"):
+                    if cleaned.startswith(fence):
+                        cleaned = cleaned[len(fence):]
+                    if cleaned.endswith("```"):
+                        cleaned = cleaned[:-3]
+                cleaned = cleaned.strip()
+                try:
+                    sk_parsed = json.loads(cleaned) if cleaned.startswith("{") else {"raw": sk_summary, "survived": None}
+                except json.JSONDecodeError:
+                    sk_parsed = {"raw": sk_summary, "survived": None}
+                entry["verification"] = {
+                    "verified": sk_parsed.get("survived"),
+                    "skeptic_verdict": sk_parsed.get("verdict", ""),
+                    "skeptic_reasoning": sk_parsed.get("reasoning", ""),
+                    "skeptic_confidence": sk_parsed.get("confidence", 0.0),
+                }
+        except Exception as exc:
+            logger.warning(
+                "delegate_task: verification failed with exception: %s",
+                exc, exc_info=True,
+            )
+            # Never let verification failure eat the original result.
+            # On error, mark as unverified and return original.
+            if results and "verification" not in results[0]:
+                results[0]["verification"] = {
+                    "verified": None,
+                    "error": f"Verification agent failed: {exc}",
+                }
+
     # Notify parent's memory provider of delegation outcomes
     if (
         parent_agent
@@ -2361,13 +2561,91 @@ def delegate_task(
 
     total_duration = round(time.monotonic() - overall_start, 2)
 
-    return json.dumps(
-        {
-            "results": results,
-            "total_duration_seconds": total_duration,
-        },
-        ensure_ascii=False,
-    )
+    # KENSEI CUSTOM — synthesis primitive (batch mode only, n > 1)
+    if synthesize and n_tasks > 1 and _get_synthesis_enabled():
+        synth_output = None
+        missing_tasks = []
+        try:
+            summaries = []
+            for entry in results:
+                if entry.get("status") == "completed" and entry.get("summary"):
+                    summaries.append(entry["summary"])
+                elif entry.get("status") != "completed":
+                    idx = entry.get("task_index", -1)
+                    gl = task_labels[idx] if 0 <= idx < len(task_labels) else f"Task {idx}"
+                    missing_tasks.append(gl)
+
+            if not summaries:
+                logger.warning(
+                    "delegate_task: synthesize=True but no children "
+                    "produced usable summaries; skipping synthesis"
+                )
+            else:
+                synth_prompt = synthesis_prompt or (
+                    "Synthesize the following findings from {n} parallel "
+                    "sub-agents into a single coherent output. Resolve "
+                    "contradictions. Deduplicate overlapping content. "
+                    "Flag confidence levels.\n\n"
+                    "{summary_block}\n\n"
+                    "Provide your synthesis as a structured report."
+                )
+                summary_block = "\n---\n".join(
+                    f"[TASK {i+1}]\n{s}" for i, s in enumerate(summaries)
+                )
+                # Capture presence BEFORE replace (F2 fix: after replace,
+                # the token is gone so 'not in' is always True).
+                had_block_token = "{summary_block}" in synth_prompt
+                synth_prompt = synth_prompt.replace(
+                    "{summary_block}", summary_block
+                ).replace("{n}", str(len(summaries)))
+                if not had_block_token:
+                    synth_prompt += f"\n\n{summary_block}"
+
+                if missing_tasks:
+                    synth_prompt += (
+                        f"\n\nNOTE: {len(missing_tasks)} task(s) did "
+                        f"not complete or produced no output: "
+                        f"{', '.join(missing_tasks)}. Account for these "
+                        f"gaps — do not fabricate findings."
+                    )
+
+                synth_result = _run_single_child(
+                    task_index=len(task_list),
+                    goal=synth_prompt,
+                    child=_build_child_agent(
+                        task_index=len(task_list),
+                        goal=synth_prompt,
+                        context=None,
+                        toolsets=None,
+                        model=creds["model"],
+                        max_iterations=effective_max_iter,
+                        task_count=1,
+                        parent_agent=parent_agent,
+                        override_provider=creds["provider"],
+                        override_base_url=creds["base_url"],
+                        override_api_key=creds["api_key"],
+                        override_api_mode=creds["api_mode"],
+                    ),
+                    parent_agent=parent_agent,
+                )
+                synth_output = synth_result.get("summary") or None
+        except Exception as exc:
+            logger.warning(
+                "delegate_task: synthesis failed: %s", exc, exc_info=True
+            )
+
+    # Build response dict with optional synthesis output
+    response_dict = {
+        "results": results,
+        "total_duration_seconds": total_duration,
+    }
+    if synthesize and n_tasks > 1 and _get_synthesis_enabled():
+        if synth_output is not None:
+            response_dict["synthesis"] = synth_output
+        if missing_tasks:
+            response_dict["missing_tasks"] = missing_tasks
+
+    return json.dumps(response_dict, ensure_ascii=False)
 
 
 def _resolve_child_credential_pool(
@@ -2570,28 +2848,39 @@ def _resolve_delegation_credentials(cfg: dict, parent_agent) -> dict:
 
 
 def _load_config() -> dict:
-    """Load delegation config from CLI_CONFIG or persistent config.
+    """Load delegation config — persistent base, CLI overlay on top.
 
-    Checks the runtime config (cli.py CLI_CONFIG) first, then falls back
-    to the persistent config (hermes_cli/config.py load_config()) so that
-    ``delegation.model`` / ``delegation.provider`` are picked up regardless
-    of the entry point (CLI, gateway, cron).
+    Always reads persistent config first so dynamic ``hermes config set``
+    changes (e.g. ``delegation.verify_enabled``) are visible without a
+    gateway restart.  CLI_CONFIG is then overlaid so runtime model /
+    provider overrides still take effect.
+
+    The previous short-circuit (CLI_CONFIG non-empty → return immediately)
+    blocked persistent reads and caused feature-flag staleness bug where
+    ``hermes config set delegation.verify_enabled true`` had zero effect
+    on a running gateway until the process was restarted.
     """
-    try:
-        from cli import CLI_CONFIG
-
-        cfg = CLI_CONFIG.get("delegation") or {}
-        if cfg:
-            return cfg
-    except Exception:
-        pass
+    # 1. Base: persistent config (always fresh — picks up hermes config set)
+    cfg: Dict[str, Any] = {}
     try:
         from hermes_cli.config import load_config
 
         full = load_config()
-        return full.get("delegation") or {}
+        cfg = dict(full.get("delegation") or {})
     except Exception:
-        return {}
+        pass
+
+    # 2. Overlay: CLI_CONFIG (runtime model/provider overrides)
+    try:
+        from cli import CLI_CONFIG
+
+        cli_del = CLI_CONFIG.get("delegation") or {}
+        if cli_del:
+            cfg.update(cli_del)
+    except Exception:
+        pass
+
+    return cfg
 
 
 # ---------------------------------------------------------------------------
@@ -2862,6 +3151,22 @@ DELEGATE_TASK_SCHEMA = {
                 "enum": ["leaf", "orchestrator"],
                 "description": "(rebuilt at get_definitions() time)",
             },
+            "synthesize": {
+                "type": "boolean",
+                "description": "KENSEI CUSTOM. After all children complete in batch mode, spawn a synthesis agent to merge results. Only active when delegation.synthesis_enabled=true and n_tasks > 1.",
+            },
+            "synthesis_prompt": {
+                "type": "string",
+                "description": "Custom prompt for the synthesis agent when synthesize=true.",
+            },
+            "verify": {
+                "type": "boolean",
+                "description": "KENSEI CUSTOM. After single-task child produces a finding, spawn skeptic in CLEAN context to refute. Only active when delegation.verify_enabled=true and n_tasks == 1.",
+            },
+            "verify_rubric": {
+                "type": "string",
+                "description": "Custom rubric for the skeptic when verify=true.",
+            },
             "acp_command": {
                 "type": "string",
                 "description": (
@@ -2893,11 +3198,15 @@ DELEGATE_TASK_SCHEMA = {
 # --- Registry ---
 from tools.registry import registry, tool_error
 
-registry.register(
-    name="delegate_task",
-    toolset="delegation",
-    schema=DELEGATE_TASK_SCHEMA,
-    handler=lambda args, **kw: delegate_task(
+def _handle_delegate_dispatch(args, **kw):
+    """Dispatch wrapper with trace logging to diagnose verify=False in gateway."""
+    import logging
+    _dl = logging.getLogger("tools.delegate_tool")
+    _dl.info(
+        "delegate_task dispatch: raw args keys=%s verify=%s synthesize=%s",
+        sorted(args.keys()), args.get("verify"), args.get("synthesize"),
+    )
+    return delegate_task(
         goal=args.get("goal"),
         context=args.get("context"),
         toolsets=args.get("toolsets"),
@@ -2907,7 +3216,18 @@ registry.register(
         acp_args=args.get("acp_args"),
         role=args.get("role"),
         parent_agent=kw.get("parent_agent"),
-    ),
+        # KENSEI CUSTOM — synthesis + verify primitives (v1.1 plan)
+        synthesize=args.get("synthesize", False),
+        synthesis_prompt=args.get("synthesis_prompt"),
+        verify=args.get("verify", False),
+        verify_rubric=args.get("verify_rubric"),
+    )
+
+registry.register(
+    name="delegate_task",
+    toolset="delegation",
+    schema=DELEGATE_TASK_SCHEMA,
+    handler=lambda args, **kw: _handle_delegate_dispatch(args, **kw),
     check_fn=check_delegate_requirements,
     emoji="🔀",
     dynamic_schema_overrides=_build_dynamic_schema_overrides,

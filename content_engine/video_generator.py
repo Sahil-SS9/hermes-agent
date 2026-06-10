@@ -260,67 +260,85 @@ def create_image_slideshow_video(
     fps: int = 30,
     bg_color: tuple = (18, 18, 18),
 ) -> str:
+    """Full-bleed Ken Burns clip from one or more stills, with optional music.
+
+    Each image is scaled to cover the full 9:16 frame (no letterbox bars) and
+    given a slow push-in via ffmpeg zoompan, so the output reads as motion
+    rather than a frozen frame. If any audio file exists under output/music/,
+    one is picked deterministically and mixed in, trimmed to the clip length;
+    TikTok/Reels punish silent video hard.
     """
-    Create a video slideshow from images with crossfade transitions.
-    """
-    if captions is None:
-        captions = [""] * len(image_paths)
-    
+    if output_path is None:
+        output_dir = Path.home() / "apps" / "content-engine" / "assets" / "videos"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_path = output_dir / f"slideshow_{uuid.uuid4().hex}.mp4"
+
+    frames = int(duration_per_image * fps)
+    # Slow push-in: ~8% zoom over the clip. Upscale first so zoompan's
+    # integer-pixel pan doesn't shimmer.
+    kb_filter = (
+        f"scale={width * 2}:{height * 2}:force_original_aspect_ratio=increase,"
+        f"crop={width * 2}:{height * 2},"
+        f"zoompan=z='min(zoom+0.0014,1.08)':d={frames}"
+        f":x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s={width}x{height}:fps={fps},"
+        f"format=yuv420p"
+    )
+
+    music_dir = Path(__file__).resolve().parent / "output" / "music"
+    tracks = sorted(music_dir.glob("*.mp3")) + sorted(music_dir.glob("*.m4a")) if music_dir.exists() else []
+
+    clip_paths = []
     with tempfile.TemporaryDirectory() as tmpdir:
         tmpdir = Path(tmpdir)
-        
-        headline_font = _get_font(36, bold=True)
-        
-        frame_idx = 0
-        
-        for i, (img_path, caption) in enumerate(zip(image_paths, captions)):
-            # Load and resize image
-            img = Image.open(img_path).convert("RGB")
-            img.thumbnail((width, int(height * 0.7)), Image.LANCZOS)
-            
-            img_frames = int(duration_per_image * fps)
-            
-            for f in range(img_frames):
-                canvas = Image.new("RGB", (width, height), bg_color)
-                draw = ImageDraw.Draw(canvas)
-                
-                # Center image
-                x = (width - img.width) // 2
-                y = (int(height * 0.7) - img.height) // 2 + 50
-                canvas.paste(img, (x, y))
-                
-                # Caption
-                if caption:
-                    draw.text((width // 2, height - 150), caption, fill=(255, 255, 255), font=headline_font, anchor="mt")
-                
-                # Brand footer
-                draw.text((width // 2, height - 60), "Download the app →", fill=(251, 191, 36), font=_get_font(20), anchor="mm")
-                
-                canvas.save(tmpdir / f"frame_{frame_idx:05d}.png")
-                frame_idx += 1
-        
-        # Build video
-        if output_path is None:
-            output_dir = Path.home() / "apps" / "content-engine" / "assets" / "videos"
-            output_dir.mkdir(parents=True, exist_ok=True)
-            output_path = output_dir / f"slideshow_{uuid.uuid4().hex}.mp4"
-        
-        cmd = [
-            "ffmpeg", "-y",
-            "-framerate", str(fps),
-            "-i", str(tmpdir / "frame_%05d.png"),
-            "-c:v", "libx264",
-            "-pix_fmt", "yuv420p",
-            "-crf", "23",
-            "-preset", "fast",
-            str(output_path),
-        ]
-        
+        for i, img_path in enumerate(image_paths):
+            clip = tmpdir / f"clip_{i:03d}.mp4"
+            cmd = [
+                "ffmpeg", "-y",
+                "-loop", "1", "-i", str(img_path),
+                "-vf", kb_filter,
+                "-t", str(duration_per_image),
+                "-c:v", "libx264", "-crf", "21", "-preset", "fast",
+                "-an",
+                str(clip),
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+            if result.returncode != 0:
+                raise RuntimeError(f"FFMPEG failed: {result.stderr[-400:]}")
+            clip_paths.append(clip)
+
+        if len(clip_paths) == 1:
+            visual = clip_paths[0]
+        else:
+            concat_list = tmpdir / "concat.txt"
+            concat_list.write_text("".join(f"file '{c}'\n" for c in clip_paths))
+            visual = tmpdir / "joined.mp4"
+            result = subprocess.run(
+                ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(concat_list),
+                 "-c", "copy", str(visual)],
+                capture_output=True, text=True, timeout=180,
+            )
+            if result.returncode != 0:
+                raise RuntimeError(f"FFMPEG concat failed: {result.stderr[-400:]}")
+
+        total = duration_per_image * len(image_paths)
+        if tracks:
+            # Deterministic per output name so re-runs are reproducible.
+            track = tracks[hash(Path(output_path).stem) % len(tracks)]
+            cmd = [
+                "ffmpeg", "-y", "-i", str(visual), "-i", str(track),
+                "-map", "0:v", "-map", "1:a",
+                "-c:v", "copy", "-c:a", "aac", "-b:a", "128k",
+                "-af", f"afade=t=out:st={max(total - 1.0, 0)}:d=1.0",
+                "-t", str(total), "-shortest",
+                str(output_path),
+            ]
+        else:
+            cmd = ["ffmpeg", "-y", "-i", str(visual), "-c", "copy", str(output_path)]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
         if result.returncode != 0:
-            raise RuntimeError(f"FFMPEG failed: {result.stderr}")
-        
-        return str(output_path)
+            raise RuntimeError(f"FFMPEG mux failed: {result.stderr[-400:]}")
+
+    return str(output_path)
 
 
 def get_video_stats(video_path: str) -> dict:

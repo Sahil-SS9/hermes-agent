@@ -8,12 +8,31 @@ spending. Ledger is a small JSON file; rolls over by calendar month.
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock
 
 _LEDGER = Path(__file__).resolve().parent / "output" / "spend_ledger.json"
-_CAP_GBP = 5.0
+
+# Single source of truth for the monthly cap: config.MONTHLY_BUDGET_GBP,
+# overridable per-environment. Previously this module hardcoded £5 while
+# config said £10, and generation silently degraded to the cheapest model.
+def _default_cap() -> float:
+    env = os.getenv("CONTENT_SPEND_CAP_GBP", "").strip()
+    if env:
+        try:
+            return float(env)
+        except ValueError:
+            pass
+    try:
+        from config import MONTHLY_BUDGET_GBP
+        return float(MONTHLY_BUDGET_GBP)
+    except Exception:  # noqa: BLE001
+        return 5.0
+
+
+_CAP_GBP = _default_cap()
 _lock = Lock()
 
 

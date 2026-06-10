@@ -95,6 +95,19 @@ GENRES = {
             "mood": "energetic, epic, high-contrast",
             "quality": ILLUS_QUALITY, "model": HERO_MODEL,
         },
+        # Reference-set learning: mythic engraved hero posters read as premium.
+        "engraved_legend": {
+            "base": "Dark mythic engraved poster of {subject} as a footballing legend",
+            "comp": ["monumental low-angle heroic figure, stadium ruins and floodlight shafts behind",
+                     "tight dramatic portrait, ornate engraved detail, ball and boots rendered like ancient relics"],
+            "light": ["single dramatic shaft of floodlight through smoke, deep chiaroscuro",
+                      "ember-lit haze catching fine engraved linework"],
+            "medium": ["antique copperplate engraving with ink wash, heavy paper grain",
+                       "dark etched poster art, dense crosshatch shading"],
+            "palette": "charcoal black and desaturated navy with a faint crimson-gold glow",
+            "mood": "mythic, reverent, epic",
+            "quality": ILLUS_QUALITY, "model": BASE_MODEL,
+        },
         "bold_poster": {
             "base": "Bold dynamic matchday poster illustration of {subject}",
             "comp": ["stylised silhouette, high-contrast graphic poster art",
@@ -132,6 +145,34 @@ GENRES = {
         },
     },
     "sahil_twitter": {
+        # Modelled on the 2026-06 reference set (~/Reference Images): dense
+        # cyberpunk HUD posters — layered diegetic interface panels, a strong
+        # character focal point, neon rim light, extreme detail density.
+        # Panels carry abstract glyphs only; real text is overlaid in Pillow.
+        "hud_poster": {
+            "base": "Hyper-detailed cyberpunk anime poster of {subject}",
+            "comp": ["lone focal character centre-frame surrounded by layered floating holographic HUD panels and status readouts with abstract glyphs",
+                     "dense diegetic interface panels framing the edges, dramatic depth, rain-slick neon cityscape behind the focal subject"],
+            "light": ["glowing violet and magenta neon rim light against near-black, volumetric haze",
+                      "electric cyan and green terminal glow, deep shadow, cinematic contrast"],
+            "medium": ["ultra-detailed digital anime illustration, intricate gear and cable detail, crisp rendering",
+                       "premium cyberpunk key-art quality, dense environmental storytelling props"],
+            "palette": "near-black with electric violet, magenta and acid-green accents",
+            "mood": "intense, technical, obsessive craft",
+            "quality": ILLUS_QUALITY, "model": HERO_MODEL,
+        },
+        "dark_engraving": {
+            "base": "Dark vintage engraved-etching poster of {subject}",
+            "comp": ["monumental centred heroic figure emerging from shadow, ruined classical architecture behind",
+                     "tight dramatic three-quarter portrait, ornate engraved detail filling the frame"],
+            "light": ["single shaft of pale light from above, deep chiaroscuro",
+                      "smoky atmospheric glow catching fine engraved linework"],
+            "medium": ["antique copperplate engraving and ink wash, heavy paper grain, Gustave Doré influence",
+                       "dark academia etching, dense crosshatch shading"],
+            "palette": "desaturated sepia-green and charcoal black with a faint gold glow",
+            "mood": "epic, mythic, timeless",
+            "quality": ILLUS_QUALITY, "model": BASE_MODEL,
+        },
         "ai_concept": {
             "base": "Striking conceptual editorial tech illustration: {subject}",
             "comp": ["sleek isometric three-quarter perspective, negative space top-right",

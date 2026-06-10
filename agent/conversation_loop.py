@@ -744,6 +744,17 @@ def run_conversation(
         # the OpenAI SDK. Sanitizing here prevents the 3-retry cycle.
         _sanitize_messages_surrogates(api_messages)
 
+        # KENSEI CUSTOM — headroom compression hook
+        # Compress api_messages once before the retry loop (gated on headroom.enabled).
+        # On error, returns original messages unchanged (never drops context).
+        try:
+            from agent.headroom_hook import compress_messages as _hr_compress
+            _ctx_limit = agent.context_compressor.context_length if agent.context_compressor else None
+            api_messages = _hr_compress(api_messages, model=agent.model, model_limit=_ctx_limit)
+        except ImportError:
+            pass  # headroom_hook module not available — no-op
+        # /KENSEI CUSTOM
+
         # Calculate approximate request size for logging
         total_chars = sum(len(str(msg)) for msg in api_messages)
         approx_tokens = estimate_messages_tokens_rough(api_messages)

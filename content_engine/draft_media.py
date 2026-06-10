@@ -52,6 +52,19 @@ def build_prompt(brand: str, body_text: str, visual_description: str = "") -> st
 from model_config import BASE_MODEL  # noqa: E402
 
 
+# Platform -> generation aspect. The base image must be born at the final
+# aspect; cropping a square into 9:16 throws away ~60% of the composition.
+_PLATFORM_ASPECT = {
+    "instagram": "portrait_4_5",
+    "tiktok": "portrait_9_16",
+    "linkedin": "landscape",
+}
+
+
+def aspect_for(platform: str) -> str:
+    return _PLATFORM_ASPECT.get((platform or "").lower(), "square")
+
+
 def generate_draft_image(
     prompt: str,
     brand: str = "",
@@ -59,6 +72,7 @@ def generate_draft_image(
     draft_id: str = "",
     model: Optional[str] = None,
     negative_prompt: str = "",
+    aspect: Optional[str] = None,
 ) -> Optional[str]:
     """Generate a raw (textless) base image down the degrading chain.
 
@@ -67,6 +81,7 @@ def generate_draft_image(
     """
     primary = model or BASE_MODEL
     chain = [primary] + [m for m in FAL_CHAIN if m != primary]
+    aspect = aspect or aspect_for(platform)
 
     # 1. FAL tiers, degrading on failure/rate-limit.
     for tier in chain:
@@ -74,7 +89,7 @@ def generate_draft_image(
             import fal_client
 
             path = fal_client.generate_image(
-                prompt, model=tier, aspect="square", negative_prompt=negative_prompt
+                prompt, model=tier, aspect=aspect, negative_prompt=negative_prompt
             )
             if path and os.path.exists(path):
                 print(f"[draft_media] base generated via {tier}: {path}")
@@ -229,30 +244,76 @@ def generate_post_image(
 
 def generate_draft_video(
     image_path: str, caption: str = "", brand: str = "", draft_id: str = "",
+    hero: bool = False,
 ) -> Optional[str]:
-    """Free motion video (ffmpeg) from a generated image + caption. mp4 or None.
+    """Motion video for a draft. Degrading chain, best first:
 
-    A paid AI-video model (FAL seedance/wan) can be slotted in later as a
-    budget-gated upgrade; ffmpeg keeps the default at zero cost.
+      1. AI image-to-video (FAL seedance_fast, ~£0.09/5s) — budget-gated, only
+         when ``hero`` is set or CONTENT_AI_VIDEO=1. Real motion from the
+         branded image; this is the gold-standard tier.
+      2. HyperFrames (£0) — GSAP-animated full-bleed overlay on the image.
+      3. ffmpeg Ken Burns (£0) — full-bleed slow zoom, always succeeds.
+
+    A silent static frame is no longer an acceptable output: every tier here
+    produces motion, and the ffmpeg tier mixes in a music bed when one exists
+    under output/music/.
     """
     if not image_path or not os.path.exists(image_path):
         print("[draft_media] video needs a base image; none available.")
         return None
+
+    out_dir = OUTPUT_ROOT / (brand or "misc") / "video"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out = str(out_dir / f"{draft_id or uuid.uuid4().hex[:8]}.mp4")
+
+    # 1. Budget-gated AI motion (seedance image-to-video).
+    if hero or os.getenv("CONTENT_AI_VIDEO", "").strip() == "1":
+        try:
+            import budget
+            from ai_video_generator import MODEL_COST, generate_video as ai_generate
+
+            model = os.getenv("CONTENT_AI_VIDEO_MODEL", "seedance_fast").strip()
+            cost_gbp = round(5 * MODEL_COST.get(model, 0.05) * 0.8, 3)  # USD->GBP approx
+            if budget.can_spend(cost_gbp):
+                motion = (caption or "subtle cinematic motion").strip()[:200]
+                path = ai_generate(
+                    brand=brand, operation="image2vid",
+                    prompt=f"Subtle cinematic camera motion, gentle parallax, atmosphere. {motion}",
+                    image_path=image_path, model=model, duration=5,
+                    aspect_ratio="9:16", filename=f"{draft_id or uuid.uuid4().hex[:8]}.mp4",
+                )
+                if path and os.path.exists(path):
+                    budget.record(cost_gbp, label=f"video:{model}:{draft_id}")
+                    print(f"[draft_media] AI video saved: {path}")
+                    return path
+            else:
+                print(f"[draft_media] budget cap; skipping AI video ({model})")
+        except Exception as exc:  # noqa: BLE001
+            print(f"[draft_media] AI video failed: {exc}")
+
+    # 2. HyperFrames animated overlay (free).
+    try:
+        from hyperframes_video import generate_screenshot_overlay_video
+
+        path = generate_screenshot_overlay_video(
+            brand, overlay_text=_headline_from({"title": caption, "body_text": caption}),
+            screenshot_path=image_path, draft_id=draft_id,
+        )
+        if path and os.path.exists(path):
+            print(f"[draft_media] hyperframes video saved: {path}")
+            return path
+    except Exception as exc:  # noqa: BLE001
+        print(f"[draft_media] hyperframes failed: {exc}")
+
+    # 3. ffmpeg Ken Burns fallback (free, always works).
     try:
         from video_generator import create_image_slideshow_video
 
-        out_dir = OUTPUT_ROOT / (brand or "misc") / "video"
-        out_dir.mkdir(parents=True, exist_ok=True)
-        out = str(out_dir / f"{draft_id or uuid.uuid4().hex[:8]}.mp4")
-        # No burned-in caption: the post copy carries the text, and multiline
-        # captions trip a PIL anchor limitation. The clip is a clean branded
-        # motion shot of the image. (caption kept in the signature for a future
-        # AI-video upgrade that can use it as the generation prompt.)
         path = create_image_slideshow_video(
             image_paths=[image_path],
             captions=None,
             output_path=out,
-            duration_per_image=5.0,
+            duration_per_image=6.0,
         )
         if path and os.path.exists(path):
             print(f"[draft_media] video saved: {path}")

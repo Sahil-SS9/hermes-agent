@@ -85,17 +85,6 @@ def gen_copy(brand, caption):
     }
     return copies.get(brand, f"{caption}\n\nbuilding in public, raw and real.")
 
-def gen_image_prompt(brand, caption, reference_images):
-    ref = "original composition inspired by a reference but completely redesigned"
-    prompts = {
-        "sahil_twitter": f"A minimalist desk setup with a laptop displaying real-time analytics and a notebook with handwritten notes, morning light casting long shadows, indie maker aesthetic, photorealistic. {ref}",
-        "sahil_linkedin": f"A bright whiteboard covered in product roadmap sketches and sticky notes, a coffee cup on the side, professional editorial style, natural window lighting, clean composition. {ref}",
-        "plenishd": f"A rustic wooden kitchen table with fresh herbs, olive oil bottle, and a steaming bowl of pasta, warm afternoon sunlight, British food photography style, cosy and inviting. {ref}",
-        "coachos": f"A leather notebook open to a hand-drawn coaching framework, a smartphone showing a client session timer, soft natural light, professional documentary photography style. {ref}",
-        "matchdaymaestro": f"A smartphone screen showing a prediction leaderboard interface against a stadium backdrop, evening floodlights, vibrant team colours, dynamic sports photo style. {ref}",
-    }
-    return prompts.get(brand, prompts["sahil_twitter"])
-
 for idx, item in enumerate(items):
     print(f"\n{'='*60}", flush=True)
     print(f"Processing item {idx+1}/{len(items)}", flush=True)
@@ -138,16 +127,17 @@ for idx, item in enumerate(items):
     )
     print(f"Draft created: {draft_id}", flush=True)
     
-    # Generate image
-    image_prompt = gen_image_prompt(brand, caption, images)
-    print(f"Image prompt: {image_prompt[:200]}...", flush=True)
-    
+    # Generate image. No scene_prompt: the Track A prompt engine (or the
+    # infographic router) art-directs from the draft itself, so every post
+    # gets a varied, brand-distinct prompt instead of a static one-liner.
     try:
         from draft_media import generate_post_image
         from database import get_draft
         d = get_draft(draft_id)
         if d:
-            path = generate_post_image(d, scene_prompt=image_prompt)
+            d = dict(d)
+            d.setdefault("visual_description", caption.strip()[:120])
+            path = generate_post_image(d)
             if path:
                 update_draft_ai_image_path(draft_id, path)
                 print(f"Image generated: {path}", flush=True)

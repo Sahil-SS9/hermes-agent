@@ -88,8 +88,16 @@ _SUMMARY_RATIO = 0.20
 # Absolute ceiling for summary tokens (even on very large context windows)
 _SUMMARY_TOKENS_CEILING = 12_000
 
-# Placeholder used when pruning old tool results
-_PRUNED_TOOL_PLACEHOLDER = "[Old tool output cleared to save context space]"
+# Placeholder used when pruning old tool results — includes retrieval pointer
+# so the model can recover the original via session_search (role_filter='tool').
+# The session DB preserves full tool outputs indexed by tool name + call ID;
+# this placeholder tells the model the retrieval path exists.
+_PRUNED_TOOL_PLACEHOLDER = (
+    "[Old tool output cleared to save context space. "
+    "The full original output is preserved in the session database. "
+    "Retrieve it by calling session_search with role_filter='tool' "
+    "and the tool name or a content keyword as the query.]"
+)
 
 # Chars per token rough estimate
 _CHARS_PER_TOKEN = 4

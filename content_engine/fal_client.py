@@ -76,7 +76,28 @@ def _poll_queue_result(model_id: str, request_id: str, timeout: int = 120) -> Op
     return None
 
 
-_ASPECT_MAP = {"square": "square_hd", "landscape": "landscape_16_9", "portrait": "portrait_16_9"}
+# Platform-native sizes. IG feed is 4:5 and TikTok/Reels 9:16 — generating
+# square and centre-cropping later destroys the composition, so the base must
+# be generated at the final aspect. Custom width/height dicts are accepted by
+# the flux/krea/seedream families; models that only take preset enums fall
+# back to the nearest preset via _image_size_for.
+_ASPECT_MAP = {
+    "square": "square_hd",
+    "landscape": "landscape_16_9",
+    "portrait": "portrait_16_9",
+    "portrait_4_5": {"width": 1024, "height": 1280},
+    "portrait_9_16": {"width": 1080, "height": 1920},
+}
+
+# Models that reject custom size objects and need a preset enum instead.
+_PRESET_ONLY_MODELS = {"nano_banana"}
+_PRESET_FALLBACK = {"portrait_4_5": "portrait_4_3", "portrait_9_16": "portrait_16_9"}
+
+
+def _image_size_for(model: str, aspect: str):
+    if model in _PRESET_ONLY_MODELS and aspect in _PRESET_FALLBACK:
+        return _PRESET_FALLBACK[aspect]
+    return _ASPECT_MAP.get(aspect, "square_hd")
 
 
 def _images_from(result: dict) -> list:
@@ -127,7 +148,7 @@ def generate_image(
         SLOW_MODELS = {"nano_banana", "krea_large", "flux_pro", "ideogram"}
 
     model_id = IMAGE_MODELS.get(model, IMAGE_MODELS["krea_medium"])
-    payload = {"prompt": prompt, "image_size": _ASPECT_MAP.get(aspect, "square_hd"), "num_images": 1}
+    payload = {"prompt": prompt, "image_size": _image_size_for(model, aspect), "num_images": 1}
     # negative_prompt only helps diffusion models; reasoning models reject/ignore it.
     if negative_prompt and model not in ("nano_banana",):
         payload["negative_prompt"] = negative_prompt

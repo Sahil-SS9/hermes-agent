@@ -412,6 +412,57 @@ class TestSkillInvocationSkip:
         assert out == {"action": "rewrite", "text": record.rewritten}
 
 
+DELEGATE_PROMPT = (
+    "delegate_task with tasks=['research headroom', 'audit compressor', "
+    "'benchmark caching'] synthesize=true verify_rubric='cite line numbers'"
+)
+
+
+class TestStructuredCommandSkip:
+    def _forbid_optimizer(self, plugin, monkeypatch):
+        monkeypatch.setattr(
+            plugin, "_run_optimizer_bridge",
+            lambda *a, **k: pytest.fail("optimizer must not run for structured commands"))
+
+    def test_pre_user_message_skips_delegate_commands(self, plugin, monkeypatch):
+        self._forbid_optimizer(plugin, monkeypatch)
+        assert plugin._on_pre_user_message(message=DELEGATE_PROMPT, session_id="s1") is None
+
+    def test_pre_gateway_dispatch_skips_delegate_commands(self, plugin, monkeypatch):
+        self._forbid_optimizer(plugin, monkeypatch)
+        event = SimpleNamespace(text=DELEGATE_PROMPT)
+        assert plugin._on_pre_gateway_dispatch(event=event) is None
+
+    def test_get_tui_preview_bypasses_delegate_commands(self, plugin, monkeypatch):
+        self._forbid_optimizer(plugin, monkeypatch)
+        out = plugin.get_tui_preview("sess", DELEGATE_PROMPT)
+        assert out == {"status": "bypass", "reason": "structured_command"}
+
+    def test_fenced_code_blocks_bypass(self, plugin, monkeypatch):
+        self._forbid_optimizer(plugin, monkeypatch)
+        msg = "please review this\n```python\nprint('hi')\n```"
+        assert plugin._on_pre_user_message(message=msg, session_id="s1") is None
+
+    def test_verb_with_trailing_colon_bypasses(self, plugin, monkeypatch):
+        self._forbid_optimizer(plugin, monkeypatch)
+        msg = "delegate: split this into three subtasks and synthesise"
+        assert plugin._on_pre_user_message(message=msg, session_id="s1") is None
+
+    def test_env_var_extends_verb_list(self, plugin, monkeypatch):
+        engine = sys.modules["hermes_plugins.prompt_optimizer.engine"]
+        monkeypatch.setenv("PROMPT_OPTIMIZER_BYPASS_VERBS", "fanout, council")
+        assert engine.is_structured_command("fanout these 4 tasks")
+        assert engine.is_structured_command("council review this plan")
+        assert not engine.is_structured_command("plan my week")
+
+    def test_mid_sentence_verb_still_optimised(self, plugin, monkeypatch):
+        record = _fake_record(plugin)
+        monkeypatch.setattr(plugin, "_run_optimizer_bridge", lambda *a, **k: record)
+        out = plugin._on_pre_user_message(
+            message="should I delegate this work to someone?", session_id="s1")
+        assert out == {"action": "rewrite", "text": record.rewritten}
+
+
 class TestRewriteWallClockTimeout:
     def test_hung_llm_call_fails_open(self, plugin, monkeypatch):
         """A provider call that ignores its timeout must not block the turn."""

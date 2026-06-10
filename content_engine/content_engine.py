@@ -71,9 +71,12 @@ def run_stage_1(
         brand_platforms = brand_config.get("platforms", [])
         effective_platform = platform or (brand_platforms[0] if brand_platforms else "twitter")
 
-        # Generate — branch personal brands to LLM path
-        if use_llm and brand in LLM_BRANDS:
-            from llm_generate import generate_drafts_llm
+        # Generate — LLM path for personal brands, and for every brand when a
+        # direct LLM endpoint is configured (CONTENT_LLM_BASE_URL/MODEL).
+        # generate_drafts_llm falls back to static templates per topic on
+        # gate/endpoint failure, so this never produces fewer drafts.
+        from llm_generate import _llm_config, generate_drafts_llm
+        if use_llm and (brand in LLM_BRANDS or _llm_config()):
             drafts = generate_drafts_llm(brand, topics, platform=effective_platform)
         else:
             drafts = generate_drafts(brand, topics, platform=effective_platform)

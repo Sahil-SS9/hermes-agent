@@ -33,7 +33,7 @@ These scripts are retained as manual tools for specific operations. They are not
 - `update_investigation.py` - Update investigation data
 - `uptime_ping.py` - Uptime monitoring ping
 - `system_report.py` - System report generator
-- `misa-auto-join.py` - Misa-Misa voice auto-join helper
+- ~~`misa-auto-join.py`~~ — removed (script was orphaned, no cron refs)
 - `post_remediation_audit.sh` - Post-remediation audit
 - `skill-broker-ledger.py` - Skill broker ledger management
 - `skill-broker-revoke-hook.py` - Skill broker revocation hook

@@ -81,6 +81,33 @@ def _load_live_variables(brand: str, topic: dict) -> dict:
 PLATFORM_LENGTH = {
     "twitter": {"max": 280, "min": 180},
     "linkedin": {"max": 3000, "min": 600, "story_floor": 400},
+    # First ~125 chars show before "more" on IG; the hook must land there.
+    "instagram": {"max": 1500, "min": 120},
+    "tiktok": {"max": 300, "min": 60},
+}
+
+# Positioning fallback for product brands that have no voice SKILL.md.
+BRAND_VOICE_FALLBACK = {
+    "plenishd": (
+        "Plenishd: UK voice-first kitchen inventory app. 'Snap it. Say it. Stock it.' "
+        "Voice of a real busy UK parent: warm, wry, practical, zero corporate polish. "
+        "Talk about real kitchen chaos, food waste guilt, takeaway-money regret. "
+        "Never invent statistics or user numbers."
+    ),
+    "coachos": (
+        "CoachSense (formerly CoachOS): grassroots football coaching platform. "
+        "Voice of a thoughtful grassroots coach: calm, craft-obsessed, generous with "
+        "knowledge. Editorial restraint, no hype. Beta opens August 2026; never claim it is live."
+    ),
+    "matchdaymaestro": (
+        "MatchdayMaestro: football prediction and trivia companion. Voice of the "
+        "sharpest mate in the group chat: quick, confident, banter without cruelty. "
+        "Predictions and bragging rights, never betting or odds talk."
+    ),
+    "kicktionary": (
+        "Kick-tionary: football tactics education for ages 6-18. Voice of an "
+        "encouraging junior coach: clear, playful, jargon explained simply. Safe for kids."
+    ),
 }
 
 
@@ -109,7 +136,7 @@ def build_generation_prompt(
     # Load brand voice
     voice_skill = _load_voice_skill(brand)
     if not voice_skill:
-        voice_skill = f"Write as {brand}, direct and specific."
+        voice_skill = BRAND_VOICE_FALLBACK.get(brand, f"Write as {brand}, direct and specific.")
 
     # Load exemplars for pillar
     exemplars = _load_exemplars(brand, pillar, platform)
@@ -135,6 +162,14 @@ def build_generation_prompt(
     elif platform == "linkedin":
         story_floor = plat_info.get("story_floor", 300)
         length_rule = f"Write a LinkedIn post ({min_chars}-{max_chars} characters, at least {story_floor} chars for proper storytelling). Setup-Evidence-Frame structure. Hashtags at the end."
+    elif platform == "instagram":
+        length_rule = (f"Write an Instagram caption ({min_chars}-{max_chars} characters). "
+                       "The first 125 characters must work as a standalone hook (shown before 'more'). "
+                       "Short paragraphs, line breaks between them, 3-5 niche hashtags at the end.")
+    elif platform == "tiktok":
+        length_rule = (f"Write a TikTok caption ({min_chars}-{max_chars} characters). "
+                       "Punchy hook, conversational, 2-4 hashtags. The video carries the story; "
+                       "the caption sets up curiosity.")
     else:
         length_rule = f"Write a social post ({min_chars}-{max_chars} characters)."
 
@@ -272,6 +307,56 @@ _SELF_CALL = False
 When False (cron mode), the cron agent handles generation via its own prompt."""
 
 
+def _llm_config() -> Optional[dict]:
+    """Direct HTTP generation config (OpenAI-compatible chat completions).
+
+    Configured via env so the model can be repointed without a code change:
+      CONTENT_LLM_BASE_URL  e.g. https://opencode.ai/zen/v1
+      CONTENT_LLM_MODEL     e.g. mimo-v2.5-free
+      CONTENT_LLM_API_KEY   bearer key (optional for keyless endpoints)
+    Returns None when not configured, in which case the old cron-agent
+    mechanism (build_generation_prompt read by the cron agent) still applies.
+    """
+    base = os.getenv("CONTENT_LLM_BASE_URL", "").strip().rstrip("/")
+    model = os.getenv("CONTENT_LLM_MODEL", "").strip()
+    if not base or not model:
+        return None
+    return {"base": base, "model": model, "key": os.getenv("CONTENT_LLM_API_KEY", "").strip()}
+
+
+def _call_llm(system: str, user: str, cfg: dict, timeout: int = 90) -> Optional[str]:
+    """One chat-completions call. Returns the text or None on any failure."""
+    try:
+        import requests
+    except ImportError:
+        return None
+    headers = {"Content-Type": "application/json"}
+    if cfg.get("key"):
+        headers["Authorization"] = f"Bearer {cfg['key']}"
+    try:
+        r = requests.post(
+            f"{cfg['base']}/chat/completions",
+            json={
+                "model": cfg["model"],
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                "temperature": 0.8,
+                "max_tokens": 1200,
+            },
+            headers=headers, timeout=timeout,
+        )
+        if r.status_code != 200:
+            print(f"[llm_generate] LLM HTTP {r.status_code}: {r.text[:160]}", file=sys.stderr)
+            return None
+        text = (r.json().get("choices") or [{}])[0].get("message", {}).get("content", "")
+        return text.strip() or None
+    except Exception as exc:  # noqa: BLE001 (generation must degrade, not crash the cron)
+        print(f"[llm_generate] LLM call failed: {exc}", file=sys.stderr)
+        return None
+
+
 def generate_one(
     brand: str,
     topic: dict,
@@ -280,17 +365,31 @@ def generate_one(
 ) -> Optional[dict]:
     """Generate one draft: build prompt → call model → gate; retry on fail.
 
-    When SELF_CALL is True (CLI --self-call), the calling agent reads the
-    system prompt instructions and generates the text. When False (cron mode),
-    this function returns None and the cron agent handles generation via its
-    own LLM call using the prompt built by build_generation_prompt().
+    With CONTENT_LLM_BASE_URL/MODEL set, generation happens here directly via
+    an OpenAI-compatible endpoint, gated by gate_post with one retry carrying
+    the gate's feedback. Without that config, behaviour is unchanged: cron
+    mode returns None and the cron agent generates from
+    build_generation_prompt().
 
-    Returns:
-        Draft dict with the same shape as llm_drafts.generate_drafts items:
-        {id, brand, platform, pillar, topic, title, body_text, content_type,
-         visual_description, slop_audit}
-        or None if not ready (cron mode) or all retries fail.
+    Returns a draft dict (same shape as llm_drafts.generate_drafts items)
+    or None.
     """
+    cfg = _llm_config()
+    if cfg:
+        feedback = None
+        for _ in range(max_retries + 1):
+            prompts = build_generation_prompt(brand, topic, platform, retry_feedback=feedback)
+            body = _call_llm(prompts["system"], prompts["user"], cfg)
+            if not body:
+                return None
+            draft = generate_with_text(brand, topic, platform, body)
+            if draft:
+                return draft
+            gate = gate_post(body, platform)
+            feedback = "; ".join(gate.get("issues", [])) or "rejected by quality gate"
+        print(f"[llm_generate] {brand}/{platform}: all retries failed the gate", file=sys.stderr)
+        return None
+
     if not _SELF_CALL:
         # Cron mode — return None; the cron agent generates text from the prompt
         return None

@@ -53,5 +53,5 @@ wesker:      allow_bots: mentions
 gojo:        allow_bots: mentions
 octacon:     allow_bots: mentions
 ceecee:      allow_bots: mentions
-miyagi:      allow_bots: mentions
+mrhermagi:      allow_bots: mentions
 ```
