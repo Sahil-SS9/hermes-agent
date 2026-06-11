@@ -1527,7 +1527,13 @@ def connect(
                 # FULL (was NORMAL): fsync before each checkpoint to narrow the
                 # crash window that can leave a b-tree page header torn.
                 conn.execute("PRAGMA synchronous=FULL")
-                conn.execute("PRAGMA wal_autocheckpoint=100")
+                # Passive checkpointing: auto-checkpoint disabled so the WAL
+                # checkpoint cannot race with concurrent writer processes and
+                # corrupt index B-tree pages.  The gateway dispatcher runs a
+                # manual PRAGMA wal_checkpoint(TRUNCATE) after each tick from
+                # a single thread — no race possible.  A safety-net cron
+                # checkpoints every 5 min in case the dispatcher is down.
+                conn.execute("PRAGMA wal_autocheckpoint=0")
                 conn.execute("PRAGMA foreign_keys=ON")
                 # Zero freed pages so a later torn write cannot expose stale
                 # cell content; persisted in the DB header for new DBs.
@@ -3693,6 +3699,28 @@ def heartbeat_claim(
                 )
             return True
         return False
+
+
+def _clear_stale_ready_claims(conn: sqlite3.Connection) -> int:
+    """Clear orphaned claim_lock / worker_pid fields from ready tasks.
+
+    When a task is manually reset from running→ready (e.g. after DB
+    recovery, operator intervention, or a kill -9 on stuck workers),
+    the claim_lock and worker_pid columns retain their old values.
+    The dispatcher interprets a non-NULL claim_lock as an active claim
+    and skips the task — it stays stuck in 'ready' forever.
+
+    This runs at the start of every dispatch tick so the board self-
+    heals without operator intervention.  Returns the number of tasks
+    cleaned.
+    """
+    with write_txn(conn):
+        cur = conn.execute(
+            "UPDATE tasks SET claim_lock = NULL, claim_expires = NULL, "
+            "worker_pid = NULL, started_at = NULL "
+            "WHERE status = 'ready' AND claim_lock IS NOT NULL"
+        )
+        return cur.rowcount
 
 
 def release_stale_claims(
@@ -7520,6 +7548,13 @@ def dispatch_once(
 
     # Reap zombie children from previously spawned workers.
     reap_worker_zombies()
+
+    # Clean stale claim locks on ready tasks — when tasks are manually
+    # reset from running→ready (e.g. after DB recovery), orphaned
+    # claim_lock / worker_pid fields block re-dispatch because the
+    # dispatcher sees an active claim.  Clear them now so the board
+    # self-heals without operator intervention.
+    _clear_stale_ready_claims(conn)
 
     result = DispatchResult()
     result.reclaimed = release_stale_claims(conn)

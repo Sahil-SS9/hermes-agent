@@ -855,6 +855,31 @@ class GatewayKanbanWatchersMixin:
                     except Exception:
                         pass
 
+        def _checkpoint_all_boards() -> None:
+            """Manual WAL checkpoint on every board after a dispatch tick.
+
+            With wal_autocheckpoint=0, SQLite never triggers automatic
+            checkpoints.  Only the dispatcher runs them, from a single
+            thread, eliminating the WAL checkpoint race that corrupts
+            index B-tree pages under concurrent cross-process write load.
+            """
+            try:
+                boards = _kb.list_boards(include_archived=False)
+            except Exception:
+                boards = [_kb.read_board_metadata(_kb.DEFAULT_BOARD)]
+            for b in boards:
+                slug = b.get("slug") or _kb.DEFAULT_BOARD
+                try:
+                    db_path = _kb.kanban_db_path(board=slug)
+                    if db_path.exists():
+                        conn = _kb._sqlite_connect(db_path)
+                        try:
+                            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                        finally:
+                            conn.close()
+                except Exception:
+                    pass  # transient — next tick will retry
+
         def _tick_once() -> "list[tuple[str, Optional[object]]]":
             """Run one dispatch_once per board. Returns (slug, result) pairs.
 
@@ -1038,6 +1063,18 @@ class GatewayKanbanWatchersMixin:
                             res.promoted,
                             len(res.auto_blocked) if hasattr(res.auto_blocked, "__len__") else 0,
                         )
+                # After every dispatch tick, run a manual WAL checkpoint
+                # from this single thread.  Auto-checkpoint is disabled
+                # (wal_autocheckpoint=0) on all connections so concurrent
+                # worker processes never trigger a checkpoint mid-write.
+                # Only the dispatcher checkpoints — no race possible.
+                try:
+                    await asyncio.to_thread(_checkpoint_all_boards)
+                except Exception:
+                    logger.debug(
+                        "kanban dispatcher: WAL checkpoint skipped (transient)",
+                        exc_info=True,
+                    )
                 # Health telemetry (aggregate across boards)
                 ready_pending = await asyncio.to_thread(_ready_nonempty)
                 if ready_pending and not any_spawned:
