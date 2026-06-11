@@ -16,4 +16,4 @@ set +a
 
 export PYTHONPATH="${CE}:${PYTHONPATH:-}"
 
-/home/kensei/repos/KenseiAgent/.venv/bin/python content_engine.py review-digest --since-minutes 75
+/home/kensei/repos/KenseiAgent/.venv/bin/python /home/kensei/repos/KenseiAgent/content_engine/content_engine.py review-digest --since-minutes 75
