@@ -372,6 +372,7 @@ class CLIAgentSetupMixin:
                 platform="cli",
                 session_db=self._session_db,
                 clarify_callback=self._clarify_callback,
+                ask_user_questions_callback=self._ask_user_questions_callback,
                 reasoning_callback=self._current_reasoning_callback(),
 
                 fallback_model=self._fallback_model,

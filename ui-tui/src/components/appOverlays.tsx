@@ -13,6 +13,7 @@ import { ModelPicker } from './modelPicker.js'
 import { OverlayHint } from './overlayControls.js'
 import { PluginsHub } from './pluginsHub.js'
 import { ApprovalPrompt, ClarifyPrompt, ConfirmPrompt } from './prompts.js'
+import { AskUserQuestionsTool } from './askUserQuestionsTool.js'
 import { SkillsHub } from './skillsHub.js'
 
 const COMPLETION_WINDOW = 16
@@ -20,10 +21,11 @@ const COMPLETION_WINDOW = 16
 export function PromptZone({
   cols,
   onApprovalChoice,
+  onAskUserQuestionsAnswer,
   onClarifyAnswer,
   onSecretSubmit,
   onSudoSubmit
-}: Pick<AppOverlaysProps, 'cols' | 'onApprovalChoice' | 'onClarifyAnswer' | 'onSecretSubmit' | 'onSudoSubmit'>) {
+}: Pick<AppOverlaysProps, 'cols' | 'onApprovalChoice' | 'onAskUserQuestionsAnswer' | 'onClarifyAnswer' | 'onSecretSubmit' | 'onSudoSubmit'>) {
   const overlay = useStore($overlayState)
   const theme = useStore($uiTheme)
 
@@ -60,6 +62,19 @@ export function PromptZone({
           onAnswer={onClarifyAnswer}
           onCancel={() => onClarifyAnswer('')}
           req={overlay.clarify}
+          t={theme}
+        />
+      </Box>
+    )
+  }
+
+  if (overlay.askUserQuestions) {
+    return (
+      <Box flexDirection="column" flexShrink={0} paddingX={1} paddingY={1}>
+        <AskUserQuestionsTool
+          onAnswer={onAskUserQuestionsAnswer}
+          onCancel={() => onAskUserQuestionsAnswer({}, overlay.askUserQuestions.requestId)}
+          req={overlay.askUserQuestions}
           t={theme}
         />
       </Box>
