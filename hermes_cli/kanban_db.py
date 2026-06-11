@@ -1203,6 +1203,7 @@ _INITIALIZED_PATHS: set[str] = set()
 _INIT_LOCK = threading.RLock()
 _SQLITE_HEADER = b"SQLite format 3\x00"
 DEFAULT_BUSY_TIMEOUT_MS = 120_000
+_conn_paths: dict[int, str] = {}  # id(conn) → db path for write_txn lock resolution
 
 
 def _resolve_busy_timeout_ms() -> int:
@@ -1235,6 +1236,10 @@ def _sqlite_connect(path: Path) -> sqlite3.Connection:
     # the PRAGMA explicitly so it is observable and survives future wrapper
     # changes. Parameter binding is not supported for PRAGMA assignments.
     conn.execute(f"PRAGMA busy_timeout={busy_timeout_ms}")
+    # Stash the path so write_txn can resolve the cross-process lock file.
+    # sqlite3.Connection does not allow arbitrary attribute assignment in
+    # all Python builds, so use a module-level dict keyed by id(conn).
+    _conn_paths[id(conn)] = str(path)
     return conn
 
 
@@ -2088,27 +2093,54 @@ def write_txn(conn: sqlite3.Connection):
     task + recording an event, etc.).  A claim CAS inside this context is
     atomic -- at most one concurrent writer can succeed.
 
-    The explicit ROLLBACK on exception is wrapped in try/except so that
-    a SQLite auto-rollback (which leaves no active transaction) does not
-    shadow the original exception with a spurious rollback error.
+    Acquires a cross-process file lock (``.write_lock`` sidecar) so that
+    only one process may enter a write transaction at any instant,
+    eliminating the WAL checkpoint race that can corrupt index pages under
+    heavy concurrent write load across processes.
     """
-    conn.execute("BEGIN IMMEDIATE")
-    try:
-        yield conn
-    except Exception:
-        try:
-            conn.execute("ROLLBACK")
-        except sqlite3.OperationalError:
-            # SQLite has already auto-rolled-back the transaction (typical
-            # under EIO, lock contention, or corruption). Nothing to undo;
-            # do not let this secondary failure shadow the real one.
-            pass
-        raise
+    # Resolve the sidecar path through the module-level registry so
+    # we can acquire the cross-process lock before BEGIN IMMEDIATE.
+    db_path_str = _conn_paths.get(id(conn))
+    if db_path_str:
+        lock_path = Path(db_path_str).with_name(Path(db_path_str).name + ".write_lock")
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_handle = lock_path.open("a+b")
     else:
-        conn.execute("COMMIT")
-        # Post-commit file-length check: header page_count must match actual file pages.
-        # A discrepancy means a torn-extend — raise now rather than silently corrupt.
-        _check_file_length_invariant(conn)
+        lock_handle = None
+    try:
+        if lock_handle is not None:
+            if _IS_WINDOWS:
+                import msvcrt
+                lock_handle.seek(0)
+                msvcrt.locking(lock_handle.fileno(), msvcrt.LK_LOCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            yield conn
+        except Exception:
+            try:
+                conn.execute("ROLLBACK")
+            except sqlite3.OperationalError:
+                pass
+            raise
+        else:
+            conn.execute("COMMIT")
+        finally:
+            _check_file_length_invariant(conn)
+    finally:
+        if lock_handle is not None:
+            try:
+                if _IS_WINDOWS:
+                    import msvcrt
+                    lock_handle.seek(0)
+                    msvcrt.locking(lock_handle.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+            finally:
+                lock_handle.close()
 
 
 # ---------------------------------------------------------------------------
