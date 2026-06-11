@@ -822,8 +822,6 @@ session_reset:
   at_hour: 4
   idle_minutes: 120
   mode: both
-smart_model_routing:
-  enabled: false
 streaming:
   buffer_threshold: 20
   edit_interval: 0.8
