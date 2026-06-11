@@ -66,10 +66,30 @@ def _cleanup_temp_dir(temp_dir: Path):
             print(f"Warning: Failed to clean up temp dir {temp_dir}: {e}")
 
 
+def _chromium_executable() -> Optional[str]:
+    """Locate an arm64 headless Chromium for puppeteer.
+
+    HyperFrames' own cached chrome-headless-shell is x86-64 (Google ships no
+    linux-arm64 Chrome for Testing), so on this box we point puppeteer at the
+    Playwright-built arm64 headless shell instead. Env override wins.
+    """
+    env_path = os.getenv("PUPPETEER_EXECUTABLE_PATH", "")
+    if env_path and Path(env_path).exists():
+        return env_path
+    for pattern in (
+        ".cache/ms-playwright/chromium_headless_shell-*/chrome-linux/headless_shell",
+        ".cache/ms-playwright/chromium-*/chrome-linux/chrome",
+    ):
+        candidates = sorted(Path.home().glob(pattern))
+        if candidates:
+            return str(candidates[-1])
+    return None
+
+
 def _run_hyperframes(html_dir: Path, output_path: Path) -> bool:
     """
     Run HyperFrames CLI to render an HTML composition directory to video.
-    
+
     html_dir must contain an index.html file with the composition.
     Returns True on success, False on failure.
     """
@@ -80,6 +100,9 @@ def _run_hyperframes(html_dir: Path, output_path: Path) -> bool:
         "ORT_ALLOW_CPU_FALLBACK": "1",
         "ORT_USE_CUDA": "0",
     })
+    chromium = _chromium_executable()
+    if chromium:
+        env["PUPPETEER_EXECUTABLE_PATH"] = chromium
     
     # Build command — hyperframes expects a directory, not a file
     cmd = [
