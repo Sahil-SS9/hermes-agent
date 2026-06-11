@@ -102,7 +102,7 @@ def save_state(state: dict) -> None:
 
 def file_finding(title: str, body: str, priority: str, slug: str) -> tuple[str | None, str, str]:
     """File a kanban task with escalation for persistent issues."""
-    key = f"system-health-{slug}-{now().strftime('%Y%m%d')}"
+    key = f"system-health-{slug}"
     state = load_state()
     issue_key = slug
 
@@ -264,6 +264,17 @@ def check_stale_crons() -> dict | None:
             continue
         last = j.get("last_run_at")
         if not last:
+            # Never run — but skip future-scheduled one-shot crons
+            schedule = j.get("schedule", {})
+            if isinstance(schedule, dict) and schedule.get("kind") == "once":
+                run_at = schedule.get("run_at", "")
+                if run_at:
+                    try:
+                        run_dt = dt.datetime.fromisoformat(run_at)
+                        if run_dt > n:
+                            continue  # Future one-shot — not stale yet
+                    except:
+                        pass
             # Never run but enabled > 24h
             created = j.get("created_at", "")
             if created:
@@ -278,9 +289,36 @@ def check_stale_crons() -> dict | None:
             last_dt = dt.datetime.fromisoformat(last)
             age_days = (n - last_dt).days
             schedule = j.get("schedule", {})
-            expr = schedule.get("expr", "") if isinstance(schedule, dict) else str(schedule)
-            # Daily crons stale if > 3 days, others if > 7
-            threshold = 3 if expr and "* * *" in expr else 7
+            if isinstance(schedule, dict):
+                kind = schedule.get("kind", "")
+                # One-shot scheduled in future — not stale
+                if kind == "once":
+                    run_at = schedule.get("run_at", "")
+                    if run_at:
+                        run_dt = dt.datetime.fromisoformat(run_at)
+                        if run_dt > n:
+                            continue
+                # Use actual schedule interval for threshold
+                expr = schedule.get("expr", "")
+                display = schedule.get("display", "")
+                # Weekly: stale after 10 days, Monthly: after 35, Quarterly: after 100
+                if "quarterly" in display.lower() or "quarterly" in j.get("name","").lower():
+                    threshold = 100
+                elif "monthly" in display.lower() or "monthly" in j.get("name","").lower():
+                    threshold = 35
+                elif "weekly" in display.lower() or "weekly" in j.get("name","").lower():
+                    threshold = 10
+                elif expr:
+                    # Parse cron expr: daily = 5 fields with day=*, weekly = specific day
+                    parts = expr.split()
+                    if len(parts) == 5:
+                        threshold = 3  # default daily
+                    else:
+                        threshold = 7
+                else:
+                    threshold = 7
+            else:
+                threshold = 7
             if age_days > threshold:
                 stale.append(f"`{j.get('name')}` — last run {age_days}d ago")
         except Exception:

@@ -119,7 +119,7 @@ check_grep "$REPO/cli.py" "from hermes_cli.mode_prompts import" "cli.py imports 
 check_grep "$REPO/cli.py" "detect_mode" "cli.py uses detect_mode (Q2 fix)"
 check_grep "$REPO/cli.py" "mode_label" "cli.py uses mode_label"
 check_grep "$REPO/cli.py" "_ask_user_questions_callback" "cli.py defines _ask_user_questions_callback"
-check_grep "$REPO/cli.py" "ask_user_questions_callback=self._ask_user_questions_callback" "cli.py wires ask_user_questions_callback to agent"
+check_grep "$REPO/agent/agent_init.py" "agent.ask_user_questions_callback = ask_user_questions_callback" "agent_init.py wires ask_user_questions_callback to agent (B2 fix)"
 check_grep "$REPO/cli.py" "UltraPlan" "UltraPlan label in CLI _handle_mode_command"
 check_grep "$REPO/hermes_cli/mode_prompts.py" "delegate_task" "Recon prompt references delegate_task in shared module"
 
