@@ -751,8 +751,8 @@ def run_conversation(
             from agent.headroom_hook import compress_messages as _hr_compress
             _ctx_limit = agent.context_compressor.context_length if agent.context_compressor else None
             api_messages = _hr_compress(api_messages, model=agent.model, model_limit=_ctx_limit)
-        except ImportError:
-            pass  # headroom_hook module not available — no-op
+        except Exception:
+            pass  # headroom_hook not available or compression failed — no-op
         # /KENSEI CUSTOM
 
         # Calculate approximate request size for logging

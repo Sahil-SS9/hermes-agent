@@ -1396,6 +1396,12 @@ def _extract_finding(summary: str) -> str:
         return ""
 
     text = summary.strip()
+
+    # Cap scanned text to prevent pathological regex behaviour on unusually
+    # large producer summaries (bounded polynomial, not catastrophic, but
+    # this box has two documented regex-freeze incidents).
+    if len(text) > 20000:
+        text = text[-20000:]
     import re as _re
 
     # --- Strategy 1: JSON extraction (two passes) ---
@@ -2867,8 +2873,12 @@ def _load_config() -> dict:
 
         full = load_config()
         cfg = dict(full.get("delegation") or {})
-    except Exception:
-        pass
+    except Exception as exc:
+        import logging
+        logging.getLogger("tools.delegate_tool").warning(
+            "delegate_tool._load_config: persistent config load failed, "
+            "all delegation features will use defaults: %s", exc,
+        )
 
     # 2. Overlay: CLI_CONFIG (runtime model/provider overrides)
     try:
@@ -2877,8 +2887,11 @@ def _load_config() -> dict:
         cli_del = CLI_CONFIG.get("delegation") or {}
         if cli_del:
             cfg.update(cli_del)
-    except Exception:
-        pass
+    except Exception as exc:
+        import logging
+        logging.getLogger("tools.delegate_tool").warning(
+            "delegate_tool._load_config: CLI_CONFIG overlay failed: %s", exc,
+        )
 
     return cfg
 
