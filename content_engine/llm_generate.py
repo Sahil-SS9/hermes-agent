@@ -343,14 +343,18 @@ def _call_llm(system: str, user: str, cfg: dict, timeout: int = 90) -> Optional[
                     {"role": "user", "content": user},
                 ],
                 "temperature": 0.8,
-                "max_tokens": 1200,
+                # Reasoning models burn tokens on hidden thinking before the
+                # answer; a tight cap returns empty content.
+                "max_tokens": 3000,
             },
             headers=headers, timeout=timeout,
         )
         if r.status_code != 200:
             print(f"[llm_generate] LLM HTTP {r.status_code}: {r.text[:160]}", file=sys.stderr)
             return None
-        text = (r.json().get("choices") or [{}])[0].get("message", {}).get("content", "")
+        text = (r.json().get("choices") or [{}])[0].get("message", {}).get("content", "") or ""
+        # Some models inline their reasoning as <think> blocks in content.
+        text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
         return text.strip() or None
     except Exception as exc:  # noqa: BLE001 (generation must degrade, not crash the cron)
         print(f"[llm_generate] LLM call failed: {exc}", file=sys.stderr)
