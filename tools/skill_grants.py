@@ -166,8 +166,12 @@ def grant_skill(profile: str, skill: str, task_id: str, reason: str = "", board:
 
 def _revoke(borrow: dict, result: str, reason: str) -> None:
     eid = borrow.get("event_id")
+    # G-2: single revocation encoding.  The payload carries the borrow
+    # event_id as the canonical link; the revoke gets its own independent
+    # event_id (not derived from the borrow's) to avoid dual encoding.
+    revoke_eid = _new_event_id("revoke")
     append_event(
-        source=GRANT_SOURCE, event_type=EV_REVOKE, event_id=f"{eid}-revoke",
+        source=GRANT_SOURCE, event_type=EV_REVOKE, event_id=revoke_eid,
         actor_profile="skill-broker", target_profile=borrow.get("target_profile"),
         object_type="skill", object_id=borrow.get("object_id"), board=borrow.get("board"),
         summary=f"Revoked {borrow.get('object_id')} grant {eid} ({reason})",

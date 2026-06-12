@@ -1187,6 +1187,7 @@ CREATE INDEX IF NOT EXISTS idx_links_child           ON task_links(child_id);
 CREATE INDEX IF NOT EXISTS idx_links_parent          ON task_links(parent_id);
 CREATE INDEX IF NOT EXISTS idx_comments_task         ON task_comments(task_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_events_task           ON task_events(task_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_events_kind           ON task_events(kind, created_at);
 CREATE INDEX IF NOT EXISTS idx_runs_task             ON task_runs(task_id, started_at);
 CREATE INDEX IF NOT EXISTS idx_runs_status           ON task_runs(status);
 CREATE INDEX IF NOT EXISTS idx_attachments_task      ON task_attachments(task_id, created_at);
@@ -3256,13 +3257,14 @@ def recompute_ready(
 def validate_task_contract(
     conn: sqlite3.Connection, task_id: str
 ) -> Optional[str]:
-    """Check that a task meets its tier's contract before dispatch.
+    """Input-presence check: full-tier tasks must carry Acceptance Criteria and
+    a Test Plan in their body before dispatch.
 
-    Full-tier tasks MUST carry Acceptance Criteria and a Test Plan in
-    their body.  Fast-tier (or unclassified) tasks are exempt.
+    This is NOT a quality gate; it only checks the required sections are
+    present. Quality judgement is the job of the council and audit stages.
 
     Returns ``None`` if the contract is satisfied, or a human-readable
-    reason string when the task should not be dispatched.
+    reason string when the required sections are missing.
     """
     row = conn.execute(
         "SELECT tier, body FROM tasks WHERE id = ?", (task_id,)
@@ -5675,6 +5677,10 @@ def _pin_sticky_reviewers(conn: sqlite3.Connection) -> int:
     Called from ``dispatch_once`` right before the review-row sweep.
     Bounded scan: at most one UPDATE per review task with a recorded
     rejection. Tasks without a prior rejection are no-ops.
+
+    R-2: only pin when the preferred reviewer is spawnable; otherwise the
+    task would sit in review with a non-spawnable assignee and the
+    dispatcher would skip it forever.
     """
     rows = conn.execute(
         "SELECT id, assignee FROM tasks "
@@ -5684,6 +5690,9 @@ def _pin_sticky_reviewers(conn: sqlite3.Connection) -> int:
     for row in rows:
         preferred = preferred_reviewer_profile(conn, row["id"])
         if not preferred:
+            continue
+        if not _is_profile_spawnable(preferred):
+            # Sticky reviewer is not spawnable; don't pin to avoid strand
             continue
         if row["assignee"] == preferred:
             continue
@@ -7672,6 +7681,20 @@ def dispatch_once(
     ``spawn_fn`` defaults to ``_default_spawn``. Tests pass a stub.
     ``board`` pins workspace/log/db resolution for this tick to a specific
     board. When omitted, the current-board resolution chain is used.
+
+    Concurrency-cap precedence (D-3, documented in one place):
+      1. ``max_spawn``: global live concurrency limit (running + this tick).
+      2. ``max_in_progress_per_profile``: per-profile cap, checked per-task
+         before spawn; skipped tasks are recorded in
+         ``skipped_per_profile_capped`` (not a failure).
+      3. ``daily_spawn_budget``: global daily counter, resets per UTC date.
+         When exhausted, remaining tasks are skipped until the next day.
+      4. ``max_review_spawn``: separate lane for review tasks (default
+         ``max(1, max_spawn // 2)``), so review and work cannot starve
+         each other.
+
+    The three dispatch sites (ready, review, pipeline) all respect the same
+    precedence stack, with review using its own lane for the review cap.
     """
     # Guarantee schema is current before any query.  Idempotent — the
     # per-tick cost is a single PRAGMA on an already-current DB.
@@ -8007,18 +8030,7 @@ def dispatch_once(
         _maybe_emit_scratch_tip(conn, claimed.id, claimed.workspace_kind)
         _spawn = spawn_fn if spawn_fn is not None else _default_spawn
         try:
-            # Back-compat: older spawn_fn signatures accept only
-            # (task, workspace). Test stubs in the suite rely on that.
-            # Introspect the callable and pass `board` only when supported.
-            import inspect
-            try:
-                sig = inspect.signature(_spawn)
-                if "board" in sig.parameters:
-                    pid = _spawn(claimed, str(workspace), board=board)
-                else:
-                    pid = _spawn(claimed, str(workspace))
-            except (TypeError, ValueError):
-                pid = _spawn(claimed, str(workspace))
+            pid = _spawn_with_board(_spawn, claimed, str(workspace), board=board)
             if pid:
                 _set_worker_pid(conn, claimed.id, int(pid))
             # NOTE: we intentionally do NOT reset consecutive_failures
@@ -8129,15 +8141,7 @@ def dispatch_once(
         claimed.skills = ["sdlc-review"]
         _spawn = spawn_fn if spawn_fn is not None else _default_spawn
         try:
-            import inspect
-            try:
-                sig = inspect.signature(_spawn)
-                if "board" in sig.parameters:
-                    pid = _spawn(claimed, str(workspace), board=board)
-                else:
-                    pid = _spawn(claimed, str(workspace))
-            except (TypeError, ValueError):
-                pid = _spawn(claimed, str(workspace))
+            pid = _spawn_with_board(_spawn, claimed, str(workspace), board=board)
             if pid:
                 _set_worker_pid(conn, claimed.id, int(pid))
             result.spawned.append((claimed.id, claimed.assignee or "", str(workspace)))
@@ -8476,15 +8480,7 @@ def dispatch_once(
             _maybe_emit_scratch_tip(conn, claimed.id, claimed.workspace_kind)
             _spawn = spawn_fn if spawn_fn is not None else _default_spawn
             try:
-                import inspect
-                try:
-                    sig = inspect.signature(_spawn)
-                    if "board" in sig.parameters:
-                        pid = _spawn(claimed, str(workspace), board=board)
-                    else:
-                        pid = _spawn(claimed, str(workspace))
-                except (TypeError, ValueError):
-                    pid = _spawn(claimed, str(workspace))
+                pid = _spawn_with_board(_spawn, claimed, str(workspace), board=board)
                 if pid:
                     _set_worker_pid(conn, claimed.id, int(pid))
                 # Record pipeline spawn for Denji's frequency tracking
@@ -9392,6 +9388,40 @@ def _worker_terminal_timeout_env(
     if existing >= desired:
         return None
     return str(desired)
+
+
+# Cached introspection: resolve whether a spawn callable accepts `board`
+# once per callable instead of per-spawn (D-4).  The three dispatch sites
+# (ready, review, pipeline) all call this instead of repeating the
+# inspect.signature block.  We key on id(spawn_fn) but ALSO pin a strong
+# reference to the callable in the value: without it a short-lived spawn_fn
+# (e.g. a per-test lambda) could be GC'd and its id reused by a different
+# callable with a different signature, returning a stale cached answer.
+_spawn_board_cache: dict[int, tuple[bool, object]] = {}
+
+
+def _spawn_with_board(
+    spawn_fn, task, workspace: str, *, board: Optional[str] = None
+) -> Optional[int]:
+    """Call ``spawn_fn(task, workspace, board=board)`` if the callable
+    accepts ``board``, else ``spawn_fn(task, workspace)``.
+
+    Introspects the signature once and caches the result per callable so the
+    three dispatch sites don't each pay ``inspect.signature`` on every spawn.
+    """
+    fn_id = id(spawn_fn)
+    cached = _spawn_board_cache.get(fn_id)
+    if cached is not None:
+        return spawn_fn(task, workspace, board=board) if cached[0] else spawn_fn(task, workspace)
+    import inspect
+    try:
+        accepts_board = "board" in inspect.signature(spawn_fn).parameters
+    except (TypeError, ValueError):
+        accepts_board = False
+    _spawn_board_cache[fn_id] = (accepts_board, spawn_fn)
+    if accepts_board:
+        return spawn_fn(task, workspace, board=board)
+    return spawn_fn(task, workspace)
 
 
 def _default_spawn(

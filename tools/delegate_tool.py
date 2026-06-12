@@ -1417,7 +1417,10 @@ def _extract_finding(summary: str) -> str:
         return json.dumps(parsed, indent=2)
 
     # 1b: Scan for inline JSON blocks with named keys (the shared parser
-    #     expects a clean JSON document; inline blocks need regex extraction)
+    #     expects a clean JSON document; inline blocks need regex extraction).
+    #     NOTE: regex handles ONE nesting level only; deeper nested JSON
+    #     falls through to the heading strategy below (DG-2, acceptable
+    #     degradation; nested findings are rare in practice).
     key_pats = "finding|answer|conclusion|claim"
     named_blocks = _re.findall(
         r'\{[^{}]*"(?:' + key_pats + r')"[^{}]*\}',

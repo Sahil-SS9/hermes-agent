@@ -201,10 +201,11 @@ class TestTimeInStage:
 
     def test_recent_entry(self, kanban_home):
         """Returns a reasonable value for a recently entered stage."""
-        import datetime
+        import time
         with connect() as conn:
-            # Insert a pipeline_advanced event from 1 hour ago
-            ts = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=1)).isoformat()
+            # Insert a pipeline_advanced event from 1 hour ago (epoch int,
+            # matching the live schema so test+prod hit the same branch).
+            ts = int(time.time() - 3600)
             conn.execute(
                 "INSERT INTO task_events (task_id, kind, payload, created_at) VALUES (?, ?, ?, ?)",
                 ("task-002", "pipeline_advanced",

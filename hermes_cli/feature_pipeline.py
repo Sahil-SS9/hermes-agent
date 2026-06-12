@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
-"""Feature Pipeline — Phase A front-half gates.
+"""Feature Pipeline: Phase A front-half input-presence checks.
+
+Each gate in this file answers a single question: "has the required
+artifact / section / data been produced?"  It does NOT judge quality.
+Quality judgement is the job of the review stages (Quan fleet, kensei
+review, etc.) further down the pipeline.
 
 Provides:
 - Artifact storage helpers (get_artifact_path, write_artifact, read_artifact)
-- Gate functions for each pipeline stage (intake, research, prd, spec)
+- Presence-check functions for each pipeline stage (intake, research, prd, spec)
 - Pipeline state machine (advance_pipeline, get_pipeline_status)
 """
 import json
@@ -102,12 +107,18 @@ def _check_body_markers(body: Optional[str], markers: dict) -> Optional[str]:
 
 
 def validate_intake_brief(body: Optional[str]) -> Optional[str]:
-    """Gate: intake brief must have Problem and Success Criteria sections."""
+    """Input-presence check: intake brief must have Problem and Success Criteria sections.
+
+    Returns None if present, or a human-readable reason string.
+    Does NOT judge quality; only checks required sections exist."""
     return _check_body_markers(body, _INTAKE_MARKERS)
 
 
 def validate_research_artifact(artifact_dir: str) -> Optional[str]:
-    """Gate: research-brief.md must exist and have a Findings section."""
+    """Input-presence check: research-brief.md must exist and have a Findings section.
+
+    Returns None if present, or a human-readable reason string.
+    Does NOT judge quality; only checks artifact exists and has required section."""
     path = os.path.join(artifact_dir, "research-brief.md")
     if not os.path.exists(path):
         return "Missing research-brief.md artifact"
@@ -121,7 +132,10 @@ def validate_research_artifact(artifact_dir: str) -> Optional[str]:
 
 
 def validate_prd_artifact(artifact_dir: str) -> Optional[str]:
-    """Gate: prd.md must exist with Problem, Users, Scope, Out of Scope, Metrics."""
+    """Input-presence check: prd.md must exist with Problem, Users, Scope, Out of Scope, Metrics.
+
+    Returns None if present, or a human-readable reason string.
+    Does NOT judge quality; only checks required sections exist."""
     path = os.path.join(artifact_dir, "prd.md")
     if not os.path.exists(path):
         return "Missing prd.md artifact"
@@ -135,7 +149,10 @@ def validate_prd_artifact(artifact_dir: str) -> Optional[str]:
 
 
 def validate_spec_artifact(artifact_dir: str) -> Optional[str]:
-    """Gate: spec.md must exist with Architecture, Interfaces, Test Strategy."""
+    """Input-presence check: spec.md must exist with Architecture, Interfaces, Test Strategy.
+
+    Returns None if present, or a human-readable reason string.
+    Does NOT judge quality; only checks required sections exist."""
     path = os.path.join(artifact_dir, "spec.md")
     if not os.path.exists(path):
         return "Missing spec.md artifact"
@@ -165,7 +182,10 @@ COUNCIL_PENDING = _GatePending()
 
 
 def validate_council_artifact(artifact_dir: str) -> Optional[str] | _GatePending:
-    """Gate: council-verdict.json must exist and contain APPROVED.
+    """Input-presence check: council-verdict.json must exist and contain APPROVED.
+
+    Returns None if approved, or a human-readable reason string.
+    Does NOT judge quality; only checks the verdict is present.
 
     This gate is PURE: it never runs the (expensive, multi-LLM) deliberation
     itself, so it is safe to call inside the dispatcher tick. When the verdict
@@ -201,14 +221,17 @@ def validate_council_artifact(artifact_dir: str) -> Optional[str] | _GatePending
                 for i in issues
             ]
             return "Council REVISE. Issues:\n" + "\n".join(issue_lines)
-        return "Council REVISE — see council-verdict.json for details"
+        return "Council REVISE; see council-verdict.json for details"
 
     # Verdict unclear — treat as REVISE
-    return f"Council verdict unclear ({verdict}) — see council-verdict.json"
+    return f"Council verdict unclear ({verdict}); see council-verdict.json"
 
 
 def validate_tech_review_artifact(artifact_dir: str) -> Optional[str]:
-    """Gate: tech-review.md must exist with Architecture, Risk Assessment sections."""
+    """Input-presence check: tech-review.md must exist with Architecture, Risk Assessment sections.
+
+    Returns None if present, or a human-readable reason string.
+    Does NOT judge quality; only checks required sections exist."""
     path = os.path.join(artifact_dir, "tech-review.md")
     if not os.path.exists(path):
         return "Missing tech-review.md artifact"
@@ -226,7 +249,10 @@ def validate_tech_review_artifact(artifact_dir: str) -> Optional[str]:
 
 
 def validate_decompose_artifact(artifact_dir: str) -> Optional[str]:
-    """Gate: decompose-output.md must exist with child task listing.
+    """Input-presence check: decompose-output.md must exist with child task listing.
+
+    Returns None if present, or a human-readable reason string.
+    Does NOT judge quality; only checks required sections exist.
 
     The decompose stage breaks the parent task into child tasks, each
     carrying ## Acceptance Criteria and ## Test Plan (WS-1 contract).
@@ -364,7 +390,10 @@ def _check_kensei_review_section(content: str) -> Optional[str]:
 
 
 def validate_audit_artifact(artifact_dir: str) -> Optional[str]:
-    """Gate: audit-report.md must exist with quan fleet + kensei-review + verdict.
+    """Input-presence check: audit-report.md must exist with quan fleet + kensei-review + verdict.
+
+    Returns None if present, or a human-readable reason string.
+    Does NOT judge quality; only checks required sections exist.
 
     Verdict semantics (design doc §3 [11]):
         - PASS        — gate passes; advance to final_sign_off.
@@ -429,7 +458,10 @@ def get_audit_verdict(artifact_dir: str) -> Optional[str]:
 
 
 def validate_document_artifact(artifact_dir: str) -> Optional[str]:
-    """Gate: docs-output.md must exist with sections for the wiki entry."""
+    """Input-presence check: docs-output.md must exist with sections for the wiki entry.
+
+    Returns None if present, or a human-readable reason string.
+    Does NOT judge quality; only checks required sections exist."""
     path = os.path.join(artifact_dir, "docs-output.md")
     if not os.path.exists(path):
         return "Missing docs-output.md artifact"
@@ -502,8 +534,11 @@ def time_in_stage_hours(conn: "sqlite3.Connection", task_id: str, stage: str) ->
 
 # Stage order in the feature pipeline (matches design doc §3).
 # Full tier=full path: 1.research 2.prd 3.spec 4.council 5.sign_off
-# 6.tech_review 7.decompose 8.execute 9.pr+qa 10.audit
-# 11.final_sign_off 12.document
+# Pipeline stage list.  MUST stay in sync with the canonical design doc
+# docs/kanban/pipeline.md (or whatever the canonical source becomes).  If
+# adding / removing stages, update the design doc and the gate map below
+# simultaneously.  Express stages are a subset of this list (see
+# EXPRESS_PIPELINE_STAGES).
 PIPELINE_STAGES = [
     "research",      # [2] research brief
     "prd",           # [3] product requirements doc

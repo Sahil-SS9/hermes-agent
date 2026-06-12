@@ -8,6 +8,7 @@ Covers:
 - Artifact storage helpers
 - Pipeline state machine transitions
 """
+import json
 import os
 import sqlite3
 import tempfile
@@ -322,8 +323,10 @@ class TestPipelineStateMachine:
         artifact_dir.mkdir()
         (artifact_dir / "prd.md").write_text("## Problem\nX\n\n## Users\nY")
         (artifact_dir / "spec.md").write_text("## Architecture\nA\n\n## Interfaces\nB\n\n## Test Strategy\nC")
-        (artifact_dir / "council-verdict.md").write_text(
-            "# Council Verdict\n\n**Verdict: APPROVED**\n\nNo issues."
+        # C-a: the gate reads the machine-readable JSON verdict; the .md is
+        # only a human-readable companion.
+        (artifact_dir / "council-verdict.json").write_text(
+            json.dumps({"verdict": "APPROVED", "issues": []})
         )
         result = advance_pipeline("task-014", "council", str(tmp_path))
         assert result["advanced"] is True
@@ -335,10 +338,15 @@ class TestPipelineStateMachine:
         """Council gate fails when verdict artifact says REVISE."""
         artifact_dir = tmp_path / "task-015"
         artifact_dir.mkdir()
-        (artifact_dir / "council-verdict.md").write_text(
-            "# Council Verdict\n\n**Verdict: REVISE**\n\n"
-            "- **[HIGH]** Missing error handling in API layer\n"
-            "- **[MEDIUM]** Test strategy too vague\n"
+        artifact_dir.mkdir(exist_ok=True)
+        (artifact_dir / "council-verdict.json").write_text(
+            json.dumps({
+                "verdict": "REVISE",
+                "issues": [
+                    {"severity": "high", "description": "Missing error handling in API layer"},
+                    {"severity": "medium", "description": "Test strategy too vague"},
+                ],
+            })
         )
         result = advance_pipeline("task-015", "council", str(tmp_path))
         assert result["advanced"] is False
