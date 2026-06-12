@@ -1498,9 +1498,14 @@ def _handle_profile_edit(args: dict, **kw) -> str:
         if result.canary:
             guard.apply_canary(result.canary)
     except ImportError:
-        import logging
-        logging.getLogger("kanban_tools").warning(
-            "Blast-radius guard unavailable — profile edit proceeding unguarded"
+        # Fail CLOSED: profile mutation is the most dangerous path in the
+        # fork. If the blast-radius guard cannot load we refuse the edit
+        # rather than proceeding unprotected. Matches the fail-closed
+        # posture used everywhere else (e.g. skill_grants).
+        return tool_error(
+            "Blast-radius guard unavailable; refusing profile edit "
+            "(fail-closed). Restore hermes_cli.blast_radius before editing "
+            "profiles."
         )
     except Exception as exc:
         return tool_error(f"Blast-radius guard error: {exc}")
@@ -1524,10 +1529,42 @@ def _handle_profile_edit(args: dict, **kw) -> str:
 
 
 def _handle_profile_rollback(args: dict, **kw) -> str:
-    """Revert a profile edit by commit hash."""
+    """Revert a profile edit by commit hash.
+
+    Gated by the same blast-radius guard as profile_edit: a rollback is a
+    profile mutation and an agent could otherwise silently revert a
+    security-hardening edit. A reason is required for the audit trail.
+    Sahil retains the manual git/script path if the guard is down.
+    """
     commit_hash = args.get("commit_hash")
     if not commit_hash:
         return tool_error("commit_hash is required")
+    reason = args.get("reason")
+    if not reason or not str(reason).strip():
+        return tool_error("reason is required (rollbacks are audited)")
+
+    # ── Blast-radius gate (mirror of profile_edit, fail-closed) ──
+    try:
+        from hermes_cli.blast_radius import EditGuard
+        guard = EditGuard()
+        result = guard.try_edit(
+            profile=str(args.get("profile") or "fleet"),
+            patch=f"rollback:{commit_hash}",
+            patch_summary=str(reason).strip(),
+        )
+        if not result.allowed:
+            return tool_error(
+                f"Blast-radius guard blocked profile rollback: {result.reason}. "
+                f"{'Deferred until ' + result.defer_until if result.defer_until else ''}"
+            )
+    except ImportError:
+        return tool_error(
+            "Blast-radius guard unavailable; refusing profile rollback "
+            "(fail-closed). Restore hermes_cli.blast_radius, or roll back "
+            "manually via git."
+        )
+    except Exception as exc:
+        return tool_error(f"Blast-radius guard error: {exc}")
 
     script = str(Path(os.environ.get(
         "HERMES_HOME", "/home/kensei/.hermes"
@@ -1767,8 +1804,16 @@ KANBAN_PROFILE_ROLLBACK_SCHEMA = {
                 "type": "string",
                 "description": "The git commit hash to revert (from kanban_profile_edit output)",
             },
+            "reason": {
+                "type": "string",
+                "description": "Why the rollback is needed (required — rollbacks are audited and blast-radius gated)",
+            },
+            "profile": {
+                "type": "string",
+                "description": "Optional profile the rollback targets, for blast-radius scoping (defaults to fleet-wide)",
+            },
         },
-        "required": ["commit_hash"],
+        "required": ["commit_hash", "reason"],
     },
 }
 

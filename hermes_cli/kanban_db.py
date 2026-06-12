@@ -5183,9 +5183,12 @@ def _should_review(
 
     # Sample 1 in N fast-tier tasks.
     sample_rate = max(1, int(kanban_cfg.get("review_sample_rate", 5) or 5))
-    # Deterministic sampling by task_id so the same task always gets
-    # the same decision across dispatcher ticks (avoids thrash).
-    sample_bucket = hash(task_id) % sample_rate
+    # Deterministic sampling by task_id so the same task always gets the same
+    # decision across dispatcher ticks AND across gateway restarts. Built-in
+    # hash() is per-process salted (PYTHONHASHSEED), so it would flip the
+    # decision after a restart; sha256 is stable.
+    digest = hashlib.sha256(task_id.encode("utf-8")).hexdigest()
+    sample_bucket = int(digest, 16) % sample_rate
     return sample_bucket == 0
 
 

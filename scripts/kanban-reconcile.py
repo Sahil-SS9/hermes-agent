@@ -28,6 +28,16 @@ TERMINAL_STATUSES = {"done", "completed", "archived"}
 # (the review itself is the deliverable, recorded as a comment).
 REVIEW_PREFIXES = ("review:", "[review]", "clean up:", "investigate:")
 
+# Circuit breaker: if a single run would auto-reopen more than this many
+# tasks, something is systemically wrong (bad heuristic, schema change,
+# bulk import) and mass-reopening would create a churn storm. Above the
+# cap we reopen NOTHING and alert for human review instead. Override via
+# the HERMES_RECONCILE_MAX_REOPEN env var.
+try:
+    MAX_REOPEN_PER_RUN = int(os.environ.get("HERMES_RECONCILE_MAX_REOPEN", "10"))
+except (TypeError, ValueError):
+    MAX_REOPEN_PER_RUN = 10
+
 
 def now_ts() -> int:
     return int(time.time())
@@ -272,9 +282,17 @@ def main() -> str:
         all_findings.extend(findings)
 
     # Phase 2: Auto-fix drifted tasks (reopen to triage)
+    breaker_tripped = False
     if all_findings:
         # Open a writable connection to each affected board
         fixable = [f for f in all_findings if f["kind"] in ("terminal_no_success", "terminal_no_runs")]
+        # Circuit breaker: refuse to mass-reopen. A run that wants to reopen
+        # more than MAX_REOPEN_PER_RUN tasks is almost certainly a systemic
+        # fault, not genuine drift — reopening them all would inject a churn
+        # storm. Reopen nothing this run; alert for human review instead.
+        if len(fixable) > MAX_REOPEN_PER_RUN:
+            breaker_tripped = True
+            fixable = []
         by_board: dict[str, list[dict]] = {}
         for f in fixable:
             by_board.setdefault(f["board"], []).append(f)
@@ -316,6 +334,19 @@ def main() -> str:
         return ""  # silent = healthy
 
     lines = []
+
+    if breaker_tripped:
+        fixable_count = len([
+            f for f in all_findings
+            if f["kind"] in ("terminal_no_success", "terminal_no_runs")
+        ])
+        lines.append(
+            f"🛑 **Kanban reconciliation circuit breaker TRIPPED**: "
+            f"{fixable_count} tasks looked drifted (cap {MAX_REOPEN_PER_RUN}). "
+            f"Auto-reopen SKIPPED to avoid a churn storm. Investigate the "
+            f"cause (bad heuristic, schema change, bulk import) and reopen "
+            f"manually if genuine."
+        )
 
     if fixed:
         lines.append(f"🔧 **Kanban reconciliation: {len(fixed)} task(s) reopened to triage**")

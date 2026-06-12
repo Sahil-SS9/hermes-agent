@@ -228,6 +228,13 @@ def _build_roster() -> tuple[list[dict], set[str]]:
     Each roster entry is ``{name, description, has_description}``. The
     valid-set is used after the LLM responds to rewrite invalid
     assignees to the default fallback.
+
+    Only SPAWNABLE profiles are offered. A profile the dispatcher would
+    refuse (a lead profile in ``kanban.nonspawnable_profiles``, or one
+    with no directory) must never be handed a child task: the dispatcher
+    would bucket it as ``skipped_nonspawnable`` and the task would strand
+    in ``ready`` forever. We reuse the dispatcher's own predicate so the
+    two can never drift.
     """
     roster: list[dict] = []
     valid: set[str] = set()
@@ -237,6 +244,17 @@ def _build_roster() -> tuple[list[dict], set[str]]:
         logger.warning("decompose: failed to list profiles: %s", exc)
         return roster, valid
     for p in all_profiles:
+        try:
+            if not kb._is_profile_spawnable(p.name):
+                continue
+        except Exception:
+            # Fail closed (see docstring): exclude rather than risk offering a
+            # non-spawnable profile.
+            logger.warning(
+                "decompose: spawnability check failed for %s, excluding it",
+                p.name,
+            )
+            continue
         desc = (p.description or "").strip()
         roster.append({
             "name": p.name,
