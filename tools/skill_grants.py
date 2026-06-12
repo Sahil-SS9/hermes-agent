@@ -73,7 +73,7 @@ def revoked_borrow_ids(*, since: Optional[int] = None) -> set:
     """event_ids of borrows that have a matching revoke.
 
     When ``since`` is provided (epoch seconds), only revokes on or after
-    that timestamp are scanned — bounds the hot-path query so it does not
+    that timestamp are scanned; bounds the hot-path query so it does not
     grow with the total historical ledger size.
     """
     return {

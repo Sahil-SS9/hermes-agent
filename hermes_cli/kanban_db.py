@@ -8641,8 +8641,9 @@ def _write_fallback_council_verdict(artifact_dir: str, task_id: str, error: str)
     """
     try:
         os.makedirs(artifact_dir, exist_ok=True)
-        path = os.path.join(artifact_dir, "council-verdict.md")
-        with open(path, "w") as f:
+        md_path = os.path.join(artifact_dir, "council-verdict.md")
+        json_path = os.path.join(artifact_dir, "council-verdict.json")
+        with open(md_path, "w") as f:
             f.write(
                 f"# Council Verdict — {task_id}\n\n"
                 f"**Verdict: REVISE**\n\n"
@@ -8651,6 +8652,19 @@ def _write_fallback_council_verdict(artifact_dir: str, task_id: str, error: str)
                 f"## Chairman Rationale\n\n"
                 f"Deliberation could not complete; manual review required.\n"
             )
+        import json as _json
+        with open(json_path, "w") as f:
+            _json.dump({
+                "verdict": "REVISE",
+                "issues": [{"severity": "critical",
+                            "description": f"Council deliberation failed: {error}"}],
+                "dissents": [],
+                "chairman_rationale": "Deliberation could not complete; manual review required.",
+                "tokens_used": 0,
+                "elapsed_seconds": 0.0,
+                "critique_count": 0,
+                "critique_verdicts": [],
+            }, f, indent=2)
     except OSError:
         _log.exception("Could not write fallback council verdict for %s", task_id)
 

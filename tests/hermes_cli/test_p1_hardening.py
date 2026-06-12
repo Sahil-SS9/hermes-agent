@@ -1,7 +1,7 @@
 """P1 hardening tests (2026-06-12 kanban/orchestration review).
 
 Covers:
-  D-1  dispatcher runaway regression — live worker not double-spawned
+  D-1  dispatcher runaway regression; live worker not double-spawned
 """
 
 from __future__ import annotations
@@ -25,13 +25,13 @@ def kanban_home(tmp_path, monkeypatch):
 
 
 # --------------------------------------------------------------------------
-# D-1 — dispatcher runaway regression test
+# D-1: dispatcher runaway regression test
 # --------------------------------------------------------------------------
 
 def test_live_worker_not_reclaimed_prevents_duplicate_spawn(kanban_home, monkeypatch):
     """A running task whose worker PID is alive and survived termination
     must NOT be reclaimed to 'ready'.  Reclaiming would release the claim
-    and let the dispatcher spawn a second worker beside the first — the
+    and let the dispatcher spawn a second worker beside the first; the
     duplication loop that D-1 prevents."""
     now = int(time.time())
     claim_lock = "host:test:12345"
@@ -60,7 +60,7 @@ def test_live_worker_not_reclaimed_prevents_duplicate_spawn(kanban_home, monkeyp
 
     with kb.connect() as conn:
         reclaimed = kb.release_stale_claims(conn)
-        # Must be 0 — the live worker blocked reclaim
+        # Must be 0; the live worker blocked reclaim
         assert reclaimed == 0
 
         # Task must still be 'running', not 'ready'
@@ -77,7 +77,7 @@ def test_live_worker_not_reclaimed_prevents_duplicate_spawn(kanban_home, monkeyp
             "WHERE task_id = ? AND kind = 'reclaim_deferred'",
             ("d1-test-001",),
         ).fetchone()
-        assert event is not None, "reclaim_deferred event missing — defer path not exercised"
+        assert event is not None, "reclaim_deferred event missing; defer path not exercised"
 
 
 def test_dead_worker_still_reclaimed(kanban_home, monkeypatch):

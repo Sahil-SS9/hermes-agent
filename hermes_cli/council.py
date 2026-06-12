@@ -64,7 +64,7 @@ class CouncilConfig:
     quorum_min: int
     """Minimum successful Phase 1 critiques required. Below this, the
     council auto-defers (REVISE) rather than proceeding with a crippled
-    panel. Default 2 — at least two members must succeed."""
+    panel. Default 2; at least two members must succeed."""
     fallback_pool: List[Dict[str, str]] = field(default_factory=list)
     """Shared fallback pool — entries tried after per-member fallbacks.
     Models already in use by other active members are skipped."""
@@ -412,7 +412,7 @@ def _call_llm_with_fallback(
                     member.model, attempt["provider"], attempt["model"], last_error[:120],
                 )
                 continue
-            # Permanent error — try next fallback rather than failing the
+            # Permanent error; try next fallback rather than failing the
             # whole member.  A single provider returning 400/401/403 should
             # not kill the council when fallbacks are available.
             logger.warning(
@@ -809,7 +809,7 @@ def deliberate(task_id: str, artifact_dir: str) -> CouncilVerdict:
     if not council_cfg.chairman.provider:
         raise RuntimeError("Council chairman not configured — check council.chairman in config.yaml")
 
-    # Validate diversity — log warnings but don't block (informational gate)
+    # Validate diversity; log warnings but don't block (informational gate)
     diversity_warnings = council_cfg.validate_diversity()
     if diversity_warnings:
         for w in diversity_warnings:
@@ -862,7 +862,7 @@ def deliberate(task_id: str, artifact_dir: str) -> CouncilVerdict:
     quorum = council_cfg.quorum_min
     if len(successful) < quorum:
         logger.warning(
-            "Council quorum failed: %d/%d successful critiques (min %d) — auto-REVISE",
+            "Council quorum failed: %d/%d successful critiques (min %d); auto-REVISE",
             len(successful), len(critiques), quorum,
         )
         elapsed = time.monotonic() - start_time
@@ -879,7 +879,7 @@ def deliberate(task_id: str, artifact_dir: str) -> CouncilVerdict:
             dissents=[],
             chairman_rationale=(
                 f"Quorum not met ({len(successful)}/{len(critiques)} < {quorum}). "
-                "Deliberation aborted — no Phase 2/3."
+                "Deliberation aborted; no Phase 2/3."
             ),
             critiques=critiques,
             rankings_snapshot="",
@@ -887,9 +887,12 @@ def deliberate(task_id: str, artifact_dir: str) -> CouncilVerdict:
             elapsed_seconds=elapsed,
         )
         os.makedirs(artifact_dir, exist_ok=True)
-        verdict_path = os.path.join(artifact_dir, "council-verdict.md")
-        with open(verdict_path, "w") as f:
+        verdict_md_path = os.path.join(artifact_dir, "council-verdict.md")
+        verdict_json_path = os.path.join(artifact_dir, "council-verdict.json")
+        with open(verdict_md_path, "w") as f:
             f.write(verdict.to_markdown(task_id))
+        with open(verdict_json_path, "w") as f:
+            json.dump(verdict.to_json(), f, indent=2)
         return verdict
 
     # Phase 2 — Cross-ranking (parallel on all members)
