@@ -131,6 +131,16 @@ DEFAULT_CLAIM_TTL_SECONDS = 15 * 60
 # effect of normal API traffic.
 DEFAULT_CLAIM_HEARTBEAT_MAX_STALE_SECONDS = 60 * 60
 
+# Grace added to a claim when a reclaim is deferred because the previous
+# host-local worker is still alive after a termination attempt. Releasing the
+# claim in that state would spawn a duplicate alongside the surviving worker —
+# the runaway seen when a cgroup memory.high throttle parks workers in
+# uninterruptible (D) state, where a pending SIGKILL cannot be delivered until
+# the throttle lifts. Holding the claim a short grace and retrying next tick
+# stops the duplication; once no duplicate is spawned the pressure eases, the
+# signal lands, and the following tick reclaims cleanly.
+RECLAIM_DEFER_GRACE_SECONDS = 120
+
 
 def _resolve_claim_ttl_seconds(ttl_seconds: Optional[int] = None) -> int:
     """Return the effective claim TTL, honoring the kanban env override.
@@ -3820,6 +3830,14 @@ def release_stale_claims(
         termination = _terminate_reclaimed_worker(
             row["worker_pid"], row["claim_lock"], signal_fn=signal_fn,
         )
+        # Never release a claim while our own worker is still alive: that would
+        # spawn a duplicate beside it. Hold the claim and retry next tick.
+        if _worker_survived_termination(termination):
+            _defer_reclaim_for_live_worker(
+                conn, row["id"], row["claim_lock"], now, termination,
+                reason="ttl_expired_worker_alive",
+            )
+            continue
         with write_txn(conn):
             cur = conn.execute(
                 "UPDATE tasks SET status = 'ready', claim_lock = NULL, "
@@ -6444,6 +6462,52 @@ def reap_worker_zombies() -> "list[int]":
     return reaped
 
 
+def _reap_done_workers(conn: sqlite3.Connection) -> list[int]:
+    """Kill workers whose tasks reached a terminal status but whose PID is still alive.
+
+    When a worker completes its task (kanban_complete → done/archived) and calls
+    sys.exit(), atexit cleanup can deadlock on shared resources (state.db WAL,
+    kanban.db lock files, log FDs) under concurrent access — the worker stays
+    alive indefinitely in futex_wait_queue, holding swap pages but doing zero
+    work.  The dispatcher's zombie reaper only handles PID-is-dead (true zombie)
+    cases and never sees these.
+
+    This function finds tasks in 'done' / 'archived' status whose ``worker_pid``
+    is still alive on this host and sends SIGKILL.  Once dead, the normal zombie
+    reaper handles the waitpid on the next tick.  The ``worker_pid`` column is
+    cleared so ``detect_crashed_workers`` doesn't try to reclaim an already-done
+    task on a subsequent tick.
+    """
+    reaped: list[int] = []
+    import signal
+    try:
+        rows = conn.execute(
+            "SELECT id, worker_pid FROM tasks "
+            "WHERE status IN ('done', 'archived') AND worker_pid IS NOT NULL"
+        ).fetchall()
+    except Exception:
+        return reaped
+
+    for row in rows:
+        pid = row["worker_pid"]
+        if not pid or pid <= 0:
+            continue
+        if not _pid_alive(pid):
+            continue
+        try:
+            os.kill(pid, signal.SIGKILL)
+            reaped.append(pid)
+        except (ProcessLookupError, PermissionError):
+            pass  # already gone or no permission
+        try:
+            conn.execute(
+                "UPDATE tasks SET worker_pid = NULL WHERE id = ?", (row["id"],)
+            )
+        except Exception:
+            pass
+    return reaped
+
+
 def _pid_alive(pid: Optional[int]) -> bool:
     """Return True if ``pid`` is still running on this host.
 
@@ -6562,6 +6626,63 @@ def _terminate_reclaimed_worker(
 
     info["terminated"] = not _pid_alive(pid)
     return info
+
+
+def _worker_survived_termination(termination: dict) -> bool:
+    """True when we tried to kill our own host-local worker and it is still alive.
+
+    Reclaiming in this state would release the claim and let the dispatcher
+    spawn a second worker while the first is still running — the duplication
+    loop. Only host-local workers we actually signalled count: a non-local
+    claim lock or a no-op attempt (no ``os.kill`` available) must fall through
+    to the normal release path, since we cannot manage that worker anyway.
+    """
+    return bool(
+        termination.get("termination_attempted")
+        and termination.get("host_local")
+        and not termination.get("terminated")
+    )
+
+
+def _defer_reclaim_for_live_worker(
+    conn: sqlite3.Connection,
+    task_id: str,
+    claim_lock: Optional[str],
+    now: int,
+    termination: dict,
+    *,
+    reason: str,
+) -> None:
+    """Hold a claim whose worker survived termination instead of releasing it.
+
+    Extends ``claim_expires`` by ``RECLAIM_DEFER_GRACE_SECONDS`` so the task
+    stays ``running`` (no duplicate spawn) and records a ``reclaim_deferred``
+    event so the hold is visible in ``hermes kanban tail``. The next dispatch
+    tick retries the kill; this is self-correcting because not spawning a
+    duplicate is what lets the throttled worker finally die.
+    """
+    grace = now + RECLAIM_DEFER_GRACE_SECONDS
+    with write_txn(conn):
+        cur = conn.execute(
+            "UPDATE tasks SET claim_expires = ? "
+            "WHERE id = ? AND status = 'running' AND claim_lock IS ?",
+            (grace, task_id, claim_lock),
+        )
+        if cur.rowcount != 1:
+            return
+        run_id = _current_run_id(conn, task_id)
+        if run_id is not None:
+            conn.execute(
+                "UPDATE task_runs SET claim_expires = ? WHERE id = ?",
+                (grace, run_id),
+            )
+        payload = {
+            "reason": reason,
+            "claim_lock": claim_lock,
+            "claim_expires_now": grace,
+        }
+        payload.update(termination)
+        _append_event(conn, task_id, "reclaim_deferred", payload, run_id=run_id)
 
 
 def heartbeat_worker(
@@ -6801,6 +6922,15 @@ def detect_stale_running(
         termination = _terminate_reclaimed_worker(
             pid, lock, signal_fn=signal_fn,
         )
+
+        # Never release a claim while our own worker is still alive: that would
+        # spawn a duplicate beside it. Hold the claim and retry next tick.
+        if _worker_survived_termination(termination):
+            _defer_reclaim_for_live_worker(
+                conn, tid, lock, now, termination,
+                reason="heartbeat_stale_worker_alive",
+            )
+            continue
 
         with write_txn(conn):
             cur = conn.execute(
@@ -7548,6 +7678,18 @@ def dispatch_once(
 
     # Reap zombie children from previously spawned workers.
     reap_worker_zombies()
+
+    # Reap workers whose task is done/archived but PID is still alive —
+    # these escape the zombie reaper because the PID never dies (atexit
+    # deadlock in sys.exit keeps them in futex_wait_queue). Kill them
+    # so they release their swap pages, then clear worker_pid so
+    # detect_crashed_workers doesn't try to reclaim an already-done task.
+    reaped_done = _reap_done_workers(conn)
+    if reaped_done:
+        _log.info(
+            "dispatch_once: reaped %d done-but-alive worker(s), pids=%s",
+            len(reaped_done), reaped_done,
+        )
 
     # Clean stale claim locks on ready tasks — when tasks are manually
     # reset from running→ready (e.g. after DB recovery), orphaned

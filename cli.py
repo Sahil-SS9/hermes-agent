@@ -13797,10 +13797,18 @@ def main(
                                     _exit_code = _RL_CODE
                                 except Exception:
                                     _exit_code = 1
-                        sys.exit(_exit_code)
+                        # Use os._exit instead of sys.exit: kanban workers share
+                        # resources (state.db, kanban.db lock files, log FDs)
+                        # across concurrent subprocesses. sys.exit triggers
+                        # atexit._run_exitfuncs → _run_cleanup → MCP/terminal/
+                        # browser/memory shutdown, which contends on those
+                        # shared resources and deadlocks workers. Use the same
+                        # os._exit path already established for KeyboardInterrupt
+                        # (#28181) — the dispatcher's zombie reaper cleans up.
+                        os._exit(_exit_code)
 
                 # Exit with error code if credentials or agent init fails
-                sys.exit(1)
+                os._exit(1)
             else:
                 # Single-query mode (`hermes chat -q "…"`): skip the welcome
                 # banner. Building the banner takes ~420 ms on cold start —
