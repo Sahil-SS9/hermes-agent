@@ -48,24 +48,35 @@ def _profiles_with_config() -> list[str]:
     names = []
     if (DEFAULT_HOME / "config.yaml").exists():
         names.append("default")
-    for d in sorted(PROFILES.iterdir()):
-        if (d / "config.yaml").exists():
-            names.append(d.name)
+    try:
+        for d in sorted(PROFILES.iterdir()):
+            if d.is_dir() and (d / "config.yaml").exists():
+                names.append(d.name)
+    except (OSError, PermissionError) as e:
+        print(f"ERROR: cannot list profiles directory: {e}")
     return names
 
 
 def _borrow_counts(days: int) -> dict[str, dict[str, int]]:
     """Return {profile: {skill: count}} for borrow events in the window."""
     since = int(time.time() - days * 86400)
-    events = query_events(event_types=[EV_BORROW], since=since)
+    try:
+        events = query_events(event_types=[EV_BORROW], since=since)
+    except Exception as e:
+        print(f"ERROR: could not query activity ledger: {e}")
+        return {}
     counts: dict[str, dict[str, int]] = {}
     for e in events:
-        profile = e.get("target_profile")
-        skill = e.get("object_id")
-        if not profile or not skill:
+        try:
+            profile = e.get("target_profile")
+            skill = e.get("object_id")
+            if not profile or not skill:
+                continue
+            counts.setdefault(profile, {}).setdefault(skill, 0)
+            counts[profile][skill] += 1
+        except (AttributeError, TypeError) as e:
+            print(f"  WARNING: skipping malformed event: {e}")
             continue
-        counts.setdefault(profile, {}).setdefault(skill, 0)
-        counts[profile][skill] += 1
     return counts
 
 
@@ -73,32 +84,40 @@ def _already_enabled(profile: str, yaml_parser: YAML) -> set[str]:
     cfg_path = _config_path(profile)
     if not cfg_path.exists():
         return set()
-    data = yaml_parser.load(cfg_path.read_text()) or {}
+    try:
+        data = yaml_parser.load(cfg_path.read_text()) or {}
+    except Exception as e:
+        print(f"  SKIP {profile}: config read error ({e})")
+        return set()
     skills_cfg = data.get("skills") or {}
     return set((skills_cfg.get("enabled_skills") or []) + (skills_cfg.get("always_skills") or []))
 
 
-def _record_promotion(profile: str, skill: str, count: int, days: int) -> str:
-    """Record an auto-promotion event in the ledger. Returns event_id."""
+def _record_promotion(profile: str, skill: str, count: int, days: int) -> str | None:
+    """Record an auto-promotion event in the ledger. Returns event_id or None on failure."""
     eid = f"auto-promote-{int(time.time())}-{skill[:20]}"
-    return append_event(
-        source=SOURCE,
-        event_type=EV_AUTO_PROMOTE,
-        event_id=eid,
-        actor_profile="denji",
-        target_profile=profile,
-        object_type="skill",
-        object_id=skill,
-        summary=f"Auto-promoted {skill} for {profile} ({count} borrows in {days}d)",
-        payload={
-            "profile": profile,
-            "skill": skill,
-            "borrow_count": count,
-            "window_days": days,
-            "promoted_at": int(time.time()),
-            "revert_event_type": EV_AUTO_PROMOTE_REVERT,
-        },
-    )
+    try:
+        return append_event(
+            source=SOURCE,
+            event_type=EV_AUTO_PROMOTE,
+            event_id=eid,
+            actor_profile="denji",
+            target_profile=profile,
+            object_type="skill",
+            object_id=skill,
+            summary=f"Auto-promoted {skill} for {profile} ({count} borrows in {days}d)",
+            payload={
+                "profile": profile,
+                "skill": skill,
+                "borrow_count": count,
+                "window_days": days,
+                "promoted_at": int(time.time()),
+                "revert_event_type": EV_AUTO_PROMOTE_REVERT,
+            },
+        )
+    except Exception as e:
+        print(f"  ERROR recording promotion event for {profile}/{skill}: {e}")
+        return None
 
 
 def _add_to_enabled(profile: str, skill: str, yaml_parser: YAML, verbose: bool = False) -> bool:
@@ -126,8 +145,12 @@ def _add_to_enabled(profile: str, skill: str, yaml_parser: YAML, verbose: bool =
     enabled.sort()
     skills_cfg["enabled_skills"] = enabled
 
-    with cfg_path.open("w") as fh:
-        yaml_parser.dump(data, fh)
+    try:
+        with cfg_path.open("w") as fh:
+            yaml_parser.dump(data, fh)
+    except (OSError, TypeError) as e:
+        print(f"  ERROR writing {profile} config: {e}")
+        return False
     return True
 
 
@@ -136,12 +159,15 @@ def _skill_exists_on_disk(skill_name: str) -> bool:
     skills_dir = DEFAULT_HOME / "skills"
     if not skills_dir.exists():
         return False
-    # Check direct path and nested paths
-    if (skills_dir / skill_name / "SKILL.md").exists():
-        return True
-    # Check for nested skill (e.g. devops/kanban-ops)
-    for skill_md in skills_dir.rglob(f"{skill_name}/SKILL.md"):
-        return True
+    try:
+        # Check direct path and nested paths
+        if (skills_dir / skill_name / "SKILL.md").exists():
+            return True
+        # Check for nested skill (e.g. devops/kanban-ops)
+        for skill_md in skills_dir.rglob(f"{skill_name}/SKILL.md"):
+            return True
+    except (OSError, PermissionError) as e:
+        print(f"  ERROR checking skill on disk '{skill_name}': {e}")
     return False
 
 
@@ -209,4 +235,8 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except Exception as e:
+        print(f"❌ denji-auto-promote · unexpected error: {e}")
+        sys.exit(1)

@@ -1,6 +1,8 @@
 #!/bin/bash
 # Daily token health check wrapper — formats token_health.py output for human delivery
 # Discord-safe output (no HTML tags)
+set -euo pipefail
+trap 'echo "❌ Token health · wrapper failed unexpectedly at line $LINENO"; exit 1' ERR
 
 cd /home/kensei
 
