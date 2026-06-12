@@ -481,13 +481,13 @@ def _get_orchestrator_enabled() -> bool:
 
 
 def _get_synthesis_enabled() -> bool:
-    """Read delegation.synthesis_enabled config flag (default: False)."""
-    return is_truthy_value(_load_config().get("synthesis_enabled", False))
+    """Read delegation.synthesis_enabled config flag (default: True)."""
+    return is_truthy_value(_load_config().get("synthesis_enabled", True))
 
 
 def _get_verify_enabled() -> bool:
-    """Read delegation.verify_enabled config flag (default: False)."""
-    return is_truthy_value(_load_config().get("verify_enabled", False))
+    """Read delegation.verify_enabled config flag (default: True)."""
+    return is_truthy_value(_load_config().get("verify_enabled", True))
 
 
 def _get_inherit_mcp_toolsets() -> bool:

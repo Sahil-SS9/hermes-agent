@@ -8788,6 +8788,9 @@ def get_spawn_frequency(
             "spawn_count": 0, "tasks": set(),
         })
         entry["spawn_count"] += 1
+        task_id = data.get("task_id", "")
+        if task_id:
+            entry["tasks"].add(task_id)
     # Materialise the sets for JSON-friendly output and sort by count desc
     out = []
     for entry in agg.values():
@@ -8795,6 +8798,7 @@ def get_spawn_frequency(
             "assignee": entry["assignee"],
             "stage": entry["stage"],
             "spawn_count": entry["spawn_count"],
+            "tasks": sorted(entry["tasks"]),
         })
     out.sort(key=lambda r: (-r["spawn_count"], r["assignee"], r["stage"]))
     return out

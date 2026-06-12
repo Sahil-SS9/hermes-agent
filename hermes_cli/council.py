@@ -61,6 +61,10 @@ class CouncilConfig:
     token_cap: Optional[int]
     timeout_seconds: int
     member_timeout_seconds: int
+    quorum_min: int
+    """Minimum successful Phase 1 critiques required. Below this, the
+    council auto-defers (REVISE) rather than proceeding with a crippled
+    panel. Default 2 — at least two members must succeed."""
     fallback_pool: List[Dict[str, str]] = field(default_factory=list)
     """Shared fallback pool — entries tried after per-member fallbacks.
     Models already in use by other active members are skipped."""
@@ -73,6 +77,7 @@ class CouncilConfig:
             token_cap=cfg.get("token_cap"),
             timeout_seconds=cfg.get("timeout_seconds", 600),
             member_timeout_seconds=cfg.get("member_timeout_seconds", 180),
+            quorum_min=cfg.get("quorum_min", 2),
             fallback_pool=cfg.get("fallback_pool", []),
         )
 
@@ -221,6 +226,19 @@ class CouncilVerdict:
         meta = f"## Meta\n\n- Tokens used: {self.tokens_used:,}\n- Elapsed: {self.elapsed_seconds:.1f}s\n"
 
         return verdict_line + issues_section + rationale + dissent + critiques_section + rankings + meta
+
+    def to_json(self) -> dict:
+        """Machine-readable verdict for the pipeline gate (C-a)."""
+        return {
+            "verdict": self.verdict,
+            "issues": self.issues,
+            "dissents": self.dissents,
+            "chairman_rationale": self.chairman_rationale,
+            "tokens_used": self.tokens_used,
+            "elapsed_seconds": self.elapsed_seconds,
+            "critique_count": len(self.critiques),
+            "critique_verdicts": [c.verdict for c in self.critiques],
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -394,11 +412,14 @@ def _call_llm_with_fallback(
                     member.model, attempt["provider"], attempt["model"], last_error[:120],
                 )
                 continue
-            # Permanent error — re-raise immediately (no fallback cycling).
-            raise RuntimeError(
-                f"Council member {member.model} via {attempt['provider']}/{attempt['model']} "
-                f"failed with permanent error: {last_error}"
-            ) from exc
+            # Permanent error — try next fallback rather than failing the
+            # whole member.  A single provider returning 400/401/403 should
+            # not kill the council when fallbacks are available.
+            logger.warning(
+                "Council member %s via %s/%s failed (permanent), trying next fallback: %s",
+                member.model, attempt["provider"], attempt["model"], last_error[:120],
+            )
+            continue
 
     raise RuntimeError(
         f"Council member {member.model} exhausted all providers ({len(providers_to_try)}). "
@@ -472,6 +493,8 @@ def _run_phase_1(
     member_timeout: int,
     token_cap: Optional[int],
     fallback_pool: Optional[List[Dict[str, str]]] = None,
+    *,
+    total_timeout: int = 600,
 ) -> Tuple[List[CouncilCritique], int, set]:
     """Phase 1: Independent review (parallel).
 
@@ -508,7 +531,7 @@ def _run_phase_1(
             )
             future_to_member[future] = (member, label)
 
-        for future in as_completed(future_to_member, timeout=600):
+        for future in as_completed(future_to_member, timeout=total_timeout):
             member, label = future_to_member[future]
             try:
                 raw, tokens = future.result()
@@ -563,6 +586,8 @@ def _run_phase_2(
     current_tokens: int,
     active_models: Optional[set] = None,
     fallback_pool: Optional[List[Dict[str, str]]] = None,
+    *,
+    total_timeout: int = 600,
 ) -> Tuple[str, int]:
     """Phase 2: Cross-ranking (anonymised).
 
@@ -604,7 +629,7 @@ Review each one and rank them.
             )
             future_to_member[future] = (member, anon)
 
-        for future in as_completed(future_to_member, timeout=600):
+        for future in as_completed(future_to_member, timeout=total_timeout):
             member, anon = future_to_member[future]
             try:
                 raw, tokens = future.result()
@@ -618,6 +643,55 @@ Review each one and rank them.
                 all_rankings_text.append(f"\n### {anon} rankings:\n\nERROR: {exc}")
 
     return "\n".join(all_rankings_text), total_tokens - current_tokens
+
+
+def _tally_votes(critiques: List[CouncilCritique]) -> dict:
+    """Count APPROVED/REVISE/ERROR votes from Phase 1 critiques.
+
+    Returns a dict suitable for feeding into the chairman prompt:
+        {"approved": N, "revise": N, "error": N, "total": N}
+    """
+    counts = {"approved": 0, "revise": 0, "error": 0}
+    for c in critiques:
+        v = c.verdict.upper()
+        if v == "APPROVED":
+            counts["approved"] += 1
+        elif v == "REVISE":
+            counts["revise"] += 1
+        else:
+            counts["error"] += 1
+    counts["total"] = len(critiques)
+    return counts
+
+
+def _parse_phase2_consensus(rankings_snapshot: str) -> dict:
+    """Extract consensus_issues and lone_wolf_issues from Phase 2 rankings.
+
+    Parses the JSON blocks embedded in the rankings snapshot to collect
+    issues that multiple reviewers flagged (consensus) vs single-reviewer
+    flags (lone wolf). Returns a dict with 'consensus' and 'lone_wolf'
+    lists for injection into the chairman prompt.
+    """
+    import re as _re
+    consensus: set = set()
+    lone_wolf: set = set()
+    # Find all JSON blocks in the rankings snapshot
+    blocks = _re.findall(r'```json\s*\n(.*?)\n```', rankings_snapshot, _re.DOTALL)
+    for block in blocks:
+        try:
+            data = json.loads(block)
+        except json.JSONDecodeError:
+            continue
+        for issue in data.get("consensus_issues", []):
+            if isinstance(issue, str) and issue.strip():
+                consensus.add(issue.strip())
+        for issue in data.get("lone_wolf_issues", []):
+            if isinstance(issue, str) and issue.strip():
+                lone_wolf.add(issue.strip())
+    return {
+        "consensus": sorted(consensus),
+        "lone_wolf": sorted(lone_wolf),
+    }
 
 
 def _run_phase_3(
@@ -640,6 +714,29 @@ def _run_phase_3(
     """
     critiques_text = "\n".join(c.to_markdown() for c in critiques)
 
+    # Build vote tally and consensus summary for the chairman
+    tally = _tally_votes(critiques)
+    consensus = _parse_phase2_consensus(rankings_snapshot)
+
+    tally_block = (
+        f"\n\n## Phase 1 Vote Tally\n\n"
+        f"- APPROVED: {tally['approved']}\n"
+        f"- REVISE:   {tally['revise']}\n"
+        f"- ERROR:    {tally['error']}\n"
+        f"- Total:    {tally['total']}\n"
+    )
+    consensus_block = ""
+    if consensus["consensus"]:
+        consensus_block += (
+            f"\n\n## Phase 2 Consensus Issues (flagged by multiple reviewers)\n\n"
+            + "\n".join(f"- {i}" for i in consensus["consensus"])
+        )
+    if consensus["lone_wolf"]:
+        consensus_block += (
+            f"\n\n## Phase 2 Lone-Wolf Issues (flagged by one reviewer only)\n\n"
+            + "\n".join(f"- {i}" for i in consensus["lone_wolf"])
+        )
+
     user_prompt = (
         _DATA_PREAMBLE
         + _wrap_as_data("PRD", prd_content)
@@ -647,8 +744,10 @@ def _run_phase_3(
         + _wrap_as_data("Tech Spec", spec_content)
         + "\n\n---\n\n## Phase 1 — Independent Reviews\n\n"
         + critiques_text
+        + tally_block
         + "\n\n---\n\n## Phase 2 — Cross-Ranking\n\n"
         + rankings_snapshot
+        + consensus_block
         + "\n"
     )
 
@@ -710,6 +809,12 @@ def deliberate(task_id: str, artifact_dir: str) -> CouncilVerdict:
     if not council_cfg.chairman.provider:
         raise RuntimeError("Council chairman not configured — check council.chairman in config.yaml")
 
+    # Validate diversity — log warnings but don't block (informational gate)
+    diversity_warnings = council_cfg.validate_diversity()
+    if diversity_warnings:
+        for w in diversity_warnings:
+            logger.warning("Council diversity: %s", w)
+
     token_cap = council_cfg.token_cap
     member_timeout = council_cfg.member_timeout_seconds
     total_timeout = council_cfg.timeout_seconds
@@ -745,9 +850,47 @@ def deliberate(task_id: str, artifact_dir: str) -> CouncilVerdict:
         member_timeout=min(member_timeout, int(remaining)),
         token_cap=token_cap,
         fallback_pool=fallback_pool,
+        total_timeout=total_timeout,
     )
     logger.info("Council Phase 1 complete: %d critiques, %d tokens — active models: %s",
                 len(critiques), tokens_used, active_models)
+
+    # Quorum check: if too few members succeeded, auto-REVISE without
+    # burning tokens on Phase 2/3.  A crippled panel cannot produce a
+    # meaningful cross-ranking or chairman synthesis.
+    successful = [c for c in critiques if c.verdict != "ERROR"]
+    quorum = council_cfg.quorum_min
+    if len(successful) < quorum:
+        logger.warning(
+            "Council quorum failed: %d/%d successful critiques (min %d) — auto-REVISE",
+            len(successful), len(critiques), quorum,
+        )
+        elapsed = time.monotonic() - start_time
+        verdict = CouncilVerdict(
+            verdict="REVISE",
+            issues=[{
+                "severity": "critical",
+                "description": (
+                    f"Council quorum failed: only {len(successful)} of "
+                    f"{len(critiques)} panellists completed review "
+                    f"(minimum {quorum}). Manual review required."
+                ),
+            }],
+            dissents=[],
+            chairman_rationale=(
+                f"Quorum not met ({len(successful)}/{len(critiques)} < {quorum}). "
+                "Deliberation aborted — no Phase 2/3."
+            ),
+            critiques=critiques,
+            rankings_snapshot="",
+            tokens_used=tokens_used,
+            elapsed_seconds=elapsed,
+        )
+        os.makedirs(artifact_dir, exist_ok=True)
+        verdict_path = os.path.join(artifact_dir, "council-verdict.md")
+        with open(verdict_path, "w") as f:
+            f.write(verdict.to_markdown(task_id))
+        return verdict
 
     # Phase 2 — Cross-ranking (parallel on all members)
     elapsed = time.monotonic() - start_time
@@ -799,11 +942,14 @@ def deliberate(task_id: str, artifact_dir: str) -> CouncilVerdict:
         elapsed_seconds=elapsed,
     )
 
-    # Write council-verdict.md
+    # Write council-verdict.md (human-readable) + council-verdict.json (machine-readable)
     os.makedirs(artifact_dir, exist_ok=True)
-    verdict_path = os.path.join(artifact_dir, "council-verdict.md")
-    with open(verdict_path, "w") as f:
+    verdict_md_path = os.path.join(artifact_dir, "council-verdict.md")
+    verdict_json_path = os.path.join(artifact_dir, "council-verdict.json")
+    with open(verdict_md_path, "w") as f:
         f.write(verdict.to_markdown(task_id))
-    logger.info("Council verdict written to %s", verdict_path)
+    with open(verdict_json_path, "w") as f:
+        json.dump(verdict.to_json(), f, indent=2)
+    logger.info("Council verdict written to %s + %s", verdict_md_path, verdict_json_path)
 
     return verdict

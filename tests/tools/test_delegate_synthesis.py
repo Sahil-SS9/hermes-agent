@@ -95,10 +95,10 @@ class TestExtractFinding(unittest.TestCase):
 class TestSynthesisEnabled(unittest.TestCase):
     """Feature flag defaults and config reading."""
 
-    def test_defaults_to_false(self):
-        # Without config, should default to False
+    def test_defaults_to_true(self):
+        # Without config, should default to True (enabled by default)
         with patch("tools.delegate_tool._load_config", return_value={}):
-            self.assertFalse(_get_synthesis_enabled())
+            self.assertTrue(_get_synthesis_enabled())
 
     def test_truthy_values(self):
         for val in (True, "true", "1", "yes", "on"):
@@ -113,9 +113,9 @@ class TestSynthesisEnabled(unittest.TestCase):
 class TestVerifyEnabled(unittest.TestCase):
     """Feature flag defaults and config reading."""
 
-    def test_defaults_to_false(self):
+    def test_defaults_to_true(self):
         with patch("tools.delegate_tool._load_config", return_value={}):
-            self.assertFalse(_get_verify_enabled())
+            self.assertTrue(_get_verify_enabled())
 
     def test_truthy_values(self):
         for val in (True, "true", "1", "yes", "on"):
@@ -213,11 +213,11 @@ class TestPersistentConfigOverlay(unittest.TestCase):
             self.assertFalse(_get_verify_enabled())
             self.assertFalse(_get_synthesis_enabled())
 
-    def test_missing_keys_default_false(self):
-        """Absent keys default to False, not crash."""
+    def test_missing_keys_default_true(self):
+        """Absent keys default to True (enabled by default), not crash."""
         with patch("tools.delegate_tool._load_config", return_value={"model": "some-model"}):
-            self.assertFalse(_get_verify_enabled())
-            self.assertFalse(_get_synthesis_enabled())
+            self.assertTrue(_get_verify_enabled())
+            self.assertTrue(_get_synthesis_enabled())
 
 
 if __name__ == "__main__":

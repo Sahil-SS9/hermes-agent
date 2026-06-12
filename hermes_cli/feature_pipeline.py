@@ -6,6 +6,7 @@ Provides:
 - Gate functions for each pipeline stage (intake, research, prd, spec)
 - Pipeline state machine (advance_pipeline, get_pipeline_status)
 """
+import json
 import os
 from typing import Optional
 
@@ -154,50 +155,46 @@ COUNCIL_PENDING = "Council deliberation pending"
 
 
 def validate_council_artifact(artifact_dir: str) -> Optional[str]:
-    """Gate: council-verdict.md must exist and contain APPROVED.
+    """Gate: council-verdict.json must exist and contain APPROVED.
 
     This gate is PURE: it never runs the (expensive, multi-LLM) deliberation
     itself, so it is safe to call inside the dispatcher tick. When the verdict
     is missing it returns the ``COUNCIL_PENDING`` sentinel; the dispatcher is
     responsible for launching the deliberation in the background.
 
+    Reads the machine-readable JSON verdict (C-a). The markdown artifact
+    (council-verdict.md) is kept as a human-readable companion.
+
     Returns None if APPROVED, reason string if REVISE/pending/error.
     """
-    verdict_path = os.path.join(artifact_dir, "council-verdict.md")
+    json_path = os.path.join(artifact_dir, "council-verdict.json")
 
-    if not os.path.exists(verdict_path):
+    if not os.path.exists(json_path):
         return COUNCIL_PENDING
 
     # Verdict artifact exists — read and check
     try:
-        with open(verdict_path) as f:
-            content = f.read()
-    except OSError as exc:
-        return f"Cannot read council-verdict.md: {exc}"
+        with open(json_path) as f:
+            data = json.loads(f.read())
+    except (OSError, json.JSONDecodeError) as exc:
+        return f"Cannot read council-verdict.json: {exc}"
 
-    if not content or not content.strip():
-        return "council-verdict.md is empty"
-
-    # Parse the verdict from the markdown
-    content_lower = content.lower()
-    if "**verdict: approved**" in content_lower or "verdict: approved" in content_lower:
+    verdict = data.get("verdict", "").upper()
+    if verdict == "APPROVED":
         return None
 
-    # Extract issues for REVISE reason
-    if "**verdict: revise**" in content_lower or "verdict: revise" in content_lower:
-        # Try to extract issues from the markdown
-        import re
-        issue_matches = re.findall(
-            r"- \*?\*?\[(CRITICAL|HIGH|MEDIUM|LOW)\]\*?\*?\s+(.+)",
-            content, re.IGNORECASE,
-        )
-        if issue_matches:
-            issue_lines = [f"[{m[0].upper()}] {m[1]}" for m in issue_matches]
+    if verdict == "REVISE":
+        issues = data.get("issues", [])
+        if issues:
+            issue_lines = [
+                f"[{i.get('severity', 'medium').upper()}] {i.get('description', '')}"
+                for i in issues
+            ]
             return "Council REVISE. Issues:\n" + "\n".join(issue_lines)
-        return "Council REVISE — see council-verdict.md for details"
+        return "Council REVISE — see council-verdict.json for details"
 
     # Verdict unclear — treat as REVISE
-    return "Council verdict unclear — see council-verdict.md"
+    return f"Council verdict unclear ({verdict}) — see council-verdict.json"
 
 
 def validate_tech_review_artifact(artifact_dir: str) -> Optional[str]:

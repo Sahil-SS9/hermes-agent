@@ -69,11 +69,16 @@ def _new_event_id(prefix: str = "borrow") -> str:
     return f"{prefix}-{today}-{uuid.uuid4().hex[:8]}"
 
 
-def revoked_borrow_ids() -> set:
-    """event_ids of borrows that have a matching revoke."""
+def revoked_borrow_ids(*, since: Optional[int] = None) -> set:
+    """event_ids of borrows that have a matching revoke.
+
+    When ``since`` is provided (epoch seconds), only revokes on or after
+    that timestamp are scanned — bounds the hot-path query so it does not
+    grow with the total historical ledger size.
+    """
     return {
         (e.get("payload") or {}).get("borrow_event_id")
-        for e in query_events(event_types=[EV_REVOKE])
+        for e in query_events(event_types=[EV_REVOKE], since=since)
     }
 
 
@@ -182,13 +187,21 @@ def revoke_by_event_id(event_id: str, result: str = "completed") -> dict:
     return {"event_id": event_id, "status": "revoked"}
 
 
+# Hot-path window for grant scans: grants are task-scoped and revoked on
+# completion, so a grant older than this many seconds is either already
+# revoked or swept by the TTL.  Bounds the ledger scan so it does not
+# grow with total historical events.
+_GRANT_SCAN_WINDOW_SECONDS = 7 * 86400  # 7 days
+
+
 def revoke_grants_for_task(task_id: str, result: str = "completed") -> int:
     """Revoke every live grant linked to ``task_id``. Returns the count revoked.
     Best-effort: never raises (called from the kanban completion path)."""
     try:
-        revoked = revoked_borrow_ids()
+        since = int(time.time() - _GRANT_SCAN_WINDOW_SECONDS)
+        revoked = revoked_borrow_ids(since=since)
         live = [
-            b for b in query_events(event_types=[EV_BORROW])
+            b for b in query_events(event_types=[EV_BORROW], since=since)
             if (b.get("payload") or {}).get("task_id") == task_id and b.get("event_id") not in revoked
         ]
         for b in live:
@@ -204,9 +217,10 @@ def sweep_expired_grants(ttl_hours: int = DEFAULT_TTL_HOURS) -> int:
     never raises, consistent with the other engine entry points."""
     try:
         cutoff = int(time.time() - ttl_hours * 3600)
-        revoked = revoked_borrow_ids()
+        since = int(time.time() - _GRANT_SCAN_WINDOW_SECONDS)
+        revoked = revoked_borrow_ids(since=since)
         expired = [
-            b for b in query_events(event_types=[EV_BORROW])
+            b for b in query_events(event_types=[EV_BORROW], since=since)
             if b.get("event_id") not in revoked and (b.get("occurred_at") or 0) < cutoff
         ]
         for b in expired:
