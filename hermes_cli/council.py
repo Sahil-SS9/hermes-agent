@@ -428,31 +428,14 @@ def _call_llm_with_fallback(
 
 
 def _parse_json_response(raw: str, label: str) -> dict:
-    """Parse JSON from an LLM response, handling markdown code fences."""
-    # Try direct parse first
-    try:
-        return json.loads(raw.strip())
-    except json.JSONDecodeError:
-        pass
+    """Parse JSON from an LLM response, handling markdown code fences.
 
-    # Try extracting from ```json ... ``` block
-    import re
-    m = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", raw, re.DOTALL)
-    if m:
-        try:
-            return json.loads(m.group(1).strip())
-        except json.JSONDecodeError:
-            pass
-
-    # Try extracting from first { to last }
-    m = re.search(r"\{.*\}", raw, re.DOTALL)
-    if m:
-        try:
-            return json.loads(m.group(0))
-        except json.JSONDecodeError:
-            pass
-
-    raise ValueError(f"Council {label}: could not parse JSON from response: {raw[:500]}")
+    Delegates to the shared ``hermes_cli.llm_json.parse_llm_json``
+    (JSON-1 consolidation).  Raises ValueError on failure; the council
+    callers catch it and record an ERROR critique.
+    """
+    from hermes_cli.llm_json import parse_llm_json
+    return parse_llm_json(raw, label=label, raise_on_failure=True)
 
 
 # ---------------------------------------------------------------------------

@@ -39,7 +39,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import re
 from dataclasses import dataclass
 from typing import Optional
 
@@ -129,9 +128,6 @@ Default assignee (used when no profile fits a task): {default_assignee}
 """
 
 
-_FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.MULTILINE)
-
-
 @dataclass
 class DecomposeOutcome:
     """Result of decomposing a single triage task."""
@@ -151,30 +147,20 @@ def _truncate(text: str, limit: int) -> str:
 
 
 def _extract_json_blob(raw: str) -> Optional[dict]:
-    if not raw:
-        return None
-    stripped = _FENCE_RE.sub("", raw.strip())
-    first = stripped.find("{")
-    last = stripped.rfind("}")
-    if first == -1 or last == -1 or last <= first:
-        return None
-    candidate = stripped[first : last + 1]
-    try:
-        val = json.loads(candidate)
-    except (ValueError, json.JSONDecodeError):
-        return None
-    if not isinstance(val, dict):
-        return None
-    return val
+    """Lenient JSON extraction. Returns None if nothing parses.
+
+    Delegates to the shared ``hermes_cli.llm_json.parse_llm_json``
+    (JSON-1 consolidation).
+    """
+    from hermes_cli.llm_json import parse_llm_json
+    return parse_llm_json(raw, raise_on_failure=False)
 
 
 def _profile_author() -> str:
-    """Mirror of ``hermes_cli.kanban._profile_author``."""
-    return (
-        os.environ.get("HERMES_PROFILE")
-        or os.environ.get("USER")
-        or "decomposer"
-    )
+    """Best-effort author name. Delegates to ``hermes_cli.llm_json``
+    (I-3: single source, breaks circular import with kanban.py)."""
+    from hermes_cli.llm_json import _profile_author as _pa
+    return _pa()
 
 
 def _load_config() -> dict:

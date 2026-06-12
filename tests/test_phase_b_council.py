@@ -248,23 +248,27 @@ class TestCouncilService:
 # ---------------------------------------------------------------------------
 
 class TestCouncilGate:
-    """Gate: validate_council_artifact checks council-verdict.md."""
+    """Gate: validate_council_artifact checks council-verdict.json."""
 
     def test_council_gate_approved(self, tmp_path):
         """Gate returns None when verdict is APPROVED."""
-        verdict_path = tmp_path / "council-verdict.md"
-        verdict_path.write_text("# Council Verdict\n\n**Verdict: APPROVED**\n\nNo issues.")
+        import json
+        verdict_path = tmp_path / "council-verdict.json"
+        verdict_path.write_text(json.dumps({"verdict": "APPROVED", "issues": []}))
         result = validate_council_artifact(str(tmp_path))
         assert result is None
 
     def test_council_gate_revise(self, tmp_path):
         """Gate returns reason string when verdict is REVISE."""
-        verdict_path = tmp_path / "council-verdict.md"
-        verdict_path.write_text(
-            "# Council Verdict\n\n**Verdict: REVISE**\n\n"
-            "- **[HIGH]** Missing error handling\n"
-            "- **[MEDIUM]** Test coverage gaps\n"
-        )
+        import json
+        verdict_path = tmp_path / "council-verdict.json"
+        verdict_path.write_text(json.dumps({
+            "verdict": "REVISE",
+            "issues": [
+                {"severity": "high", "description": "Missing error handling"},
+                {"severity": "medium", "description": "Test coverage gaps"},
+            ],
+        }))
         result = validate_council_artifact(str(tmp_path))
         assert result is not None
         assert "REVISE" in result
@@ -280,20 +284,21 @@ class TestCouncilGate:
         """
         from hermes_cli.feature_pipeline import COUNCIL_PENDING
         result = validate_council_artifact(str(tmp_path))
-        assert result == COUNCIL_PENDING
+        assert result is COUNCIL_PENDING
 
     def test_council_gate_empty_artifact(self, tmp_path):
         """Gate returns error when verdict artifact is empty."""
-        verdict_path = tmp_path / "council-verdict.md"
+        verdict_path = tmp_path / "council-verdict.json"
         verdict_path.write_text("")
         result = validate_council_artifact(str(tmp_path))
         assert result is not None
-        assert "empty" in result.lower()
+        assert "Cannot read" in result or "empty" in result.lower()
 
     def test_council_gate_unparseable(self, tmp_path):
         """Gate returns REVISE when verdict is unclear."""
-        verdict_path = tmp_path / "council-verdict.md"
-        verdict_path.write_text("# Something Else\n\nNo verdict found here.")
+        import json
+        verdict_path = tmp_path / "council-verdict.json"
+        verdict_path.write_text(json.dumps({"verdict": "UNKNOWN", "issues": []}))
         result = validate_council_artifact(str(tmp_path))
         assert result is not None
         assert "unclear" in result.lower()
@@ -399,8 +404,12 @@ class TestCouncilFallbacks:
         # (without running the deliberation). The actual fallback retry logic
         # is in council._call_llm_with_fallback, tested indirectly via
         # test_council_verdict_artifact_created which mocks the LLM call.
-        verdict_path = tmp_path / "council-verdict.md"
-        verdict_path.write_text("# Council Verdict\n\n**Verdict: REVISE**\n\n- **[LOW]** Minor thing\n")
+        import json
+        verdict_path = tmp_path / "council-verdict.json"
+        verdict_path.write_text(json.dumps({
+            "verdict": "REVISE",
+            "issues": [{"severity": "low", "description": "Minor thing"}],
+        }))
         result = validate_council_artifact(str(tmp_path))
         assert result is not None
         assert "REVISE" in result

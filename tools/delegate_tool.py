@@ -1404,9 +1404,20 @@ def _extract_finding(summary: str) -> str:
         text = text[-20000:]
     import re as _re
 
-    # --- Strategy 1: JSON extraction (two passes) ---
+    # --- Strategy 1: JSON extraction via shared parser ---
 
-    # 1a: JSON blocks with a named key (preferred — clean extraction)
+    # 1a: Try the shared parser on the whole text first
+    from hermes_cli.llm_json import parse_llm_json
+    parsed = parse_llm_json(text, raise_on_failure=False)
+    if parsed is not None:
+        for key in ("finding", "answer", "conclusion", "claim"):
+            if key in parsed and isinstance(parsed[key], str) and parsed[key]:
+                return str(parsed[key])
+        # No named key; serialise the whole dict as the finding
+        return json.dumps(parsed, indent=2)
+
+    # 1b: Scan for inline JSON blocks with named keys (the shared parser
+    #     expects a clean JSON document; inline blocks need regex extraction)
     key_pats = "finding|answer|conclusion|claim"
     named_blocks = _re.findall(
         r'\{[^{}]*"(?:' + key_pats + r')"[^{}]*\}',
@@ -1420,36 +1431,6 @@ def _extract_finding(summary: str) -> str:
                     return str(parsed[key])
         except (json.JSONDecodeError, TypeError, KeyError):
             continue
-
-    # 1b: any JSON block (fence-stripped) — when the producer used
-    #     arbitrary keys, serialise the whole block so the skeptic has
-    #     the full claim to evaluate rather than skipping silently.
-    any_blocks = _re.findall(
-        r'(?:```(?:json)?\s*\n)?(\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\})',
-        text, _re.DOTALL,
-    )
-    for block_str in reversed(any_blocks):
-        block_str = block_str.strip()
-        try:
-            parsed = json.loads(block_str)
-            # Prefer a named key if one exists; otherwise serialise
-            for key in ("finding", "answer", "conclusion", "claim"):
-                if key in parsed and isinstance(parsed[key], str):
-                    return str(parsed[key])
-            return json.dumps(parsed, indent=2)
-        except (json.JSONDecodeError, TypeError):
-            continue
-
-    # 1c: whole-text JSON
-    if text.startswith("{") and text.endswith("}"):
-        try:
-            parsed = json.loads(text)
-            for key in ("finding", "answer", "conclusion", "claim"):
-                if key in parsed and parsed[key]:
-                    return str(parsed[key])
-            return json.dumps(parsed, indent=2)
-        except (json.JSONDecodeError, TypeError, KeyError):
-            pass
 
     # --- Strategy 2: Markdown heading ---
     for heading in ("Finding", "Conclusion", "Claim", "Result"):

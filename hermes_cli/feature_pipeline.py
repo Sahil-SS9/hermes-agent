@@ -148,13 +148,23 @@ def validate_spec_artifact(artifact_dir: str) -> Optional[str]:
     return _check_body_markers(content, _SPEC_MARKERS)
 
 
-# Sentinel reason returned while the council is still deliberating. The
+# Sentinel returned while the council is still deliberating. The
 # dispatcher recognises this to launch/await the background run rather than
 # bouncing the task to spec (which a normal REVISE reason would do).
-COUNCIL_PENDING = "Council deliberation pending"
+# S2: proper sentinel type instead of a bare string so `is` checks work
+# and accidental string collisions cannot produce false matches.
+class _GatePending:
+    """Sentinel: gate cannot evaluate yet; retry next tick."""
+    __slots__ = ()
+    def __repr__(self) -> str:
+        return "GatePending"
+    def __bool__(self) -> bool:
+        return False  # truthy enough for `if result:` to treat as non-pass
+
+COUNCIL_PENDING = _GatePending()
 
 
-def validate_council_artifact(artifact_dir: str) -> Optional[str]:
+def validate_council_artifact(artifact_dir: str) -> Optional[str] | _GatePending:
     """Gate: council-verdict.json must exist and contain APPROVED.
 
     This gate is PURE: it never runs the (expensive, multi-LLM) deliberation

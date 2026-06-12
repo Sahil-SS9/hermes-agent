@@ -34,7 +34,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import re
 from dataclasses import dataclass
 from typing import Optional
 
@@ -105,38 +104,22 @@ def _truncate(text: str, limit: int) -> str:
     return text[: limit - 1] + "…"
 
 
-_FENCE_RE = re.compile(r"^\s*```(?:json)?\s*|\s*```\s*$", re.IGNORECASE)
-
-
 def _extract_json_blob(raw: str) -> Optional[dict]:
     """Lenient JSON extraction — tolerates fenced code blocks and
-    leading/trailing whitespace. Returns None if nothing parses."""
-    if not raw:
-        return None
-    stripped = _FENCE_RE.sub("", raw.strip())
-    # Greedy: find the first `{` and last `}` and try that slice.
-    first = stripped.find("{")
-    last = stripped.rfind("}")
-    if first == -1 or last == -1 or last <= first:
-        return None
-    candidate = stripped[first : last + 1]
-    try:
-        val = json.loads(candidate)
-    except (ValueError, json.JSONDecodeError):
-        return None
-    if not isinstance(val, dict):
-        return None
-    return val
+    leading/trailing whitespace. Returns None if nothing parses.
+
+    Delegates to the shared ``hermes_cli.llm_json.parse_llm_json``
+    (JSON-1 consolidation).
+    """
+    from hermes_cli.llm_json import parse_llm_json
+    return parse_llm_json(raw, raise_on_failure=False)
 
 
 def _profile_author() -> str:
-    """Mirror of ``hermes_cli.kanban._profile_author``. Kept local to
-    avoid a circular import when kanban.py imports this module."""
-    return (
-        os.environ.get("HERMES_PROFILE")
-        or os.environ.get("USER")
-        or "specifier"
-    )
+    """Best-effort author name. Delegates to ``hermes_cli.llm_json``
+    (I-3: single source, breaks circular import with kanban.py)."""
+    from hermes_cli.llm_json import _profile_author as _pa
+    return _pa()
 
 
 def specify_task(
