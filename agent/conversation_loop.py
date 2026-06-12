@@ -432,6 +432,45 @@ def run_conversation(
     _plugin_user_context = _ctx.plugin_user_context
     _ext_prefetch_cache = _ctx.ext_prefetch_cache
 
+    # Plugin hook: pre_user_message — fires on CLI/TUI surfaces before
+    # the message is appended to history. Mirrors pre_gateway_dispatch.
+    # First non-None action wins; rewrite replaces user_message and
+    # original_user_message; skip drops the turn with no LLM call.
+    try:
+        from hermes_cli.plugins import invoke_hook as _invoke_hook
+        _pre_results = _invoke_hook(
+            "pre_user_message",
+            message=user_message,
+            session_id=agent.session_id,
+            platform=getattr(agent, "platform", None) or "cli",
+            model=agent.model,
+        )
+        for _r in _pre_results:
+            if not isinstance(_r, dict):
+                continue
+            _action = _r.get("action")
+            if _action == "skip":
+                logger.info(
+                    "pre_user_message: turn skipped (%s)",
+                    _r.get("reason", "no reason given"),
+                )
+                return {
+                    "final_response": "",
+                    "messages": messages,
+                    "completed": True,
+                    "api_calls": 0,
+                    "skipped": True,
+                    "skip_reason": _r.get("reason", ""),
+                }
+            if _action == "rewrite":
+                _new_text = _r.get("text", "")
+                if isinstance(_new_text, str) and _new_text.strip():
+                    user_message = _new_text
+                    original_user_message = _new_text
+                    break
+    except Exception as exc:
+        logger.warning("pre_user_message hook failed: %s", exc)
+
     # Main conversation loop counters (pure locals consumed by the loop below).
     api_call_count = 0
     final_response = None
