@@ -4882,6 +4882,47 @@ class DiscordAdapter(BasePlatformAdapter):
         except Exception as e:
             return SendResult(success=False, error=str(e))
 
+    async def send_profile_gate(
+        self, chat_id: str, approval: dict, board: Optional[str] = None,
+        metadata: Optional[dict] = None,
+    ) -> SendResult:
+        """Post an Approve / Reject prompt for a profile lifecycle approval."""
+        if not self._client or not DISCORD_AVAILABLE:
+            return SendResult(success=False, error="Not connected")
+        try:
+            target_id = chat_id
+            if metadata and metadata.get("thread_id"):
+                target_id = metadata["thread_id"]
+            channel = self._client.get_channel(int(target_id))
+            if not channel:
+                channel = await self._client.fetch_channel(int(target_id))
+            op = str(approval.get("op") or "?").upper()
+            profile = approval.get("profile") or "?"
+            embed = discord.Embed(
+                title=f"Profile {op} requested",
+                description=approval.get("blast_summary") or f"{op} {profile}",
+                color=discord.Color.orange(),
+            )
+            embed.add_field(name="Profile", value=str(profile), inline=True)
+            embed.add_field(
+                name="Requested by",
+                value=str(approval.get("requested_by") or "?"), inline=True,
+            )
+            embed.add_field(
+                name="Approval id", value=str(approval.get("id")), inline=False,
+            )
+            view = ProfileGateView(
+                approval_id=str(approval.get("id")),
+                board=board,
+                allowed_user_ids=self._allowed_user_ids,
+                allowed_role_ids=self._allowed_role_ids,
+            )
+            msg = await channel.send(embed=embed, view=view)
+            view._message = msg
+            return SendResult(success=True, message_id=str(msg.id))
+        except Exception as e:
+            return SendResult(success=False, error=str(e))
+
     async def send_clarify(
         self,
         chat_id: str,
@@ -5784,6 +5825,7 @@ def _define_discord_view_classes() -> None:
     undefined, causing NameError on the first button interaction.
     """
     global ExecApprovalView, SlashConfirmView, UpdatePromptView, ModelPickerView, ClarifyChoiceView
+    global ProfileGateView
 
     class ExecApprovalView(discord.ui.View):
         """
@@ -6007,6 +6049,124 @@ def _define_discord_view_classes() -> None:
                     if embed:
                         embed.color = discord.Color.greyple()
                         embed.set_footer(text="⏱ Prompt expired — no action taken")
+                    await msg.edit(embed=embed, view=self)
+                except Exception:
+                    pass
+
+    class ProfileGateView(discord.ui.View):
+        """Two-button Approve / Reject view for PROFILE-GATE.
+
+        Gates autonomous profile CREATE / DELETE. Clicking runs the
+        kanban-side resolver (``profile_lifecycle_gate.approve`` / ``reject``)
+        in a worker thread: on approve the op executes and the requester task
+        closes; on reject the op never runs. Only allowlisted users can click.
+        A long timeout keeps the buttons live; if it expires the approval
+        stays pending and the operator can resolve it via the CLI fallback.
+        """
+
+        def __init__(
+            self,
+            approval_id: str,
+            board: Optional[str],
+            allowed_user_ids: set,
+            allowed_role_ids: Optional[set] = None,
+        ):
+            # 24h so Sahil has time; pending row survives expiry regardless.
+            super().__init__(timeout=86400)
+            self.approval_id = approval_id
+            self.board = board
+            self.allowed_user_ids = allowed_user_ids
+            self.allowed_role_ids = allowed_role_ids or set()
+            self.resolved = False
+
+        def _check_auth(self, interaction: discord.Interaction) -> bool:
+            return _component_check_auth(
+                interaction, self.allowed_user_ids, self.allowed_role_ids,
+            )
+
+        @staticmethod
+        def _resolve_blocking(approval_id: str, board: Optional[str], decision: str, by: str) -> dict:
+            from contextlib import nullcontext
+            from hermes_cli import kanban_db as _kb
+            from hermes_cli import profile_lifecycle_gate as _gate
+            scope = _kb.scoped_current_board(board) if board else nullcontext()
+            with scope, _kb.connect() as conn:
+                if decision == "approve":
+                    return _gate.approve(conn, approval_id, resolved_by=by)
+                return _gate.reject(conn, approval_id, resolved_by=by)
+
+        async def _resolve(
+            self, interaction: discord.Interaction, decision: str,
+            color: discord.Color, label: str,
+        ):
+            if self.resolved:
+                await interaction.response.send_message(
+                    "This approval has already been resolved~", ephemeral=True,
+                )
+                return
+            if not self._check_auth(interaction):
+                await interaction.response.send_message(
+                    "You're not authorised to answer this prompt~", ephemeral=True,
+                )
+                return
+            self.resolved = True
+            for child in self.children:
+                child.disabled = True
+            embed = interaction.message.embeds[0] if interaction.message.embeds else None
+            if embed:
+                embed.color = color
+                embed.set_footer(text=f"{label} by {interaction.user.display_name}")
+            await interaction.response.edit_message(embed=embed, view=self)
+
+            by = f"discord:{interaction.user.display_name}"
+            try:
+                res = await asyncio.to_thread(
+                    self._resolve_blocking, self.approval_id, self.board, decision, by,
+                )
+            except Exception as exc:
+                logger.error("profile-gate resolve failed: %s", exc, exc_info=True)
+                await interaction.followup.send(
+                    f"Profile gate {decision} failed: {exc}"
+                )
+                return
+            if decision == "approve" and not res.get("ok"):
+                await interaction.followup.send(
+                    f"Approved but the op FAILED: {res.get('error')}"
+                )
+            else:
+                verb = "executed" if decision == "approve" else "rejected"
+                await interaction.followup.send(
+                    f"Profile {res.get('op')} {res.get('profile')} {verb}."
+                )
+            logger.info(
+                "profile-gate %s for %s by %s",
+                decision, self.approval_id, interaction.user.display_name,
+            )
+
+        @discord.ui.button(label="Approve", style=discord.ButtonStyle.green)
+        async def approve(
+            self, interaction: discord.Interaction, button: discord.ui.Button,
+        ):
+            await self._resolve(interaction, "approve", discord.Color.green(), "Approved")
+
+        @discord.ui.button(label="Reject", style=discord.ButtonStyle.red)
+        async def reject(
+            self, interaction: discord.Interaction, button: discord.ui.Button,
+        ):
+            await self._resolve(interaction, "reject", discord.Color.red(), "Rejected")
+
+        async def on_timeout(self):
+            for child in self.children:
+                child.disabled = True
+            msg = getattr(self, "_message", None)
+            if msg:
+                try:
+                    embed = msg.embeds[0] if msg.embeds else None
+                    if embed:
+                        embed.color = discord.Color.greyple()
+                        embed.set_footer(
+                            text="⏱ Prompt expired; resolve via CLI if still needed"
+                        )
                     await msg.edit(embed=embed, view=self)
                 except Exception:
                     pass

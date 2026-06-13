@@ -1181,6 +1181,32 @@ CREATE TABLE IF NOT EXISTS kanban_notify_subs (
     PRIMARY KEY (task_id, platform, chat_id, thread_id)
 );
 
+-- PROFILE-GATE: pending human-approval records for profile lifecycle ops
+-- (create / delete).  Autonomous lifecycle ops block their task and write a
+-- row here; a Discord approve/reject resolves it and the resolver executes
+-- the op on approve.  ``args_json`` carries everything needed to run the op
+-- without re-consulting the (now ended) requesting agent run.  ``token`` is a
+-- one-shot per-approval secret the resolver passes into
+-- ``profiles.lifecycle_authorised`` when it runs the approved op (and an
+-- audit handle); it is not a substitute for the DB status guard, which is
+-- what actually makes a rejected or already-resolved op un-runnable.
+CREATE TABLE IF NOT EXISTS profile_lifecycle_approvals (
+    id            TEXT PRIMARY KEY,
+    task_id       TEXT NOT NULL,
+    op            TEXT NOT NULL,            -- 'create' | 'delete'
+    profile       TEXT NOT NULL,
+    args_json     TEXT NOT NULL DEFAULT '{}',
+    requested_by  TEXT,
+    blast_summary TEXT,
+    status        TEXT NOT NULL DEFAULT 'pending',  -- pending|approved|rejected|executed|failed
+    token         TEXT NOT NULL,
+    error         TEXT,
+    resolved_by   TEXT,
+    created_at    INTEGER NOT NULL,
+    resolved_at   INTEGER,
+    notified_at   INTEGER                   -- when the Discord prompt was delivered
+);
+
 CREATE INDEX IF NOT EXISTS idx_tasks_assignee_status ON tasks(assignee, status);
 CREATE INDEX IF NOT EXISTS idx_tasks_status          ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_links_child           ON task_links(child_id);
@@ -1192,6 +1218,7 @@ CREATE INDEX IF NOT EXISTS idx_runs_task             ON task_runs(task_id, start
 CREATE INDEX IF NOT EXISTS idx_runs_status           ON task_runs(status);
 CREATE INDEX IF NOT EXISTS idx_attachments_task      ON task_attachments(task_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_notify_task           ON kanban_notify_subs(task_id);
+CREATE INDEX IF NOT EXISTS idx_profile_approvals_status ON profile_lifecycle_approvals(status, created_at);
 -- Cost governance: daily agent-spawn counter (P2-1). One row per UTC
 -- date.  The ``count`` column tracks total agent spawns across all boards
 -- for the calendar day.  Dispatcher tick reads the row, compares against
@@ -1953,6 +1980,7 @@ _REBUILD_SPECS = {
         (
             "CREATE INDEX idx_events_task ON task_events(task_id, created_at)",
             "CREATE INDEX idx_events_run ON task_events(run_id, id)",
+            "CREATE INDEX idx_events_kind ON task_events(kind, created_at)",
         ),
     ),
     "task_comments": (
@@ -4908,6 +4936,164 @@ def block_task(
     )
     return True
 
+
+# ---------------------------------------------------------------------------
+# PROFILE-GATE: human approval for profile lifecycle ops (create / delete)
+# ---------------------------------------------------------------------------
+# Autonomous profile CREATE and DELETE are destructive/creation ops that
+# Sahil gates personally via Discord. The op blocks its task, writes a
+# pending row here, and a Discord approve/reject resolves it. On approve the
+# resolver (profile_lifecycle_gate.py) runs the op with the one-shot token.
+
+_VALID_LIFECYCLE_OPS = ("create", "delete")
+
+
+def request_profile_lifecycle_approval(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    op: str,
+    profile: str,
+    args: Optional[dict] = None,
+    requested_by: Optional[str] = None,
+    blast_summary: Optional[str] = None,
+    expected_run_id: Optional[int] = None,
+) -> str:
+    """Record a pending profile-lifecycle approval and block the task.
+
+    Returns the approval id. The task is blocked with a
+    ``needs_human_approval`` reason; the Discord bridge delivers the
+    prompt and the resolver executes the op once Sahil approves.
+    """
+    if op not in _VALID_LIFECYCLE_OPS:
+        raise ValueError(f"op must be one of {_VALID_LIFECYCLE_OPS}, got {op!r}")
+    approval_id = "pla-" + secrets.token_hex(4)
+    token = secrets.token_urlsafe(24)
+    now = int(time.time())
+    with write_txn(conn):
+        conn.execute(
+            """
+            INSERT INTO profile_lifecycle_approvals
+                (id, task_id, op, profile, args_json, requested_by,
+                 blast_summary, status, token, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+            """,
+            (
+                approval_id, task_id, op, profile,
+                json.dumps(args or {}), requested_by, blast_summary,
+                token, now,
+            ),
+        )
+    _append_event(
+        conn, task_id, "profile_lifecycle_approval_requested",
+        {"approval_id": approval_id, "op": op, "profile": profile},
+    )
+    # Block the task last, so the row exists before the dispatcher could
+    # ever observe the blocked state.
+    request_human_approval(
+        conn, task_id,
+        detail=f"profile {op} {profile} (approval {approval_id})",
+        expected_run_id=expected_run_id,
+    )
+    return approval_id
+
+
+def get_profile_lifecycle_approval(
+    conn: sqlite3.Connection, approval_id: str
+) -> Optional[dict]:
+    """Return the approval row as a dict, or None if unknown."""
+    row = conn.execute(
+        "SELECT * FROM profile_lifecycle_approvals WHERE id = ?", (approval_id,)
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def list_pending_profile_lifecycle_approvals(
+    conn: sqlite3.Connection, *, undelivered_only: bool = False
+) -> list[dict]:
+    """List pending approvals, oldest first.
+
+    ``undelivered_only`` returns just the rows the Discord bridge has not
+    yet posted (``notified_at IS NULL``).
+    """
+    sql = "SELECT * FROM profile_lifecycle_approvals WHERE status = 'pending'"
+    if undelivered_only:
+        sql += " AND notified_at IS NULL"
+    sql += " ORDER BY created_at ASC"
+    return [dict(r) for r in conn.execute(sql).fetchall()]
+
+
+def mark_profile_lifecycle_notified(
+    conn: sqlite3.Connection, approval_id: str
+) -> None:
+    """Stamp when the Discord prompt was delivered (idempotency guard)."""
+    with write_txn(conn):
+        conn.execute(
+            "UPDATE profile_lifecycle_approvals SET notified_at = ? "
+            "WHERE id = ? AND notified_at IS NULL",
+            (int(time.time()), approval_id),
+        )
+
+
+def resolve_profile_lifecycle_approval(
+    conn: sqlite3.Connection,
+    approval_id: str,
+    *,
+    decision: str,
+    resolved_by: str,
+) -> dict:
+    """Mark an approval approved or rejected. Fail-closed on bad state.
+
+    Returns the updated row dict (including ``token`` so the caller can
+    execute the op on approve). On ``reject`` the blocked task is closed
+    via ``unblock_task`` + ``block_task`` is left resolved by the caller.
+    Raises ``ValueError`` if the approval is unknown or not pending (so a
+    double-click cannot execute the op twice).
+    """
+    if decision not in ("approve", "reject"):
+        raise ValueError(f"decision must be approve|reject, got {decision!r}")
+    row = get_profile_lifecycle_approval(conn, approval_id)
+    if row is None:
+        raise ValueError(f"unknown approval {approval_id}")
+    if row["status"] != "pending":
+        raise ValueError(
+            f"approval {approval_id} already {row['status']}; refusing to re-resolve"
+        )
+    new_status = "approved" if decision == "approve" else "rejected"
+    now = int(time.time())
+    with write_txn(conn):
+        cur = conn.execute(
+            "UPDATE profile_lifecycle_approvals "
+            "SET status = ?, resolved_by = ?, resolved_at = ? "
+            "WHERE id = ? AND status = 'pending'",
+            (new_status, resolved_by, now, approval_id),
+        )
+        if cur.rowcount != 1:
+            # Lost a race with a concurrent resolve.
+            raise ValueError(
+                f"approval {approval_id} was resolved concurrently; ignoring"
+            )
+    _append_event(
+        conn, row["task_id"], "profile_lifecycle_approval_resolved",
+        {"approval_id": approval_id, "decision": new_status, "by": resolved_by},
+    )
+    return get_profile_lifecycle_approval(conn, approval_id)
+
+
+def mark_profile_lifecycle_executed(
+    conn: sqlite3.Connection,
+    approval_id: str,
+    *,
+    ok: bool,
+    error: Optional[str] = None,
+) -> None:
+    """Record the outcome of running an approved op (executed | failed)."""
+    with write_txn(conn):
+        conn.execute(
+            "UPDATE profile_lifecycle_approvals SET status = ?, error = ? "
+            "WHERE id = ? AND status = 'approved'",
+            ("executed" if ok else "failed", error, approval_id),
+        )
 
 
 def promote_task(

@@ -20,6 +20,8 @@ Usage::
 """
 
 import json
+import contextlib
+import contextvars
 import os
 import re
 import shutil
@@ -33,6 +35,59 @@ from typing import List, Optional
 from agent.skill_utils import is_excluded_skill_path
 
 _PROFILE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+
+# PROFILE-GATE defence-in-depth. Profile CREATE/DELETE from an autonomous
+# kanban worker must route through the Discord approval gate; the worker
+# never runs the op itself (the gateway resolver does, after Sahil approves).
+# Human CLI / web dashboard / wizard / tests run outside a spawned worker
+# (HERMES_KANBAN_TASK unset), so they are unaffected.
+#
+# The worker marker is snapshotted ONCE at import. Reading os.environ live
+# would let worker code clear HERMES_KANBAN_TASK before the op to slip the
+# gate; the snapshot closes that trivial in-process bypass. This is
+# defence-in-depth, NOT a hard boundary: any code running in the worker can
+# still circumvent in-process Python checks. The authoritative controls are
+# (a) the DB status guard in resolve_profile_lifecycle_approval, which makes a
+# rejected or already-resolved op un-runnable, and (b) the gateway being the
+# only trusted process that executes the op after explicit human approval.
+_WORKER_MARKER = os.environ.get("HERMES_KANBAN_TASK")
+
+# Holds the approval token the resolver is currently authorised under, or None.
+_lifecycle_authorised: "contextvars.ContextVar[Optional[str]]" = contextvars.ContextVar(
+    "_lifecycle_authorised", default=None
+)
+
+
+@contextlib.contextmanager
+def lifecycle_authorised(token: str):
+    """Authorise a single in-context profile create/delete.
+
+    ``token`` is the approval's one-shot token (from the
+    profile_lifecycle_approvals row). The resolver passes it when executing an
+    approved op; the contextvar carries it for the duration of the call so the
+    guard sees an explicit, row-scoped authorisation rather than a bare flag.
+    """
+    if not token:
+        raise ValueError("lifecycle_authorised requires the approval token")
+    tok = _lifecycle_authorised.set(token)
+    try:
+        yield
+    finally:
+        _lifecycle_authorised.reset(tok)
+
+
+def _assert_lifecycle_authorised(op: str, name: str) -> None:
+    """Fail closed if an autonomous worker tries a lifecycle op un-gated."""
+    if not _WORKER_MARKER:
+        return  # human / web / wizard / test path
+    if _lifecycle_authorised.get():
+        return  # resolver executing an approved op under its token
+    raise PermissionError(
+        f"profile {op} '{name}' blocked: autonomous lifecycle ops require "
+        f"human approval via the Discord profile gate (PROFILE-GATE). Route "
+        f"through request_profile_lifecycle_approval; do not call the "
+        f"primitive directly from a worker. Fail-closed."
+    )
 
 # Directories bootstrapped inside every new profile
 _PROFILE_DIRS = [
@@ -767,6 +822,7 @@ def create_profile(
         )
     canon = normalize_profile_name(name)
     validate_profile_name(canon)
+    _assert_lifecycle_authorised("create", canon)
 
     if canon == "default":
         raise ValueError(
@@ -944,6 +1000,7 @@ def delete_profile(name: str, yes: bool = False) -> Path:
     """
     canon = normalize_profile_name(name)
     validate_profile_name(canon)
+    _assert_lifecycle_authorised("delete", canon)
 
     if canon == "default":
         raise ValueError(

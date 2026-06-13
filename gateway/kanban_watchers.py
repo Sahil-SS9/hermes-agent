@@ -487,6 +487,109 @@ class GatewayKanbanWatchersMixin:
         finally:
             conn.close()
 
+    async def _profile_gate_watcher(self, interval: float = 5.0) -> None:
+        """Deliver pending PROFILE-GATE approvals to Discord as button prompts.
+
+        Polls each board's ``profile_lifecycle_approvals`` for undelivered
+        pending rows and posts an Approve / Reject prompt to the Discord home
+        channel. Runs only on the dispatch-owning gateway (same gate as the
+        notifier) so a single process owns kanban-DB access. Marking a row
+        ``notified`` is the idempotency guard against re-posting every tick.
+        """
+        env_override = os.environ.get(
+            "HERMES_KANBAN_DISPATCH_IN_GATEWAY", ""
+        ).strip().lower()
+        if env_override in {"0", "false", "no", "off"}:
+            return
+        try:
+            from hermes_cli.config import load_config as _load_config
+            cfg = _load_config()
+        except Exception as exc:
+            logger.warning("profile-gate watcher: config unavailable (%s); disabled", exc)
+            return
+        kanban_cfg = cfg.get("kanban", {}) if isinstance(cfg, dict) else {}
+        if not kanban_cfg.get("dispatch_in_gateway", True):
+            return
+        from gateway.config import Platform as _Platform
+        try:
+            from hermes_cli import kanban_db as _kb
+        except Exception:
+            logger.warning("profile-gate watcher: kanban_db not importable; disabled")
+            return
+
+        await asyncio.sleep(6)  # let adapters wire up
+
+        while self._running:
+            try:
+                adapter = self.adapters.get(_Platform.DISCORD)
+                home = self.config.get_home_channel(_Platform.DISCORD)
+                if adapter is None or home is None:
+                    await asyncio.sleep(interval)
+                    continue
+
+                def _collect():
+                    out: list[tuple[str, dict]] = []
+                    try:
+                        boards = _kb.list_boards(include_archived=False)
+                    except Exception:
+                        boards = [_kb.read_board_metadata(_kb.DEFAULT_BOARD)]
+                    seen: set[str] = set()
+                    for board_meta in boards:
+                        slug = board_meta.get("slug") or _kb.DEFAULT_BOARD
+                        db_path = board_meta.get("db_path")
+                        try:
+                            resolved = str(
+                                Path(db_path).expanduser().resolve()
+                            ) if db_path else str(_kb.kanban_db_path(slug).resolve())
+                        except Exception:
+                            resolved = f"slug:{slug}"
+                        if resolved in seen:
+                            continue
+                        seen.add(resolved)
+                        try:
+                            conn = _kb.connect(board=slug)
+                        except Exception:
+                            continue
+                        try:
+                            for row in _kb.list_pending_profile_lifecycle_approvals(
+                                conn, undelivered_only=True
+                            ):
+                                out.append((slug, row))
+                        finally:
+                            conn.close()
+                    return out
+
+                def _mark(slug: str, approval_id: str):
+                    conn = _kb.connect(board=slug)
+                    try:
+                        _kb.mark_profile_lifecycle_notified(conn, approval_id)
+                    finally:
+                        conn.close()
+
+                pending = await asyncio.to_thread(_collect)
+                for slug, row in pending:
+                    metadata = {"thread_id": home.thread_id} if home.thread_id else None
+                    try:
+                        res = await adapter.send_profile_gate(
+                            home.chat_id, row, board=slug, metadata=metadata,
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "profile-gate watcher: send failed for %s: %s",
+                            row.get("id"), exc,
+                        )
+                        continue
+                    if getattr(res, "success", False):
+                        await asyncio.to_thread(_mark, slug, row["id"])
+                    else:
+                        logger.warning(
+                            "profile-gate watcher: delivery unsuccessful for %s: %s",
+                            row.get("id"), getattr(res, "error", "?"),
+                        )
+            except Exception:
+                logger.exception("profile-gate watcher tick failed")
+            await asyncio.sleep(interval)
+
     async def _deliver_kanban_artifacts(
         self,
         *,

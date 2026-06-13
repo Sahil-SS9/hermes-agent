@@ -573,6 +573,19 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
     )
     p_unblock.add_argument("task_ids", nargs="+")
 
+    p_pgate = sub.add_parser(
+        "profile-gate",
+        help="Review profile create/delete approvals (PROFILE-GATE manual path)",
+    )
+    p_pgate.add_argument(
+        "pg_action", choices=["list", "approve", "reject"],
+        help="list pending approvals, or approve/reject one by id",
+    )
+    p_pgate.add_argument(
+        "approval_id", nargs="?",
+        help="approval id (required for approve / reject)",
+    )
+
     p_promote = sub.add_parser(
         "promote",
         help="Manually move one or more todo/blocked tasks to ready (recovery path)",
@@ -956,6 +969,7 @@ def kanban_command(args: argparse.Namespace) -> int:
             "block":    _cmd_block,
             "schedule": _cmd_schedule,
             "unblock":  _cmd_unblock,
+            "profile-gate": _cmd_profile_gate,
             "promote":  _cmd_promote,
             "promote-backlog":  _cmd_promote_backlog,
             "archive":  _cmd_archive,
@@ -990,6 +1004,56 @@ def kanban_command(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 # Handlers
 # ---------------------------------------------------------------------------
+
+
+def _cmd_profile_gate(args: argparse.Namespace) -> int:
+    """Manual PROFILE-GATE path: list / approve / reject lifecycle approvals.
+
+    Discord buttons are the primary surface; this CLI is the fallback so the
+    flow is reachable without Discord (and is the audited operator path).
+    Runs in a human context, so executing an approved op is allowed.
+    """
+    from hermes_cli import profile_lifecycle_gate as gate
+
+    act = args.pg_action
+    with kb.connect() as conn:
+        if act == "list":
+            rows = kb.list_pending_profile_lifecycle_approvals(conn)
+            if not rows:
+                print("No pending profile-gate approvals.")
+                return 0
+            for r in rows:
+                print(
+                    f"{r['id']}  {r['op']:6}  {r['profile']:24}  "
+                    f"by {r.get('requested_by') or '?'}  | {r.get('blast_summary') or ''}"
+                )
+            return 0
+
+        if not args.approval_id:
+            print(
+                f"kanban: profile-gate {act} requires an approval id "
+                f"(see `hermes kanban profile-gate list`)",
+                file=sys.stderr,
+            )
+            return 2
+        resolved_by = (
+            os.environ.get("HERMES_PROFILE") or os.environ.get("USER") or "cli"
+        )
+        try:
+            if act == "approve":
+                res = gate.approve(conn, args.approval_id, resolved_by=resolved_by)
+                if res["ok"]:
+                    print(f"Approved + executed: {res['op']} {res['profile']}")
+                    return 0
+                print(f"Approved but op FAILED: {res['error']}", file=sys.stderr)
+                return 1
+            gate.reject(conn, args.approval_id, resolved_by=resolved_by)
+            print(f"Rejected {args.approval_id}")
+            return 0
+        except ValueError as exc:
+            print(f"kanban: {exc}", file=sys.stderr)
+            return 1
+
 
 def _profile_author() -> str:
     """Best-effort author name for an interactive CLI call."""
