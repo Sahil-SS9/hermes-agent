@@ -388,3 +388,46 @@ class TestProfileConfigResolution:
         assert isinstance(cfg["model"], str)
         assert cfg["provider"] == "custom:CommandCode"
         assert cfg["base_url"] == "https://api.commandcode.ai/provider/v1"
+
+
+class TestExecuteBaseUrlRouting:
+    """_execute_golden_task must only forward base_url for custom: providers;
+    a known provider with an explicit base_url 401s (call_llm falls back to
+    OPENAI_API_KEY instead of the provider's credential pool)."""
+
+    def _run(self, monkeypatch, provider, base_url):
+        import hermes_cli.eval_harness as eh
+        monkeypatch.setattr(
+            eh, "_get_profile_config",
+            lambda cfg, profile: {
+                "provider": provider, "model": "m", "base_url": base_url, "timeout": 5,
+            },
+        )
+        captured = {}
+
+        class _Resp:
+            class choices:
+                pass
+        def _fake_call_llm(**kw):
+            captured.update(kw)
+            r = type("R", (), {})()
+            msg = type("M", (), {"content": "out"})()
+            ch = type("C", (), {"message": msg})()
+            r.choices = [ch]
+            return r
+        monkeypatch.setattr(eh, "_get_profile_config",
+                            lambda cfg, profile: {"provider": provider, "model": "m",
+                                                  "base_url": base_url, "timeout": 5})
+        import agent.auxiliary_client as ac
+        monkeypatch.setattr(ac, "call_llm", _fake_call_llm)
+        monkeypatch.setattr("hermes_cli.config.load_config_readonly", lambda: {})
+        eh._execute_golden_task(GoldenTask(id="t", domain="code", description="d"), "p")
+        return captured
+
+    def test_known_provider_omits_base_url(self, monkeypatch):
+        cap = self._run(monkeypatch, "opencode-go", "https://opencode.ai/zen/go/v1")
+        assert cap.get("base_url") is None
+
+    def test_custom_provider_forwards_base_url(self, monkeypatch):
+        cap = self._run(monkeypatch, "custom:CommandCode", "https://api.commandcode.ai/provider/v1")
+        assert cap.get("base_url") == "https://api.commandcode.ai/provider/v1"

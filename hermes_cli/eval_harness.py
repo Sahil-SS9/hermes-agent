@@ -464,7 +464,12 @@ def _execute_golden_task(task: GoldenTask, profile: str) -> str:
 
     provider = profile_cfg.get("provider", "opencode-go")
     model = profile_cfg.get("model", "minimax-m3")
-    base_url = profile_cfg.get("base_url")
+    # Only pass base_url for custom: providers. For a known provider an
+    # explicit base_url makes call_llm treat it as a custom endpoint and
+    # fall back to OPENAI_API_KEY instead of the provider's credential pool,
+    # which 401s. Omitting it lets call_llm resolve the provider's own
+    # base_url + key together.
+    base_url = profile_cfg.get("base_url") if str(provider).startswith("custom:") else None
     timeout = profile_cfg.get("timeout", 120)
 
     # Build the task prompt
