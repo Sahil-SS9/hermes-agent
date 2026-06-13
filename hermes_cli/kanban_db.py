@@ -4870,6 +4870,65 @@ def request_human_approval(
     )
 
 
+def _block_task_locked(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    reason: Optional[str] = None,
+    expected_run_id: Optional[int] = None,
+) -> "tuple[bool, Optional[int]]":
+    """Transactional body of ``block_task``. MUST run inside a ``write_txn``.
+
+    Returns ``(blocked, run_id)``. Factored out so callers that must block a
+    task atomically with other writes (e.g. recording a profile-lifecycle
+    approval) can do both in a single transaction rather than two.
+    """
+    if expected_run_id is None:
+        cur = conn.execute(
+            """
+            UPDATE tasks
+               SET status       = 'blocked',
+                   claim_lock   = NULL,
+                   claim_expires= NULL,
+                   worker_pid   = NULL
+             WHERE id = ?
+               AND status IN ('running', 'ready', 'triage')
+            """,
+            (task_id,),
+        )
+    else:
+        cur = conn.execute(
+            """
+            UPDATE tasks
+               SET status       = 'blocked',
+                   claim_lock   = NULL,
+                   claim_expires= NULL,
+                   worker_pid   = NULL
+             WHERE id = ?
+               AND status IN ('running', 'ready', 'triage')
+               AND current_run_id = ?
+            """,
+            (task_id, int(expected_run_id)),
+        )
+    if cur.rowcount != 1:
+        return False, None
+    run_id = _end_run(
+        conn, task_id,
+        outcome="blocked", status="blocked",
+        summary=reason,
+    )
+    # Synthesize a run when blocking a never-claimed task so the
+    # reason is preserved in attempt history.
+    if run_id is None and reason:
+        run_id = _synthesize_ended_run(
+            conn, task_id,
+            outcome="blocked",
+            summary=reason,
+        )
+    _append_event(conn, task_id, "blocked", {"reason": reason}, run_id=run_id)
+    return True, run_id
+
+
 def block_task(
     conn: sqlite3.Connection,
     task_id: str,
@@ -4879,49 +4938,11 @@ def block_task(
 ) -> bool:
     """Transition ``running/ready/triage -> blocked``."""
     with write_txn(conn):
-        if expected_run_id is None:
-            cur = conn.execute(
-                """
-                UPDATE tasks
-                   SET status       = 'blocked',
-                       claim_lock   = NULL,
-                       claim_expires= NULL,
-                       worker_pid   = NULL
-                 WHERE id = ?
-                   AND status IN ('running', 'ready', 'triage')
-                """,
-                (task_id,),
-            )
-        else:
-            cur = conn.execute(
-                """
-                UPDATE tasks
-                   SET status       = 'blocked',
-                       claim_lock   = NULL,
-                       claim_expires= NULL,
-                       worker_pid   = NULL
-                 WHERE id = ?
-                   AND status IN ('running', 'ready', 'triage')
-                   AND current_run_id = ?
-                """,
-                (task_id, int(expected_run_id)),
-            )
-        if cur.rowcount != 1:
-            return False
-        run_id = _end_run(
-            conn, task_id,
-            outcome="blocked", status="blocked",
-            summary=reason,
+        blocked, run_id = _block_task_locked(
+            conn, task_id, reason=reason, expected_run_id=expected_run_id,
         )
-        # Synthesize a run when blocking a never-claimed task so the
-        # reason is preserved in attempt history.
-        if run_id is None and reason:
-            run_id = _synthesize_ended_run(
-                conn, task_id,
-                outcome="blocked",
-                summary=reason,
-            )
-        _append_event(conn, task_id, "blocked", {"reason": reason}, run_id=run_id)
+        if not blocked:
+            return False
     task = get_task(conn, task_id)
     record_event_if_enabled(
         source="kanban.db",
@@ -4970,6 +4991,10 @@ def request_profile_lifecycle_approval(
     approval_id = "pla-" + secrets.token_hex(4)
     token = secrets.token_urlsafe(24)
     now = int(time.time())
+    detail = f"profile {op} {profile} (approval {approval_id})"
+    reason = f"{_HUMAN_APPROVAL_PREFIX}: {detail}"
+    # Atomic: record the approval AND block the task in one transaction, so
+    # there is never an approval row without a blocked task (or vice versa).
     with write_txn(conn):
         conn.execute(
             """
@@ -4984,17 +5009,20 @@ def request_profile_lifecycle_approval(
                 token, now,
             ),
         )
-    _append_event(
-        conn, task_id, "profile_lifecycle_approval_requested",
-        {"approval_id": approval_id, "op": op, "profile": profile},
-    )
-    # Block the task last, so the row exists before the dispatcher could
-    # ever observe the blocked state.
-    request_human_approval(
-        conn, task_id,
-        detail=f"profile {op} {profile} (approval {approval_id})",
-        expected_run_id=expected_run_id,
-    )
+        _append_event(
+            conn, task_id, "profile_lifecycle_approval_requested",
+            {"approval_id": approval_id, "op": op, "profile": profile},
+        )
+        blocked, _run_id = _block_task_locked(
+            conn, task_id, reason=reason, expected_run_id=expected_run_id,
+        )
+        if not blocked:
+            # Roll the whole transaction back (no orphan approval row) by
+            # raising; the task was not in a blockable state.
+            raise RuntimeError(
+                f"cannot request approval {approval_id}: task {task_id} is not "
+                f"in a blockable (running/ready/triage) state"
+            )
     return approval_id
 
 

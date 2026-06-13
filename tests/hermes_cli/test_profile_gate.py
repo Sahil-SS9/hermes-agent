@@ -57,6 +57,22 @@ def test_request_blocks_task_and_records(kanban_home):
         assert [p["id"] for p in pend] == [aid]
 
 
+def test_request_atomic_no_orphan_when_block_fails(kanban_home):
+    """If the task can't be blocked, the approval INSERT rolls back too:
+    no approval row without a blocked task."""
+    with kb.connect() as conn:
+        tid = _new_task(conn)
+        # Move it out of a blockable state.
+        kb.complete_task(conn, tid, result="done")
+        before = len(kb.list_pending_profile_lifecycle_approvals(conn))
+        with pytest.raises(RuntimeError):
+            kb.request_profile_lifecycle_approval(
+                conn, tid, op="create", profile="x",
+            )
+        after = len(kb.list_pending_profile_lifecycle_approvals(conn))
+        assert after == before  # no orphan approval row
+
+
 def test_request_rejects_bad_op(kanban_home):
     with kb.connect() as conn:
         tid = _new_task(conn)
