@@ -46,6 +46,27 @@ from typing import Optional
 # Config defaults
 # ---------------------------------------------------------------------------
 
+def load_eval_domains() -> dict:
+    """Return the ``governance.eval_domains`` profile -> domain map.
+
+    Single source for both the edit gate (refuse edits to unmapped
+    profiles, so every autonomous edit is evaluable) and the observe
+    driver (resolve the golden set). Empty on any config failure.
+    """
+    try:
+        from hermes_cli.config import load_config
+        cfg = load_config()
+        gov = cfg.get("governance", {}) if isinstance(cfg, dict) else {}
+        return dict(gov.get("eval_domains") or {})
+    except Exception:
+        return {}
+
+
+def eval_domain_for(profile: str) -> "Optional[str]":
+    """Domain a profile is evaluated under, or None if unmapped."""
+    return load_eval_domains().get(profile)
+
+
 DEFAULT_MAX_EDITS_PER_CYCLE = 3
 DEFAULT_CANARY_OBSERVE_RUNS = 3
 DEFAULT_TRIPWIRE_PASS_RATE = 0.60  # 60% aggregate pass rate
@@ -90,6 +111,9 @@ class CanaryState:
     patch_summary: str = ""
     error: Optional[str] = None
     promoted_to: list[str] = field(default_factory=list)
+    # Git commit the edit landed as, so the observe loop can revert a
+    # regressed canary via profile_editor.py --rollback.
+    commit: str = ""
 
 
 @dataclass
@@ -196,6 +220,26 @@ class EditGuard:
         self._canaries.append(canary)
         self._cycle_count += 1
         self._save_state()
+
+    def active_canaries(self) -> list[CanaryState]:
+        """Canaries still awaiting an observe decision (applied/observing)."""
+        return [
+            c for c in self._canaries
+            if c.stage in (CanaryStage.APPLIED, CanaryStage.OBSERVING)
+        ]
+
+    def attach_commit(self, edit_id: str, commit: str) -> bool:
+        """Record the git commit an applied canary edit landed as.
+
+        Called after profile_editor.py returns the commit, so the observe
+        loop can revert this exact commit if the canary later regresses.
+        """
+        canary = self._find_canary(edit_id)
+        if canary is None:
+            return False
+        canary.commit = commit
+        self._save_state()
+        return True
 
     def observe_canary(
         self,
@@ -354,6 +398,7 @@ class EditGuard:
                     patch_summary=c.get("patch_summary", ""),
                     error=c.get("error"),
                     promoted_to=c.get("promoted_to", []),
+                    commit=c.get("commit", ""),
                 )
                 for c in data.get("canaries", [])
             ]
@@ -380,6 +425,7 @@ class EditGuard:
                     "patch_summary": c.patch_summary,
                     "error": c.error,
                     "promoted_to": c.promoted_to,
+                    "commit": c.commit,
                 }
                 for c in self._canaries
             ],

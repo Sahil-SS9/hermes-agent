@@ -1481,8 +1481,20 @@ def _handle_profile_edit(args: dict, **kw) -> str:
         return tool_error("profile, file, new_value, and reason are required")
 
     # ── Blast-radius gate (P2-3) ──
+    guard = None
+    canary_edit_id = None
     try:
-        from hermes_cli.blast_radius import EditGuard
+        from hermes_cli.blast_radius import EditGuard, eval_domain_for
+        # Fail CLOSED: refuse an autonomous edit to a profile with no
+        # governance.eval_domains mapping. Without a mapping the canary
+        # observe loop can never evaluate or revert the edit, so it would
+        # persist unchecked. Require evaluability up front.
+        if not eval_domain_for(profile):
+            return tool_error(
+                f"Profile '{profile}' has no governance.eval_domains mapping; "
+                f"refusing autonomous edit (fail-closed). Map it to a domain "
+                f"that has a golden task set before editing."
+            )
         guard = EditGuard()
         result = guard.try_edit(
             profile=profile,
@@ -1497,6 +1509,7 @@ def _handle_profile_edit(args: dict, **kw) -> str:
         # Apply to canary — records the edit for observation
         if result.canary:
             guard.apply_canary(result.canary)
+            canary_edit_id = result.canary.edit_id
     except ImportError:
         # Fail CLOSED: profile mutation is the most dangerous path in the
         # fork. If the blast-radius guard cannot load we refuse the edit
@@ -1523,6 +1536,13 @@ def _handle_profile_edit(args: dict, **kw) -> str:
         if r.returncode != 0:
             return tool_error(f"profile_edit failed: {_try_json_error(r)}")
         result = _json.loads(r.stdout)
+        # Record the commit on the canary so the observe loop can revert
+        # this exact edit if it later regresses (P2-3 close-the-loop).
+        if guard is not None and canary_edit_id and result.get("commit"):
+            try:
+                guard.attach_commit(canary_edit_id, str(result["commit"]))
+            except Exception:
+                logger.warning("could not attach commit to canary %s", canary_edit_id)
         return _json.dumps(result, indent=2)
     except Exception as exc:
         return tool_error(f"profile_edit error: {exc}")

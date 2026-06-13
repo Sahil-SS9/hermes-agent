@@ -129,6 +129,42 @@ class TestEditCap:
 # ---------------------------------------------------------------------------
 
 
+class TestCanaryCommitWiring:
+    """P2-3 close-the-loop: commit capture + active-canary accessor."""
+
+    def test_attach_commit_persists(self, isolated_guard):
+        guard = isolated_guard
+        r = guard.try_edit("p", "patch", "sum")
+        guard.apply_canary(r.canary)
+        assert guard.attach_commit(r.canary.edit_id, "abc123def456") is True
+        # Reload from disk to prove persistence (commit survives serialisation).
+        guard._canaries = []
+        guard._load_state()
+        c = guard._find_canary(r.canary.edit_id)
+        assert c is not None and c.commit == "abc123def456"
+
+    def test_attach_commit_unknown_id(self, isolated_guard):
+        assert isolated_guard.attach_commit("nope", "abc") is False
+
+    def test_active_canaries_filters_terminal(self, isolated_guard):
+        guard = isolated_guard
+        r = guard.try_edit("p", "patch", "sum")
+        guard.apply_canary(r.canary)
+        active = guard.active_canaries()
+        assert [c.edit_id for c in active] == [r.canary.edit_id]
+        # Force it terminal; it drops out of the active set.
+        guard.revert_canary(r.canary.edit_id, "test")
+        assert guard.active_canaries() == []
+
+    def test_eval_domain_for(self, monkeypatch):
+        import hermes_cli.blast_radius as br
+        monkeypatch.setattr(
+            br, "load_eval_domains", lambda: {"coder": "code"}
+        )
+        assert br.eval_domain_for("coder") == "code"
+        assert br.eval_domain_for("mystery") is None
+
+
 class TestCanaryApply:
     def test_apply_increments_count(self, isolated_guard):
         guard = isolated_guard
