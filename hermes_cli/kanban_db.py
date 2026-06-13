@@ -7695,6 +7695,12 @@ def dispatch_once(
 
     The three dispatch sites (ready, review, pipeline) all respect the same
     precedence stack, with review using its own lane for the review cap.
+
+    ACCEPTED STRUCTURAL DEBT (D-2): this function is a ~880-line god-function
+    handling reclaim, stale, crash, runtime, promote, forced-skill-gate, and
+    the three dispatch sites. It is battle-tested and load-bearing; do NOT
+    decompose it casually. Any refactor must land characterisation tests for
+    the full reclaim/dispatch matrix first. Logged as debt, not a defect.
     """
     # Guarantee schema is current before any query.  Idempotent — the
     # per-tick cost is a single PRAGMA on an already-current DB.
