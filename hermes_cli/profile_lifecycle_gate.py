@@ -100,16 +100,26 @@ def _close_task(conn, task_id: str, *, result: str) -> None:
     Tries ``done`` (unblock then complete); falls back to ``archived``. If
     BOTH fail the task is left actionable while its approval is already
     resolved, so log loudly rather than swallow it.
+
+    Exception-safe: this runs AFTER the (irreversible) op has executed, so a
+    DB error here must not propagate and mask the completed side effect; it
+    is logged instead.
     """
-    kb.unblock_task(conn, task_id)
-    if kb.complete_task(conn, task_id, result=result, summary=result):
-        return
-    if kb.archive_task(conn, task_id):
-        return
-    logger.error(
-        "profile-gate: could not move task %s to a terminal state after "
-        "resolving its approval; manual cleanup needed", task_id,
-    )
+    try:
+        kb.unblock_task(conn, task_id)
+        if kb.complete_task(conn, task_id, result=result, summary=result):
+            return
+        if kb.archive_task(conn, task_id):
+            return
+        logger.error(
+            "profile-gate: could not move task %s to a terminal state after "
+            "resolving its approval; manual cleanup needed", task_id,
+        )
+    except Exception:
+        logger.exception(
+            "profile-gate: error closing task %s after approval resolution; "
+            "the op already ran, manual cleanup may be needed", task_id,
+        )
 
 
 def approve(conn, approval_id: str, *, resolved_by: str) -> dict:

@@ -548,7 +548,11 @@ class GatewayKanbanWatchersMixin:
                         seen.add(resolved)
                         try:
                             conn = _kb.connect(board=slug)
-                        except Exception:
+                        except Exception as exc:
+                            logger.warning(
+                                "profile-gate watcher: cannot open board %s: %s",
+                                slug, exc,
+                            )
                             continue
                         try:
                             for row in _kb.list_pending_profile_lifecycle_approvals(

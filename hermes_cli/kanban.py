@@ -1053,6 +1053,9 @@ def _cmd_profile_gate(args: argparse.Namespace) -> int:
         except ValueError as exc:
             print(f"kanban: {exc}", file=sys.stderr)
             return 1
+        except Exception as exc:
+            print(f"kanban: profile-gate {act} failed: {exc}", file=sys.stderr)
+            return 1
 
 
 def _profile_author() -> str:

@@ -45,11 +45,16 @@ _PROFILE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 # The worker marker is snapshotted ONCE at import. Reading os.environ live
 # would let worker code clear HERMES_KANBAN_TASK before the op to slip the
 # gate; the snapshot closes that trivial in-process bypass. This is
-# defence-in-depth, NOT a hard boundary: any code running in the worker can
-# still circumvent in-process Python checks. The authoritative controls are
-# (a) the DB status guard in resolve_profile_lifecycle_approval, which makes a
-# rejected or already-resolved op un-runnable, and (b) the gateway being the
-# only trusted process that executes the op after explicit human approval.
+# defence-in-depth, NOT a hard boundary: a worker can still spawn a FRESH
+# subprocess with HERMES_KANBAN_TASK scrubbed and import this module clean,
+# which no in-process Python check can stop. The real boundary is operational:
+# (a) no autonomous create/delete TOOL exists yet (deferred), so no agent path
+# reaches these functions; (b) the DB status guard in
+# resolve_profile_lifecycle_approval makes a rejected/resolved op un-runnable;
+# (c) the gateway is the only trusted process that executes after human
+# approval; and ultimately (d) OS-level file permissions on ~/.hermes/profiles
+# are what stop a determined compromised worker. Treat this guard as a tripwire,
+# not a sandbox.
 _WORKER_MARKER = os.environ.get("HERMES_KANBAN_TASK")
 
 # Holds the approval token the resolver is currently authorised under, or None.

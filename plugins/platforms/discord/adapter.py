@@ -4917,7 +4917,12 @@ class DiscordAdapter(BasePlatformAdapter):
                 allowed_user_ids=self._allowed_user_ids,
                 allowed_role_ids=self._allowed_role_ids,
             )
-            msg = await channel.send(embed=embed, view=view)
+            # Suppress mentions: the profile / blast text is server-generated
+            # but defends against a crafted profile name pinging @everyone.
+            msg = await channel.send(
+                embed=embed, view=view,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
             view._message = msg
             return SendResult(success=True, message_id=str(msg.id))
         except Exception as e:

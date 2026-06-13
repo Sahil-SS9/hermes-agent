@@ -73,6 +73,25 @@ def test_request_atomic_no_orphan_when_block_fails(kanban_home):
         assert after == before  # no orphan approval row
 
 
+def test_request_emits_blocked_telemetry(kanban_home, monkeypatch):
+    """The approval request must emit the external kanban.task.blocked event
+    (preserved through the atomic refactor) so dashboards see profile-gate
+    blocks, not just the task_events row."""
+    calls = []
+    monkeypatch.setattr(
+        kb, "record_event_if_enabled",
+        lambda **kw: calls.append(kw),
+    )
+    with kb.connect() as conn:
+        tid = _new_task(conn)
+        kb.request_profile_lifecycle_approval(
+            conn, tid, op="create", profile="newbot",
+        )
+    blocked = [c for c in calls if c.get("event_type") == "kanban.task.blocked"]
+    assert len(blocked) == 1
+    assert blocked[0]["object_id"] == tid
+
+
 def test_request_rejects_bad_op(kanban_home):
     with kb.connect() as conn:
         tid = _new_task(conn)

@@ -5013,7 +5013,7 @@ def request_profile_lifecycle_approval(
             conn, task_id, "profile_lifecycle_approval_requested",
             {"approval_id": approval_id, "op": op, "profile": profile},
         )
-        blocked, _run_id = _block_task_locked(
+        blocked, run_id = _block_task_locked(
             conn, task_id, reason=reason, expected_run_id=expected_run_id,
         )
         if not blocked:
@@ -5023,6 +5023,21 @@ def request_profile_lifecycle_approval(
                 f"cannot request approval {approval_id}: task {task_id} is not "
                 f"in a blockable (running/ready/triage) state"
             )
+    # Emit the same external blocked-telemetry block_task does, so dashboards
+    # and event consumers see profile-gate blocks (the inlined _block_task_locked
+    # only writes the task_events row, not the external event bus).
+    task = get_task(conn, task_id)
+    record_event_if_enabled(
+        source="kanban.db",
+        actor_profile=os.environ.get("HERMES_PROFILE"),
+        target_profile=task.assignee if task else None,
+        event_type="kanban.task.blocked",
+        object_type="kanban_task",
+        object_id=task_id,
+        status_to="blocked",
+        summary=reason,
+        payload={"reason": reason, "run_id": run_id},
+    )
     return approval_id
 
 
@@ -5073,8 +5088,8 @@ def resolve_profile_lifecycle_approval(
     """Mark an approval approved or rejected. Fail-closed on bad state.
 
     Returns the updated row dict (including ``token`` so the caller can
-    execute the op on approve). On ``reject`` the blocked task is closed
-    via ``unblock_task`` + ``block_task`` is left resolved by the caller.
+    execute the op on approve). This only flips the approval status; closing
+    the requester task is the caller's job (profile_lifecycle_gate._close_task).
     Raises ``ValueError`` if the approval is unknown or not pending (so a
     double-click cannot execute the op twice).
     """
