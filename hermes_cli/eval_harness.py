@@ -464,6 +464,7 @@ def _execute_golden_task(task: GoldenTask, profile: str) -> str:
 
     provider = profile_cfg.get("provider", "opencode-go")
     model = profile_cfg.get("model", "minimax-m3")
+    base_url = profile_cfg.get("base_url")
     timeout = profile_cfg.get("timeout", 120)
 
     # Build the task prompt
@@ -490,6 +491,7 @@ def _execute_golden_task(task: GoldenTask, profile: str) -> str:
     response = call_llm(
         provider=provider,
         model=model,
+        base_url=base_url,
         messages=messages,
         timeout=timeout,
     )
@@ -514,11 +516,30 @@ def _get_profile_config(cfg: dict, profile: str) -> dict:
             with open(profile_cfg_path) as f:
                 pc = _yaml.safe_load(f)
             if "model" in pc:
-                return {
-                    "provider": pc.get("provider", cfg.get("provider", "opencode-go")),
-                    "model": pc["model"],
-                    "timeout": pc.get("timeout", 120),
-                }
+                model_cfg = pc["model"]
+                # Profiles use either a flat ``model: <name>`` string or the
+                # nested ``model: {default: <name>, provider: <prov>}`` form.
+                # call_llm needs a plain string, so normalise both.
+                base_url = None
+                if isinstance(model_cfg, dict):
+                    model = model_cfg.get("default") or model_cfg.get("model")
+                    provider = (
+                        model_cfg.get("provider")
+                        or pc.get("provider")
+                        or cfg.get("provider", "opencode-go")
+                    )
+                    base_url = model_cfg.get("base_url") or pc.get("base_url")
+                else:
+                    model = model_cfg
+                    provider = pc.get("provider", cfg.get("provider", "opencode-go"))
+                    base_url = pc.get("base_url")
+                if model:
+                    return {
+                        "provider": provider,
+                        "model": model,
+                        "base_url": base_url,
+                        "timeout": pc.get("timeout", 120),
+                    }
         except Exception:
             pass
 

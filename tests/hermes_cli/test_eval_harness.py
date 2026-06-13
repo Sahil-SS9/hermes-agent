@@ -352,3 +352,39 @@ class TestRunEval:
         assert result["passed"] is False
         assert result["score"] == 0.0
         assert "placeholder" in result["notes"].lower()
+
+
+class TestProfileConfigResolution:
+    """_get_profile_config must return a string model (not a dict) for both
+    the flat and nested model: forms, plus base_url for custom providers."""
+
+    def _write_profile(self, tmp_path, monkeypatch, name, body):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        d = tmp_path / ".hermes" / "profiles" / name
+        d.mkdir(parents=True)
+        (d / "config.yaml").write_text(body)
+
+    def test_flat_model_string(self, tmp_path, monkeypatch):
+        from hermes_cli.eval_harness import _get_profile_config
+        self._write_profile(
+            tmp_path, monkeypatch, "flat",
+            "provider: ollama-cloud\nmodel: deepseek-v4-flash\n",
+        )
+        cfg = _get_profile_config({}, "flat")
+        assert cfg["model"] == "deepseek-v4-flash"
+        assert isinstance(cfg["model"], str)
+        assert cfg["provider"] == "ollama-cloud"
+
+    def test_nested_model_dict(self, tmp_path, monkeypatch):
+        from hermes_cli.eval_harness import _get_profile_config
+        self._write_profile(
+            tmp_path, monkeypatch, "nested",
+            "model:\n  default: moonshotai/Kimi-K2.6\n"
+            "  provider: custom:CommandCode\n"
+            "  base_url: https://api.commandcode.ai/provider/v1\n",
+        )
+        cfg = _get_profile_config({}, "nested")
+        assert cfg["model"] == "moonshotai/Kimi-K2.6"
+        assert isinstance(cfg["model"], str)
+        assert cfg["provider"] == "custom:CommandCode"
+        assert cfg["base_url"] == "https://api.commandcode.ai/provider/v1"
