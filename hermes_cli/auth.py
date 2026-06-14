@@ -2665,12 +2665,23 @@ def _xai_wait_for_callback(
     result: dict[str, Any],
     *,
     timeout_seconds: float = 180.0,
+    manual_paste_redirect_uri: Optional[str] = None,
 ) -> dict[str, Any]:
     deadline = time.monotonic() + max(5.0, timeout_seconds)
+    if manual_paste_redirect_uri and sys.stdin.isatty():
+        print()
+        print("If xAI shows a Grok Build code instead of redirecting,")
+        print("paste that code here and press Enter.")
     try:
         while time.monotonic() < deadline:
             if result["code"] or result["error"]:
                 return result
+            if manual_paste_redirect_uri:
+                raw_paste = _read_ready_stdin_line()
+                if raw_paste and raw_paste.strip():
+                    pasted = _parse_pasted_callback(raw_paste)
+                    pasted["_manual_paste"] = True
+                    return pasted
             time.sleep(0.1)
     finally:
         server.shutdown()
@@ -2692,6 +2703,21 @@ def _xai_wait_for_callback(
         provider="xai-oauth",
         code="xai_callback_timeout",
     )
+
+
+def _read_ready_stdin_line() -> Optional[str]:
+    """Return one pending stdin line without blocking, if the terminal has one."""
+    try:
+        if not sys.stdin.isatty():
+            return None
+        import select
+
+        ready, _, _ = select.select([sys.stdin], [], [], 0)
+        if not ready:
+            return None
+        return sys.stdin.readline()
+    except Exception:
+        return None
 
 
 def _spotify_token_payload_to_state(
@@ -3498,6 +3524,22 @@ def _save_codex_tokens(tokens: Dict[str, str], last_refresh: str = None, label: 
         _save_auth_store(auth_store)
 
 
+def _recover_codex_tokens_from_cli(reason: str) -> Optional[Dict[str, str]]:
+    """Adopt a valid Codex CLI token pair into Hermes auth, if available."""
+    imported = _import_codex_cli_tokens()
+    # Require BOTH tokens before adopting: persisting a payload without a
+    # usable refresh_token would only break the next refresh cycle.
+    if not (
+        imported
+        and str(imported.get("access_token", "") or "").strip()
+        and str(imported.get("refresh_token", "") or "").strip()
+    ):
+        return None
+    logger.info("Codex auth recovered from Codex CLI auth.json (%s).", reason)
+    _save_codex_tokens(imported)
+    return dict(imported)
+
+
 def refresh_codex_oauth_pure(
     access_token: str,
     refresh_token: str,
@@ -3634,11 +3676,34 @@ def _refresh_codex_auth_tokens(
     
     Saves the new tokens to Hermes auth store automatically.
     """
-    refreshed = refresh_codex_oauth_pure(
-        str(tokens.get("access_token", "") or ""),
-        str(tokens.get("refresh_token", "") or ""),
-        timeout_seconds=timeout_seconds,
-    )
+    try:
+        refreshed = refresh_codex_oauth_pure(
+            str(tokens.get("access_token", "") or ""),
+            str(tokens.get("refresh_token", "") or ""),
+            timeout_seconds=timeout_seconds,
+        )
+    except AuthError as exc:
+        # Self-heal cross-store refresh_token rotation. Hermes keeps its OWN
+        # Codex OAuth token (per profile + top-level), separate from the Codex
+        # CLI's ~/.codex/auth.json. OAuth refresh_tokens are single-use, so when
+        # the Codex CLI (or another Hermes process) rotates the shared token,
+        # this frozen copy's refresh_token goes stale and the refresh fails with
+        # a relogin-required error (invalid_grant / refresh_token_reused / 401).
+        # Before surfacing that as a hard 401 to the turn, adopt the canonical
+        # fresh token from ~/.codex/auth.json (the Codex CLI keeps it current) so
+        # idle profiles / desktop sessions recover automatically instead of
+        # 401'ing until a manual re-auth. Transient failures (e.g. 429 quota)
+        # keep relogin_required=False — the stored token is still valid there, so
+        # we never self-heal those and re-raise unchanged.
+        if not getattr(exc, "relogin_required", False):
+            raise
+        imported = _recover_codex_tokens_from_cli(
+            f"refresh_token rejected: {getattr(exc, 'code', None) or 'auth_error'}"
+        )
+        if not imported:
+            raise
+        return imported
+
     updated_tokens = dict(tokens)
     updated_tokens["access_token"] = refreshed["access_token"]
     updated_tokens["refresh_token"] = refreshed["refresh_token"]
@@ -3698,9 +3763,25 @@ def resolve_codex_runtime_credentials(
     HTTP 401 ``Missing Authentication header`` from the wire instead of a usable
     credential. See issue #32992.
     """
+    read_error: Optional[AuthError] = None
     try:
         data = _read_codex_tokens()
-    except AuthError:
+    except AuthError as exc:
+        read_error = exc
+        if getattr(exc, "relogin_required", False) and getattr(exc, "code", None) in {
+            "codex_auth_missing_access_token",
+            "codex_auth_missing_refresh_token",
+            "codex_auth_invalid_shape",
+        }:
+            imported = _recover_codex_tokens_from_cli(str(getattr(exc, "code", None) or "auth_error"))
+            if imported:
+                data = {"tokens": imported, "last_refresh": imported.get("last_refresh")}
+            else:
+                data = None
+        else:
+            data = None
+
+    if data is None:
         pool_token = _pool_codex_access_token()
         if pool_token:
             base_url = (
@@ -3715,7 +3796,14 @@ def resolve_codex_runtime_credentials(
                 "last_refresh": None,
                 "auth_mode": "chatgpt",
             }
-        raise
+        if read_error is not None:
+            raise read_error
+        raise AuthError(
+            "No Codex credentials stored. Run `hermes auth` to authenticate.",
+            provider="openai-codex",
+            code="codex_auth_missing",
+            relogin_required=True,
+        )
 
     tokens = dict(data["tokens"])
     access_token = str(tokens.get("access_token", "") or "").strip()
@@ -6149,6 +6237,40 @@ def _reset_config_provider() -> Path:
     return config_path
 
 
+def _confirm_expensive_model_selection(
+    model_id: str,
+    *,
+    provider: str = "",
+    base_url: str = "",
+    api_key: str = "",
+) -> bool:
+    """Prompt before saving a model whose known pricing exceeds guardrails."""
+    try:
+        from hermes_cli.model_cost_guard import expensive_model_warning
+
+        warning = expensive_model_warning(
+            model_id,
+            provider=provider,
+            base_url=base_url,
+            api_key=api_key,
+        )
+    except Exception:
+        warning = None
+    if warning is None:
+        return True
+
+    print()
+    print("=" * 72)
+    print(warning.message)
+    print("=" * 72)
+    try:
+        response = input("Switch anyway? [y/N]: ").strip().lower()
+    except (KeyboardInterrupt, EOFError):
+        print()
+        return False
+    return response in {"y", "yes"}
+
+
 def _prompt_model_selection(
     model_ids: List[str],
     current_model: str = "",
@@ -6156,6 +6278,9 @@ def _prompt_model_selection(
     unavailable_models: Optional[List[str]] = None,
     portal_url: str = "",
     unavailable_message: str = "",
+    confirm_provider: str = "",
+    confirm_base_url: str = "",
+    confirm_api_key: str = "",
 ) -> Optional[str]:
     """Interactive model selection. Puts current_model first with a marker. Returns chosen model ID or None.
 
@@ -6168,6 +6293,18 @@ def _prompt_model_selection(
     from hermes_cli.models import _format_price_per_mtok
 
     _unavailable = unavailable_models or []
+
+    def _confirmed_selection(mid: str) -> Optional[str]:
+        if not mid:
+            return None
+        if confirm_provider and not _confirm_expensive_model_selection(
+            mid,
+            provider=confirm_provider,
+            base_url=confirm_base_url,
+            api_key=confirm_api_key,
+        ):
+            return None
+        return mid
 
     # Reorder: current model first, then the rest (deduplicated)
     ordered = []
@@ -6284,13 +6421,13 @@ def _prompt_model_selection(
             return None
         print()
         if idx < len(ordered):
-            return ordered[idx]
+            return _confirmed_selection(ordered[idx])
         elif idx == len(ordered):
             try:
                 custom = input("Enter model name: ").strip()
             except (EOFError, KeyboardInterrupt):
                 return None
-            return custom if custom else None
+            return _confirmed_selection(custom) if custom else None
         return None
     except (ImportError, NotImplementedError, OSError, subprocess.SubprocessError):
         pass
@@ -6322,10 +6459,10 @@ def _prompt_model_selection(
                 return None
             idx = int(choice)
             if 1 <= idx <= n:
-                return ordered[idx - 1]
+                return _confirmed_selection(ordered[idx - 1])
             elif idx == n + 1:
                 custom = input("Enter model name: ").strip()
-                return custom if custom else None
+                return _confirmed_selection(custom) if custom else None
             elif idx == n + 2:
                 return None
             print(f"Please enter 1-{n + 2}")
@@ -6669,6 +6806,7 @@ def _xai_oauth_loopback_login(
     authorization_endpoint = discovery["authorization_endpoint"]
     token_endpoint = discovery["token_endpoint"]
 
+    allow_missing_state = False
     if manual_paste:
         # No HTTP listener — synthesize a redirect_uri matching what
         # the server would have bound to so the authorize URL the user
@@ -6695,6 +6833,7 @@ def _xai_oauth_loopback_login(
         print("Open this URL to authorize Hermes with xAI:")
         print(authorize_url)
         callback = _prompt_manual_callback_paste(redirect_uri)
+        allow_missing_state = True
     else:
         server, thread, callback_result, redirect_uri = _xai_start_callback_server()
         try:
@@ -6734,6 +6873,7 @@ def _xai_oauth_loopback_login(
                     thread,
                     callback_result,
                     timeout_seconds=max(30.0, timeout_seconds * 9),
+                    manual_paste_redirect_uri=redirect_uri,
                 )
             except AuthError as exc:
                 if (
@@ -6750,6 +6890,7 @@ def _xai_oauth_loopback_login(
                 callback = _prompt_manual_callback_paste(redirect_uri)
                 if callback.get("code") is None and callback.get("error") is None:
                     raise exc
+                allow_missing_state = True
         except Exception:
             try:
                 server.shutdown()
@@ -6770,7 +6911,7 @@ def _xai_oauth_loopback_login(
             code="xai_authorization_failed",
         )
     callback_state = callback.get("state")
-    # Manual-paste bare-code path: when a user pastes only the opaque
+    # Manual bare-code paths: when a user pastes only the opaque
     # authorization code (no ``code=``/``state=`` query parameters),
     # ``_parse_pasted_callback`` returns ``state=None``.  xAI's consent
     # page renders the code in-page rather than redirecting through the
@@ -6778,10 +6919,12 @@ def _xai_oauth_loopback_login(
     # VPS, container consoles) the bare code is the only thing the user
     # can obtain.  PKCE (code_verifier) still binds the exchange to this
     # client, so the local state-equality check is redundant on the
-    # bare-code path — we substitute the locally generated state to keep
+    # bare-code paths — we substitute the locally generated state to keep
     # the rest of the validation chain (and the token exchange) unchanged.
     # See #26923 (AccursedGalaxy comment, 2026-05-20).
-    if callback_state is None and manual_paste:
+    if callback.get("_manual_paste"):
+        allow_missing_state = True
+    if callback_state is None and (manual_paste or allow_missing_state):
         callback_state = state
     if callback_state != state:
         raise AuthError(
@@ -7698,6 +7841,9 @@ def _login_nous(args, pconfig: ProviderConfig) -> None:
                     unavailable_models=unavailable_models,
                     portal_url=_portal,
                     unavailable_message=unavailable_message,
+                    confirm_provider="nous",
+                    confirm_base_url=inference_base_url,
+                    confirm_api_key=runtime_key,
                 )
             elif unavailable_models:
                 _url = (_portal or DEFAULT_NOUS_PORTAL_URL).rstrip("/")
