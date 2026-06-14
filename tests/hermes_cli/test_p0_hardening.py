@@ -82,6 +82,28 @@ def test_build_roster_excludes_nonspawnable_profiles(monkeypatch):
     assert "quan" not in valid and "octacon" not in valid
 
 
+def test_is_profile_spawnable_fails_closed_on_profiles_import_error(monkeypatch):
+    """If hermes_cli.profiles can't be imported, treat the profile as
+    non-spawnable rather than assuming it is safe to dispatch to."""
+    monkeypatch.setitem(sys.modules, "hermes_cli.profiles", None)
+    assert kb._is_profile_spawnable("some-profile") is False
+
+
+def test_is_profile_spawnable_fails_closed_on_config_load_error(monkeypatch):
+    """If profile_exists succeeds but config can't be loaded, treat the
+    profile as non-spawnable rather than assuming it isn't blocked."""
+    from hermes_cli import profiles as profiles_mod
+    monkeypatch.setattr(profiles_mod, "profile_exists", lambda name: True)
+
+    from hermes_cli import config as config_mod
+
+    def _boom():
+        raise RuntimeError("config unreadable")
+
+    monkeypatch.setattr(config_mod, "load_config_readonly", _boom)
+    assert kb._is_profile_spawnable("some-profile") is False
+
+
 def test_build_roster_excludes_profile_when_spawnability_unknown(monkeypatch):
     """Fail closed: if the spawnability predicate raises, exclude the profile
     rather than risk offering a non-spawnable one. Excluded profiles fall

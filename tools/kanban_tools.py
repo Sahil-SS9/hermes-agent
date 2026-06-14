@@ -1461,6 +1461,73 @@ def _handle_request_human_approval(args: dict, **kw) -> str:
         return tool_error(f"request_human_approval failed: {exc}")
 
 
+def _handle_request_subprofile(args: dict, **kw) -> str:
+    """Request creation of a new sub-profile via the PROFILE-GATE.
+
+    Blocks the task and records a pending profile_lifecycle_approval with
+    op="create"; Sahil approves or rejects on Discord. The lead has no
+    direct path to create profiles, only this request channel.
+    """
+    tid = _default_task_id(args.get("task_id"))
+    if not tid:
+        return tool_error("task_id is required")
+    ownership_err = _enforce_worker_task_ownership(tid)
+    if ownership_err:
+        return ownership_err
+
+    profile = args.get("profile")
+    if not profile or not str(profile).strip():
+        return tool_error("profile is required")
+    profile = str(profile).strip()
+
+    reason = args.get("reason")
+    if not reason or not str(reason).strip():
+        return tool_error("reason is required")
+    reason = str(reason).strip()
+
+    clone_from = args.get("clone_from")
+    if clone_from is not None:
+        clone_from = str(clone_from).strip() or None
+
+    try:
+        from hermes_cli.profiles import profile_exists
+    except Exception as exc:
+        return tool_error(f"could not load hermes_cli.profiles: {exc}")
+
+    if profile_exists(profile):
+        return tool_error(f"profile '{profile}' already exists; refusing to request a duplicate")
+    if clone_from and not profile_exists(clone_from):
+        return tool_error(f"clone_from profile '{clone_from}' does not exist")
+
+    board = args.get("board")
+    try:
+        kb, conn = _connect(board=board)
+        try:
+            from hermes_cli.profile_lifecycle_gate import submit_lifecycle_request
+            from tools.skills_tool import _current_profile
+
+            lifecycle_args = {"clone_from": clone_from} if clone_from else None
+            approval_id = submit_lifecycle_request(
+                conn, tid,
+                op="create", profile=profile, args=lifecycle_args,
+                requested_by=_current_profile(),
+                expected_run_id=_worker_run_id(tid),
+            )
+            return _ok(
+                task_id=tid,
+                approval_id=approval_id,
+                status="pending_human_approval",
+                message=(
+                    "Sub-profile creation requested; awaiting Sahil's "
+                    "approval via Discord. The task is blocked until then."
+                ),
+            )
+        finally:
+            conn.close()
+    except Exception as exc:
+        return tool_error(f"request_subprofile failed: {exc}")
+
+
 # WS-7: profile_editor handlers — call the profile_editor.py script
 import subprocess as _sp
 import json as _json
@@ -1854,6 +1921,56 @@ registry.register(
     check_fn=_check_kanban_mode,
     emoji="↩️",
 )
+
+# PROFILE-GATE front door: lead requests a new sub-profile, gated by
+# explicit human (Sahil) approval via Discord.
+KANBAN_REQUEST_SUBPROFILE_SCHEMA = {
+    "name": "kanban_request_subprofile",
+    "description": (
+        "Request creation of a new sub-profile. This does NOT create the "
+        "profile directly: it blocks the task and records a pending "
+        "PROFILE-GATE approval, which Sahil must explicitly approve or "
+        "reject via Discord. The task stays blocked until that decision "
+        "is made. Use this when a lead determines it needs a new "
+        "specialist sub-profile (optionally cloned from an existing one)."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "task_id": {
+                "type": "string",
+                "description": _DESC_TASK_ID_DEFAULT,
+            },
+            "profile": {
+                "type": "string",
+                "description": "Name of the new sub-profile to create (e.g. 'remii-deep')",
+            },
+            "clone_from": {
+                "type": "string",
+                "description": "Optional existing profile to clone config/skills from",
+            },
+            "reason": {
+                "type": "string",
+                "description": "Why this sub-profile is needed, for the Discord approval prompt",
+            },
+            "board": {
+                "type": "string",
+                "description": "Board slug; uses default when omitted",
+            },
+        },
+        "required": ["profile", "reason"],
+    },
+}
+
+registry.register(
+    name="kanban_request_subprofile",
+    toolset="kanban",
+    schema=KANBAN_REQUEST_SUBPROFILE_SCHEMA,
+    handler=_handle_request_subprofile,
+    check_fn=_check_kanban_mode,
+    emoji="🐣",
+)
+
 # Pipeline worker completion — returns a pipeline worker to its originating
 # stage (e.g. research, prd, spec) instead of marking the task done.
 KANBAN_COMPLETE_PIPELINE_SCHEMA = {
