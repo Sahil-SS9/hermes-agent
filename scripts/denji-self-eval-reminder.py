@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Weekly self-eval reminder — prompts agents to log their self-evaluations."""
+"""Weekly self-eval reminder: prompts agents to log their self-evaluations."""
 import datetime as dt
 
 TZ = dt.timezone(dt.timedelta(hours=1))
@@ -7,7 +7,7 @@ now = dt.datetime.now(TZ)
 
 print(f"🔄 Self-Eval Reminder · {now.strftime('%d/%m/%Y · %H:%M:%S')}")
 print()
-print("It's Friday — time for this week's self-evaluation.")
+print("It's Friday. Time for this week's self-evaluation.")
 print()
 print("**Who should eval this week**")
 print("• **Tier 2 (rolling):** Check the Logboard for this week's rotation")
