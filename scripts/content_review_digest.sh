@@ -16,4 +16,5 @@ set +a
 
 export PYTHONPATH="${CE}:${PYTHONPATH:-}"
 
-/home/kensei/repos/KenseiAgent/.venv/bin/python /home/kensei/repos/KenseiAgent/content_engine/content_engine.py review-digest --since-minutes 75
+# Wrap in timeout to prevent FAL/Discord hangs from blocking the cron slot
+timeout 90 /home/kensei/repos/KenseiAgent/.venv/bin/python /home/kensei/repos/KenseiAgent/content_engine/content_engine.py review-digest --since-minutes 75
