@@ -347,6 +347,51 @@ def get_tool_definitions(
     return result
 
 
+def resolve_allowed_tool_names(
+    enabled_toolsets: Optional[List[str]] = None,
+    disabled_toolsets: Optional[List[str]] = None,
+) -> Optional[set]:
+    """Resolve the set of tool names a session's toolset scope permits.
+
+    Mirrors the toolset resolution in :func:`_compute_tool_definitions`
+    (enabled toolsets -> resolved tool names, minus disabled toolsets, plus
+    the HERMES_KANBAN_TASK exemption) so the execution-time scope fence in
+    agent/tool_executor.py agrees with the schemas the model was shown.
+
+    Returns ``None`` when ``enabled_toolsets`` is ``None`` (unrestricted),
+    meaning callers should skip enforcement entirely.
+    """
+    if enabled_toolsets is None:
+        return None
+
+    allowed: set = set()
+    effective_enabled_toolsets = list(enabled_toolsets)
+    if os.environ.get("HERMES_KANBAN_TASK") and "kanban" not in effective_enabled_toolsets:
+        effective_enabled_toolsets.append("kanban")
+    for toolset_name in effective_enabled_toolsets:
+        if validate_toolset(toolset_name):
+            allowed.update(resolve_toolset(toolset_name))
+        elif toolset_name in _LEGACY_TOOLSET_MAP:
+            allowed.update(_LEGACY_TOOLSET_MAP[toolset_name])
+
+    if disabled_toolsets:
+        for toolset_name in disabled_toolsets:
+            if validate_toolset(toolset_name):
+                allowed.difference_update(resolve_toolset(toolset_name))
+            elif toolset_name in _LEGACY_TOOLSET_MAP:
+                allowed.difference_update(_LEGACY_TOOLSET_MAP[toolset_name])
+
+    # Re-add the kanban lifecycle tools after the disabled-toolset subtraction.
+    # A profile may legitimately have "kanban" in disabled_toolsets for normal
+    # chat sessions, but a dispatcher-spawned worker (HERMES_KANBAN_TASK set)
+    # must always retain kanban_complete/kanban_block/kanban_heartbeat, or
+    # enforce mode would strand it with no way to hand the task back.
+    if os.environ.get("HERMES_KANBAN_TASK"):
+        allowed.update(resolve_toolset("kanban"))
+
+    return allowed
+
+
 def _compute_tool_definitions(
     enabled_toolsets: Optional[List[str]] = None,
     disabled_toolsets: Optional[List[str]] = None,

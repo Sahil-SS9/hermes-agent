@@ -37,6 +37,11 @@ except ImportError:
 HERMES_DIR = get_hermes_home().resolve()
 CRON_DIR = HERMES_DIR / "cron"
 JOBS_FILE = CRON_DIR / "jobs.json"
+# Last-known-good snapshot of jobs.json. Refreshed on every successful load and
+# save. Used to recover from structural corruption (e.g. a partial write from an
+# external process that bypasses save_jobs()) instead of taking down the whole
+# cron subsystem. See load_jobs().
+LASTGOOD_FILE = CRON_DIR / "jobs.json.lastgood"
 
 # In-process lock protecting load_jobs→modify→save_jobs cycles.
 # Required when tick() runs jobs in parallel threads — without this,
@@ -454,13 +459,108 @@ def compute_next_run(schedule: Dict[str, Any], last_run_at: Optional[str] = None
 # Job CRUD Operations
 # =============================================================================
 
+def _coerce_jobs_shape(data: Any) -> Optional[List[Dict[str, Any]]]:
+    """Return the jobs list from a parsed jobs.json payload, or None if the
+    payload is not recoverable.
+
+    Recoverable shapes: a dict carrying a ``jobs`` list, or a bare list. In
+    either case every element must be a dict; a list containing non-dict items
+    (e.g. ``[null, {...}]``) is treated as corruption (return None) so callers
+    fall back to the lastgood snapshot rather than crashing later on ``job.get``.
+    """
+    if isinstance(data, dict):
+        jobs = data.get("jobs", [])
+    elif isinstance(data, list):
+        jobs = data
+    else:
+        return None
+    if not isinstance(jobs, list):
+        return None
+    if not all(isinstance(j, dict) for j in jobs):
+        return None
+    return jobs
+
+
+def _quarantine_corrupt_file() -> None:
+    """Preserve the corrupted jobs.json for forensics before it is overwritten
+    by a recovery write. Best-effort; never breaks the recovery path. This is
+    the cron store for an agent with shell execution, so keeping the artefact
+    that caused a recovery matters for diagnosing the offending writer."""
+    try:
+        if not JOBS_FILE.exists():
+            return
+        stamp = _hermes_now().strftime("%Y%m%d_%H%M%S")
+        dest = CRON_DIR / f"jobs.json.corrupt.{stamp}"
+        shutil.copy2(JOBS_FILE, dest)
+        _secure_file(dest)
+        logger.error("Preserved corrupted jobs.json for forensics at %s", dest)
+    except Exception as e:  # noqa: BLE001 - forensic copy is best-effort
+        logger.warning("Could not preserve corrupted jobs.json: %s", e)
+
+
+def _self_heal(jobs: List[Dict[str, Any]]) -> None:
+    """Persist a recovered job list back to jobs.json. Guarded: a failure to
+    write must not turn a successful in-memory recovery into a hard crash, so we
+    log and continue serving the recovered jobs for this cycle."""
+    try:
+        save_jobs(jobs)
+    except Exception as e:  # noqa: BLE001 - keep serving recovered jobs in-memory
+        logger.error("Recovered jobs in-memory but failed to persist self-heal: %s", e)
+
+
+def _write_lastgood(jobs: List[Dict[str, Any]]) -> None:
+    """Atomically refresh the last-known-good snapshot. Best-effort: a failure
+    here must never break a load/save, so all errors are swallowed (logged)."""
+    try:
+        ensure_dirs()
+        fd, tmp_path = tempfile.mkstemp(dir=str(LASTGOOD_FILE.parent), suffix='.tmp', prefix='.lastgood_')
+        try:
+            with os.fdopen(fd, 'w', encoding='utf-8') as f:
+                json.dump({"jobs": jobs, "updated_at": _hermes_now().isoformat()}, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            atomic_replace(tmp_path, LASTGOOD_FILE)
+            _secure_file(LASTGOOD_FILE)
+        except BaseException:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+    except Exception as e:  # noqa: BLE001 - recovery snapshot is best-effort
+        logger.warning("Could not refresh jobs.json.lastgood snapshot: %s", e)
+
+
+def _recover_from_lastgood() -> Optional[List[Dict[str, Any]]]:
+    """Try to load jobs from the last-known-good snapshot. Returns the jobs list
+    on success, or None if no usable snapshot exists."""
+    if not LASTGOOD_FILE.exists():
+        return None
+    try:
+        with open(LASTGOOD_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+    except Exception as e:  # noqa: BLE001
+        logger.error("jobs.json.lastgood is itself unreadable: %s", e)
+        return None
+    return _coerce_jobs_shape(data)
+
+
 def load_jobs() -> List[Dict[str, Any]]:
-    """Load all jobs from storage."""
+    """Load all jobs from storage.
+
+    Resilience: jobs.json can be corrupted by a process that writes it without
+    going through save_jobs() (no atomic replace). Rather than raise and take
+    down the entire cron subsystem, we fall back to jobs.json.lastgood (the
+    snapshot refreshed on every prior successful load/save), preserve the
+    corrupted file for forensics, and self-heal the primary file from the
+    snapshot. Only if no usable snapshot exists do we raise.
+    """
     ensure_dirs()
     if not JOBS_FILE.exists():
         return []
 
     _strict_retry = False  # track whether we used the strict=False fallback
+    data: Any = None
 
     try:
         with open(JOBS_FILE, 'r', encoding='utf-8') as f:
@@ -472,34 +572,55 @@ def load_jobs() -> List[Dict[str, Any]]:
             with open(JOBS_FILE, 'r', encoding='utf-8') as f:
                 data = json.loads(f.read(), strict=False)
         except Exception as e:
-            logger.error("Failed to auto-repair jobs.json: %s", e)
-            raise RuntimeError(f"Cron database corrupted and unrepairable: {e}") from e
+            # Structural corruption (e.g. partial/non-atomic external write).
+            # Recover from the last-known-good snapshot instead of crashing.
+            recovered = _recover_from_lastgood()
+            if recovered is None:
+                logger.error("Failed to auto-repair jobs.json and no usable lastgood snapshot: %s", e)
+                raise RuntimeError(f"Cron database corrupted and unrepairable: {e}") from e
+            logger.error(
+                "jobs.json corrupted (%s); recovered %d job(s) from lastgood snapshot and self-healed",
+                e, len(recovered),
+            )
+            _quarantine_corrupt_file()
+            _self_heal(recovered)
+            return recovered
     except IOError as e:
         logger.error("IOError reading jobs.json: %s", e)
         raise RuntimeError(f"Failed to read cron database: {e}") from e
 
-    # Validate the top-level JSON shape: accept a dict (expected) or a bare
-    # list (auto-repair). Anything else (str/number/null) is corruption that
-    # would otherwise raise an uncaught AttributeError on ``.get()`` and take
-    # down the whole cron subsystem.
-    if isinstance(data, dict):
-        jobs = data.get("jobs", [])
-        if _strict_retry and jobs:
-            # Hit control-character corruption — rewrite with proper escaping.
-            save_jobs(jobs)
-            logger.warning("Auto-repaired jobs.json (had invalid control characters)")
-        return jobs
-    if isinstance(data, list):
-        # Bare array — likely saved/edited outside save_jobs(). Wrap it back
-        # into the expected {"jobs": [...]} structure.
-        if data:
-            save_jobs(data)
-            logger.warning("Auto-repaired jobs.json (bare list wrapped as dict)")
-        return data
+    # Validate the JSON shape: accept a dict carrying a jobs list, or a bare
+    # list (auto-repair). Anything else (incl. a list with non-dict items) is
+    # corruption that would otherwise crash callers iterating the jobs.
+    jobs = _coerce_jobs_shape(data)
+    if jobs is None:
+        recovered = _recover_from_lastgood()
+        if recovered is None:
+            raise RuntimeError(
+                f"Cron database corrupted: expected {{'jobs': [...]}}, got {type(data).__name__}"
+            )
+        logger.error(
+            "jobs.json had unusable shape (%s); recovered %d job(s) from lastgood snapshot",
+            type(data).__name__, len(recovered),
+        )
+        _quarantine_corrupt_file()
+        _self_heal(recovered)
+        return recovered
 
-    raise RuntimeError(
-        f"Cron database corrupted: expected {{'jobs': [...]}}, got {type(data).__name__}"
-    )
+    if _strict_retry and jobs:
+        # Hit control-character corruption: rewrite with proper escaping.
+        _self_heal(jobs)
+        logger.warning("Auto-repaired jobs.json (had invalid control characters)")
+    elif isinstance(data, list) and jobs:
+        # Bare array, likely saved/edited outside save_jobs(). Wrap it back into
+        # the expected {"jobs": [...]} structure (save_jobs refreshes lastgood).
+        _self_heal(jobs)
+        logger.warning("Auto-repaired jobs.json (bare list wrapped as dict)")
+    else:
+        # Clean read: refresh the recovery snapshot so it tracks the latest
+        # known-good state, even when the primary file was written externally.
+        _write_lastgood(jobs)
+    return jobs
 
 
 def save_jobs(jobs: List[Dict[str, Any]]):
@@ -519,6 +640,8 @@ def save_jobs(jobs: List[Dict[str, Any]]):
         except OSError:
             pass
         raise
+    # Refresh the recovery snapshot from this known-good write.
+    _write_lastgood(jobs)
 
 
 def _normalize_workdir(workdir: Optional[str]) -> Optional[str]:

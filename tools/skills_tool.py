@@ -681,6 +681,37 @@ def skill_request(skill: str, task_id: str, reason: str = "", **kwargs) -> str:
         return json.dumps({"success": False, "granted": False, "error": str(e)}, ensure_ascii=False)
 
 
+def tool_request(tool: str, task_id: str, reason: str = "", **kwargs) -> str:
+    """Request a temporary, task-scoped grant for a tool not in your enabled toolset.
+
+    The tool broker validates the tool exists in the registry, checks it
+    against the NEVER_GRANT safety list (curated dangerous tool names, plus
+    every tool in dangerous toolsets such as "terminal"), and applies a
+    per-tool frequency cap. A granted tool becomes callable for the duration
+    of the task and is auto-revoked when the task completes (or after a TTL).
+    Dangerous tools (profile-lifecycle mutators, skill management, terminal
+    commands) are never granted this way; ask the relevant lead or Denji.
+    Repeated grants are tracked so the tool can be enabled permanently for
+    this profile.
+
+    Args:
+        tool: The tool name to borrow.
+        task_id: The kanban task this grant is scoped to.
+        reason: Why the tool is needed for this task.
+    """
+    profile = _current_profile() or "default"
+    try:
+        from tools.tool_grants import grant_tool
+
+        decision = grant_tool(profile, tool, task_id, reason)
+        decision["success"] = True
+        decision["profile"] = profile
+        decision["tool"] = tool
+        return json.dumps(decision, ensure_ascii=False)
+    except Exception as e:  # noqa: BLE001
+        return json.dumps({"success": False, "granted": False, "error": str(e)}, ensure_ascii=False)
+
+
 def _is_skill_disabled(name: str, platform: str = None) -> bool:
     """Check if a skill is disabled in config.
 
@@ -1825,4 +1856,41 @@ registry.register(
     ),
     check_fn=check_skills_requirements,
     emoji="🙋",
+)
+
+
+TOOL_REQUEST_SCHEMA = {
+    "name": "tool_request",
+    "description": (
+        "Request temporary, task-scoped access to a tool that is not in your "
+        "enabled toolset. Use this when, mid-task, you need a tool you cannot "
+        "call. The broker validates the tool exists, checks safety (some "
+        "tools and toolsets are never granted, e.g. terminal commands or "
+        "profile-lifecycle mutators) and a frequency cap, then grants the "
+        "tool for this task only; it is auto-revoked when the task completes. "
+        "Dangerous tools require Denji. Repeated requests are tracked so the "
+        "tool can be enabled permanently if you use it often."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "tool": {"type": "string", "description": "The tool name to borrow."},
+            "task_id": {"type": "string", "description": "The kanban task this grant is scoped to."},
+            "reason": {"type": "string", "description": "Why the tool is needed for this task."},
+        },
+        "required": ["tool", "task_id"],
+    },
+}
+
+registry.register(
+    name="tool_request",
+    toolset="skills",
+    schema=TOOL_REQUEST_SCHEMA,
+    handler=lambda args, **kw: tool_request(
+        tool=args.get("tool"),
+        task_id=args.get("task_id") or kw.get("task_id"),
+        reason=args.get("reason", ""),
+    ),
+    check_fn=check_skills_requirements,
+    emoji="🛠️",
 )

@@ -85,6 +85,10 @@ def submit_lifecycle_request(
 
 def _run_op(op: str, profile: str, args: dict, token: str) -> None:
     """Execute the approved op under the approval's one-shot authorisation."""
+    # args may arrive as None when a request stored no extra args (e.g. a
+    # create with no clone_from, serialised as JSON null). Coerce so the
+    # **kwargs splat never throws on the approve path.
+    args = args or {}
     with profiles_mod.lifecycle_authorised(token):
         if op == "create":
             profiles_mod.create_profile(profile, **args)

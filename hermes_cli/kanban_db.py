@@ -4467,6 +4467,14 @@ def complete_task(
         revoke_grants_for_task(task_id, "completed")
     except Exception:  # noqa: BLE001
         _log.debug("skill grant auto-revoke failed for %s", task_id, exc_info=True)
+    # Auto-revoke any temporary tool grants scoped to this task (mirrors the
+    # skill broker above). Best-effort: never fail task completion.
+    try:
+        from tools.tool_grants import revoke_grants_for_task as _revoke_tool_grants
+
+        _revoke_tool_grants(task_id, "completed")
+    except Exception:  # noqa: BLE001
+        _log.debug("tool grant auto-revoke failed for %s", task_id, exc_info=True)
     # Clean up the scratch workspace and any stale tmux session for the worker.
     _cleanup_workspace(conn, task_id)
     return True
@@ -8778,11 +8786,21 @@ def _is_profile_spawnable(name: str) -> bool:
     Orchestrator-only names (no profile directory) are blocked by
     ``profile_exists()`` already — this function adds the second layer
     for profiles that DO have directories but are not workers.
+
+    Fails CLOSED: if spawnability cannot be determined (profiles import
+    failure, or config load failure), the profile is treated as
+    non-spawnable. A task that cannot be assigned simply waits in
+    ``ready`` (recoverable), which is safer than dispatching to a
+    profile whose spawnability could not be verified.
     """
     try:
         from hermes_cli.profiles import profile_exists
-    except Exception:
-        return True  # fail open: can't load profiles → assume spawnable
+    except Exception as exc:
+        _log.error(
+            "_is_profile_spawnable(%s): could not import hermes_cli.profiles "
+            "(%s); treating as non-spawnable (fail-closed)", name, exc,
+        )
+        return False
     if not profile_exists(name):
         return False
     try:
@@ -8790,8 +8808,12 @@ def _is_profile_spawnable(name: str) -> bool:
         cfg = load_config_readonly()
         blocked = cfg.get("kanban", {}).get("nonspawnable_profiles", [])
         return name not in blocked
-    except Exception:
-        return True  # fail open
+    except Exception as exc:
+        _log.error(
+            "_is_profile_spawnable(%s): could not load config (%s); "
+            "treating as non-spawnable (fail-closed)", name, exc,
+        )
+        return False
 
 
 def _hours_since_last_event(

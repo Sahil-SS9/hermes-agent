@@ -379,6 +379,47 @@ def get_skill_enforcement_mode() -> str:
     return mode if mode in {"off", "shadow", "enforce"} else "off"
 
 
+def _read_tools_cfg() -> dict:
+    """Read the tools: section of the active profile config (lightweight)."""
+    config_path = get_config_path()
+    if not config_path.exists():
+        return {}
+    try:
+        parsed = yaml_load(config_path.read_text(encoding="utf-8"))
+    except Exception as e:  # noqa: BLE001
+        logger.debug("Could not read tools config %s: %s", config_path, e)
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    cfg = parsed.get("tools")
+    return cfg if isinstance(cfg, dict) else {}
+
+
+def get_tool_enforcement_mode() -> str:
+    """Toolset scope enforcement mode: ``off`` | ``shadow`` | ``enforce``.
+
+    ``off``     no scope gating (legacy behaviour).
+    ``shadow``  out-of-toolset tool calls are logged (would-block) but run.
+    ``enforce`` out-of-toolset tool calls are blocked; agent must use
+    tool_search/skill_request to borrow capability.
+    Mirrors :func:`get_skill_enforcement_mode`; reads the profile config, then
+    falls back to the merged default via load_config_readonly. Defaults to
+    "shadow" so enforcement is observable but non-disruptive until a profile
+    opts into "enforce".
+    """
+    mode = _read_tools_cfg().get("enforcement_mode")
+    if not mode:
+        try:
+            from hermes_cli.config import load_config_readonly
+
+            mode = ((load_config_readonly().get("tools") or {}).get("enforcement_mode"))
+        except Exception as e:  # noqa: BLE001
+            logger.debug("tool enforcement_mode fallback read failed: %s", e)
+            mode = None
+    mode = str(mode or "shadow").lower()
+    return mode if mode in {"off", "shadow", "enforce"} else "shadow"
+
+
 def _normalize_string_set(values) -> Set[str]:
     if values is None:
         return set()

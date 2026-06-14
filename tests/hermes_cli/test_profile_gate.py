@@ -57,6 +57,34 @@ def test_request_blocks_task_and_records(kanban_home):
         assert [p["id"] for p in pend] == [aid]
 
 
+def test_approve_executes_create_with_no_clone_args(kanban_home, monkeypatch):
+    """Regression: a create request with no clone_from stores no args (JSON
+    null); the approve path must coerce that to {} so create_profile(**args)
+    does not throw. This is the previously-unproven approve path."""
+    called = {}
+
+    def _fake_create(name, **kwargs):
+        called["name"] = name
+        called["kwargs"] = kwargs
+        return Path("/tmp") / name
+
+    monkeypatch.setattr(profiles_mod, "create_profile", _fake_create)
+    # lifecycle_authorised is a context manager guarding the real op; keep it
+    monkeypatch.setattr(profiles_mod, "lifecycle_authorised", lambda token: __import__("contextlib").nullcontext())
+
+    with kb.connect() as conn:
+        tid = _new_task(conn)
+        aid = gate.submit_lifecycle_request(
+            conn, tid, op="create", profile="freshsub", args=None,
+            requested_by="denji",
+        )
+        result = gate.approve(conn, aid, resolved_by="sahil")
+        assert result["ok"] is True, result
+        assert called["name"] == "freshsub"
+        assert called["kwargs"] == {}
+        assert kb.get_profile_lifecycle_approval(conn, aid)["status"] == "executed"
+
+
 def test_request_atomic_no_orphan_when_block_fails(kanban_home):
     """If the task can't be blocked, the approval INSERT rolls back too:
     no approval row without a blocked task."""

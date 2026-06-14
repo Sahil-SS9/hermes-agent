@@ -182,8 +182,64 @@ def tmp_cron_dir(tmp_path, monkeypatch):
     """Redirect cron storage to a temp directory."""
     monkeypatch.setattr("cron.jobs.CRON_DIR", tmp_path / "cron")
     monkeypatch.setattr("cron.jobs.JOBS_FILE", tmp_path / "cron" / "jobs.json")
+    monkeypatch.setattr("cron.jobs.LASTGOOD_FILE", tmp_path / "cron" / "jobs.json.lastgood")
     monkeypatch.setattr("cron.jobs.OUTPUT_DIR", tmp_path / "cron" / "output")
     return tmp_path
+
+
+class TestCorruptionRecovery:
+    """jobs.json must survive structural corruption from a non-atomic external
+    write by recovering from the jobs.json.lastgood snapshot instead of crashing
+    the whole cron subsystem (regression for the 2026-06-14 cron CLI crash)."""
+
+    def test_save_writes_lastgood_snapshot(self, tmp_cron_dir):
+        save_jobs([{"id": "j1", "prompt": "hi"}])
+        from cron.jobs import LASTGOOD_FILE
+        assert LASTGOOD_FILE.exists()
+
+    def test_clean_load_refreshes_lastgood(self, tmp_cron_dir):
+        from cron.jobs import LASTGOOD_FILE
+        save_jobs([{"id": "j1", "prompt": "hi"}])
+        LASTGOOD_FILE.unlink()
+        assert load_jobs()[0]["id"] == "j1"
+        assert LASTGOOD_FILE.exists()
+
+    def test_structural_corruption_recovers_and_self_heals(self, tmp_cron_dir):
+        import json as _json
+        from cron.jobs import JOBS_FILE
+        save_jobs([{"id": "j1", "prompt": "hi"}])
+        JOBS_FILE.write_text('{"jobs": [ {"id": "j1", bad } ]', encoding="utf-8")
+        jobs = load_jobs()
+        assert jobs and jobs[0]["id"] == "j1"
+        # primary file is valid again after self-heal
+        _json.load(open(JOBS_FILE))
+        # corrupted original preserved for forensics
+        assert list((tmp_cron_dir / "cron").glob("jobs.json.corrupt.*"))
+
+    def test_non_dict_job_item_treated_as_corruption(self, tmp_cron_dir):
+        import json as _json
+        from cron.jobs import JOBS_FILE
+        save_jobs([{"id": "j1", "prompt": "hi"}])
+        JOBS_FILE.write_text(_json.dumps({"jobs": [None, {"id": "x"}]}), encoding="utf-8")
+        assert load_jobs() == [{"id": "j1", "prompt": "hi"}]
+
+    def test_corruption_without_snapshot_raises(self, tmp_cron_dir):
+        from cron.jobs import JOBS_FILE
+        JOBS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        JOBS_FILE.write_text('{bad', encoding="utf-8")
+        with pytest.raises(RuntimeError, match="unrepairable"):
+            load_jobs()
+
+    def test_self_heal_failure_still_returns_recovered(self, tmp_cron_dir, monkeypatch):
+        from cron.jobs import JOBS_FILE
+        save_jobs([{"id": "j1", "prompt": "hi"}])
+        JOBS_FILE.write_text('{bad', encoding="utf-8")
+
+        def _boom(*a, **k):
+            raise OSError("disk full")
+
+        monkeypatch.setattr("cron.jobs.save_jobs", _boom)
+        assert load_jobs()[0]["id"] == "j1"
 
 
 class TestJobCRUD:

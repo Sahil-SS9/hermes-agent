@@ -1812,3 +1812,78 @@ def test_board_param_in_all_schemas():
         assert "board" not in schema["parameters"].get("required", []), (
             f"{schema['name']} marks board as required; must be optional"
         )
+
+
+# ---------------------------------------------------------------------------
+# kanban_request_subprofile (PROFILE-GATE front door)
+# ---------------------------------------------------------------------------
+
+def test_request_subprofile_records_pending_approval_and_blocks_task(
+    monkeypatch, worker_env
+):
+    """A lead requesting a new sub-profile gets a pending create approval
+    and its task is blocked awaiting Sahil's Discord decision."""
+    from hermes_cli import profiles as profiles_mod
+    monkeypatch.setattr(profiles_mod, "profile_exists", lambda name: False)
+
+    from tools import kanban_tools as kt
+    out = kt._handle_request_subprofile({
+        "profile": "remii-deep",
+        "reason": "need a specialist sub-profile for deep research tasks",
+    })
+    d = json.loads(out)
+    assert d["ok"] is True
+    assert d["task_id"] == worker_env
+    assert d["status"] == "pending_human_approval"
+    assert d["approval_id"].startswith("pla-")
+
+    from hermes_cli import kanban_db as kb
+    conn = kb.connect()
+    try:
+        row = kb.get_profile_lifecycle_approval(conn, d["approval_id"])
+        assert row["status"] == "pending"
+        assert row["op"] == "create"
+        assert row["profile"] == "remii-deep"
+        assert kb.get_task(conn, worker_env).status == "blocked"
+    finally:
+        conn.close()
+
+
+def test_request_subprofile_rejects_existing_profile(monkeypatch, worker_env):
+    from hermes_cli import profiles as profiles_mod
+    monkeypatch.setattr(profiles_mod, "profile_exists", lambda name: True)
+
+    from tools import kanban_tools as kt
+    out = kt._handle_request_subprofile({
+        "profile": "remii-deep",
+        "reason": "duplicate request",
+    })
+    d = json.loads(out)
+    assert "already exists" in d.get("error", "")
+
+
+def test_request_subprofile_rejects_missing_clone_from(monkeypatch, worker_env):
+    from hermes_cli import profiles as profiles_mod
+    monkeypatch.setattr(
+        profiles_mod, "profile_exists",
+        lambda name: name == "remii-deep",
+    )
+
+    from tools import kanban_tools as kt
+    out = kt._handle_request_subprofile({
+        "profile": "new-profile",
+        "clone_from": "does-not-exist",
+        "reason": "clone from a missing profile",
+    })
+    d = json.loads(out)
+    assert "does-not-exist" in d.get("error", "")
+
+
+def test_request_subprofile_requires_profile_and_reason(worker_env):
+    from tools import kanban_tools as kt
+    assert "profile is required" in json.loads(
+        kt._handle_request_subprofile({"reason": "x"})
+    ).get("error", "")
+    assert "reason is required" in json.loads(
+        kt._handle_request_subprofile({"profile": "remii-deep"})
+    ).get("error", "")
