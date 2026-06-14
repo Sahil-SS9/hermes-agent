@@ -24,10 +24,12 @@ skills:
   - gbrain-knowledge
   - memory-promotion
   - kanban-worker
+  - obsidian
+  - codebase-consolidation
   external_dirs:
   - /home/kensei/.hermes/skills
   enabled_skills:
   - gbrain-knowledge
   - kanban-worker
   - memory-promotion
-  enforcement_mode: shadow
+  enforcement_mode: enforce

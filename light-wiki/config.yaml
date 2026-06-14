@@ -24,10 +24,12 @@ skills:
   - llm-wiki
   - kanban-worker
   - avoid-ai-writing
+  - gbrain-knowledge
+  - obsidian
   external_dirs:
   - /home/kensei/.hermes/skills
   enabled_skills:
   - avoid-ai-writing
   - kanban-worker
   - llm-wiki
-  enforcement_mode: shadow
+  enforcement_mode: enforce

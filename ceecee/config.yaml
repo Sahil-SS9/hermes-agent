@@ -1,28 +1,27 @@
 model:
-  default: kimi-k2.6
-  provider: ollama-cloud
-  base_url: https://ollama.com/v1
+  default: minimax-m3
+  provider: opencode-go
+  base_url: https://opencode.ai/zen/go/v1
 fallback_providers:
-  # Cheap-first chain mirroring the global resilient chain (config.yaml).
-  # The old chain was all-free (ollama weekly-limited + OpenRouter :free
-  # variants that rate-limit/stall), leaving no terminal that completes.
-- provider: ollama-cloud
-  model: deepseek-v4-pro
-  base_url: https://ollama.com/v1
+- provider: opencode-zen
+  model: deepseek-v4-flash
+  base_url: https://opencode.ai/zen/v1
+- provider: opencode-go
+  model: minimax-m3
+  base_url: https://opencode.ai/zen/go/v1
 - provider: nous
-  model: qwen/qwen3.6-plus
+  model: stepfun/step-3.7-flash
   base_url: https://inference-api.nousresearch.com/v1
-- provider: openrouter
-  model: nvidia/nemotron-3-super-120b-a12b
-  base_url: https://openrouter.ai/api/v1
 providers:
-  # ceecee loads this profile config (not global), so the stale-stream
-  # watchdog default of 180s applies unless set here. The slow OpenRouter
-  # and nous paths can legitimately prefill for minutes on a 40k context.
   openrouter:
     stale_timeout_seconds: 600
   nous:
     stale_timeout_seconds: 600
+  custom:CommandCode:
+    base_url: https://api.commandcode.ai/provider/v1
+    api_key: ''
+    request_timeout_seconds: 1800
+    stale_timeout_seconds: 300
 toolsets:
 - hermes-cli
 - kanban
@@ -32,6 +31,9 @@ agent:
   max_turns: 85
   reasoning_effort: low
 kanban:
+  # Only the base KENSEI gateway dispatches kanban (single-dispatcher rule:
+  # concurrent dispatchers corrupt the shared kanban SQLite DBs). See
+  # discord-bot-architecture skill. Drift to true caused the 2026-06-12 runaway.
   dispatch_in_gateway: false
 cron:
   ticker_enabled: false
@@ -47,20 +49,41 @@ discord:
     gateway_restart_notification: false
 approvals:
   destructive_slash_confirm: false
+plugins:
+  enabled:
+  - kenseivoice
 skills:
   always_skills:
   - content-pipeline
   - postiz-self-hosting
   - avoid-ai-writing
   - social-content
+  - brand-voices
+  - sahil-twitter-voice
+  - sahil-linkedin-voice
+  - plenishd-voice
+  - coachos-voice
+  - matchdaymaestro-voice
+  - humanizer
+  - ceecee-humanizer
+  - ceecee-platform-content
+  - content-review
   external_dirs:
   - /home/kensei/.hermes/skills
   enabled_skills:
+  - kanban-worker
+  - cron-output-contract
+  - content-review
+  - brand-voices
+  - sahil-linkedin-voice
+  - sahil-twitter-voice
+  - sdlc-review
   - avoid-ai-writing
   - content-pipeline
   - postiz-self-hosting
   - social-content
-  enforcement_mode: shadow
+  enforcement_mode: enforce
 tts:
   provider: kenseivoice
   voice: pocket:eve
+  speed: 1.3

@@ -23,16 +23,16 @@ agent:
   max_turns: 30
   reasoning_effort: minimal
 skills:
+  disabled: [content-review]
   always_skills:
-  - content-review
   - avoid-ai-writing
   - ceecee-humanizer
   - kanban-worker
+  - content-review
+  - brand-voices
   external_dirs:
   - /home/kensei/.hermes/skills
   enabled_skills:
-  - avoid-ai-writing
   - ceecee-humanizer
-  - content-review
   - kanban-worker
-  enforcement_mode: shadow
+  enforcement_mode: enforce

@@ -24,14 +24,16 @@ agent:
   max_turns: 30
   reasoning_effort: minimal
 skills:
+  disabled: []
   always_skills:
-  - market-research
-  - landscape-monitoring
   - kanban-worker
+  - landscape-monitoring
+  - market-research
+  - job-hunt-automation
+  - blogwatcher
   external_dirs:
   - /home/kensei/.hermes/skills
   enabled_skills:
-  - kanban-worker
   - landscape-monitoring
   - market-research
-  enforcement_mode: shadow
+  enforcement_mode: enforce

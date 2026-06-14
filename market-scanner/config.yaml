@@ -43,4 +43,4 @@ skills:
   - kanban-worker
   - landscape-monitoring
   - market-research
-  enforcement_mode: shadow
+  enforcement_mode: enforce

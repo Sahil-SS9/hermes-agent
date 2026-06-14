@@ -1,5 +1,5 @@
 {
-  "updated_at": "2026-06-05T00:14:05.743000",
+  "updated_at": "2026-06-14T01:35:54.083407",
   "platforms": {
     "discord": [
       {
@@ -133,6 +133,12 @@
         "name": "Kensei Camp / #misa-misa",
         "type": "group",
         "thread_id": null
+      },
+      {
+        "id": "1506021205797507265",
+        "name": "Kensei Camp / #general",
+        "type": "group",
+        "thread_id": null
       }
     ],
     "telegram": [],
@@ -157,6 +163,7 @@
     "irc": [],
     "line": [],
     "ntfy": [],
+    "photon": [],
     "simplex": [],
     "teams": []
   }

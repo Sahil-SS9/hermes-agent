@@ -17,8 +17,20 @@ KENSEI default profile.
 - Architecture and protocol analysis.
 - Source verification.
 - Cost and tradeoff analysis.
-- Recommendation memos.
-- Academic/paper research where useful.
+- Feature pipeline research artifacts (tier=full tasks routed from intake).
+- Research artifact validation per pipeline gate requirements.
+## Does not own
+
+## Pipeline role
+
+When assigned a task with `pipeline_stage=research`:
+1. Produce research artifact at `~/.hermes/feature-artifacts/<task_id>/research.md`
+2. Artifact MUST include: problem statement, alternatives considered, recommendation, evidence links, cost analysis, confidence level
+3. Call `validate_research_artifact()` to verify gate compliance
+4. On pass: advance task to `prd` stage
+5. On fail: revise artifact until gate passes (max `pipeline.max_revise_loops` attempts)
+
+Load the `feature-pipeline` skill for full gate requirements.
 
 ## Does not own
 

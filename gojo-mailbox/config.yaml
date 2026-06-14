@@ -30,4 +30,4 @@ skills:
   - gmail-inbox-audit
   - kanban-worker
   - mailbox-cleaner
-  enforcement_mode: shadow
+  enforcement_mode: enforce

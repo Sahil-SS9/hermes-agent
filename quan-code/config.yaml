@@ -31,11 +31,13 @@ skills:
   - systematic-debugging
   - quan-output-validator
   - kanban-worker
+  - code-simplifier
   external_dirs:
   - /home/kensei/.hermes/skills
   enabled_skills:
+  - feature-pipeline
   - github-code-review
   - kanban-worker
   - quan-output-validator
   - systematic-debugging
-  enforcement_mode: shadow
+  enforcement_mode: enforce

@@ -60,14 +60,23 @@ delegation:
   subagent_auto_approve: false
 cron:
   ticker_enabled: false
+plugins:
+  enabled:
+    - kenseivoice
 skills:
   always_skills:
+  - kanban-worker
   - plenishd-design-tokens
   - coachos-design-tokens
   - site-teardown
   - ui-pattern-library-research
   - mobile-screen-spec
   - design-system-review
+  - dezzy-design-md
+  - dezzy-design-systems
+  - dezzy-excalidraw
+  - dezzy-html-prototype
+  - popular-web-designs
   - dogfood
   external_dirs:
   - /home/kensei/.hermes/skills
@@ -79,7 +88,8 @@ skills:
   - plenishd-design-tokens
   - site-teardown
   - ui-pattern-library-research
-  enforcement_mode: shadow
+  enforcement_mode: enforce
 tts:
   provider: kenseivoice
   voice: kokoro:af_alloy
+  speed: 1.3

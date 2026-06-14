@@ -30,4 +30,4 @@ skills:
   - obsidian
   - gbrain-knowledge
   - kanban-worker
-  enforcement_mode: shadow
+  enforcement_mode: enforce

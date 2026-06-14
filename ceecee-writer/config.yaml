@@ -26,6 +26,12 @@ skills:
   always_skills:
   - ceecee-humanizer
   - avoid-ai-writing
+  - brand-voices
+  - sahil-twitter-voice
+  - sahil-linkedin-voice
+  - plenishd-voice
+  - coachos-voice
+  - matchdaymaestro-voice
   - kanban-worker
   external_dirs:
   - /home/kensei/.hermes/skills
@@ -33,4 +39,4 @@ skills:
   - avoid-ai-writing
   - ceecee-humanizer
   - kanban-worker
-  enforcement_mode: shadow
+  enforcement_mode: enforce

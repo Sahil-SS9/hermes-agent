@@ -23,18 +23,24 @@ agent:
   max_turns: 30
   reasoning_effort: minimal
 skills:
+  disabled: []
   always_skills:
   - avoid-ai-writing
-  - ceecee-humanizer
-  - social-content
   - brand-voices
+  - ceecee-humanizer
   - kanban-worker
+  - social-content
+  - plenishd-voice
+  - coachos-voice
+  - matchdaymaestro-voice
+  - humanizer
   external_dirs:
   - /home/kensei/.hermes/skills
   enabled_skills:
   - avoid-ai-writing
   - brand-voices
   - ceecee-humanizer
+  - cron-output-contract
   - kanban-worker
   - social-content
-  enforcement_mode: shadow
+  enforcement_mode: enforce

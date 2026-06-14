@@ -37,4 +37,4 @@ skills:
   - denji-write-skill
   - governance
   - kanban-worker
-  enforcement_mode: shadow
+  enforcement_mode: enforce

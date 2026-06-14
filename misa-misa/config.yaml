@@ -24,9 +24,10 @@ tts:
   edge:
     voice: en-US-AriaNeural
   voice: pocket:azelma
+  speed: 1.3
 discord:
   require_mention: true
-  free_response_channels: 1506022800190607370,1506021205797507266
+  free_response_channels: 1506022800190607370,1506021205797507265
   allowed_channels: ''
   auto_thread: true
   reactions: true
@@ -37,6 +38,7 @@ discord:
     auto_join_user_id: 797682085224513547
     auto_join_text_channel_id: 1506022800190607370
     auto_join_greeting_text: "Hey, it's Misa-Misa. What's up? How can I help?"
+    voice_log_only: true
     auto_leave_on_user_exit: true
     voice_timeout_seconds: 900
   server_actions: ''
@@ -47,13 +49,17 @@ kanban:
   dispatch_in_gateway: false
 cron:
   ticker_enabled: false
+plugins:
+  enabled:
+    - kenseivoice
 skills:
   always_skills:
   - kensei-intake
   - kanban-worker
+  - kensei-todo-write
   external_dirs:
   - /home/kensei/.hermes/skills
   enabled_skills:
   - kensei-intake
   - kanban-worker
-  enforcement_mode: shadow
+  enforcement_mode: enforce

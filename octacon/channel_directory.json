@@ -1,5 +1,5 @@
 {
-  "updated_at": "2026-06-05T00:14:05.800722",
+  "updated_at": "2026-06-12T15:35:44.598212",
   "platforms": {
     "discord": [
       {
@@ -127,6 +127,12 @@
         "name": "repurpose-inbox",
         "guild": "Kensei Camp",
         "type": "channel"
+      },
+      {
+        "id": "1507448572784939151",
+        "name": "Kensei Camp / #build-review",
+        "type": "group",
+        "thread_id": null
       }
     ],
     "telegram": [],
@@ -151,6 +157,7 @@
     "irc": [],
     "line": [],
     "ntfy": [],
+    "photon": [],
     "simplex": [],
     "teams": []
   }

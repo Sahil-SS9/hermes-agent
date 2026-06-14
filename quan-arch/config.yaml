@@ -31,6 +31,8 @@ skills:
   - design-system-review
   - quan-output-validator
   - kanban-worker
+  - codebase-inspection
+  - loom
   external_dirs:
   - /home/kensei/.hermes/skills
   enabled_skills:
@@ -38,4 +40,4 @@ skills:
   - kanban-worker
   - octacon-arch-review
   - quan-output-validator
-  enforcement_mode: shadow
+  enforcement_mode: enforce

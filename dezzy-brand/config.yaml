@@ -22,10 +22,14 @@ agent:
   reasoning_effort: minimal
 skills:
   always_skills:
+  - kanban-worker
   - site-teardown
   - dezzy-design-systems
+  - plenishd-design-tokens
+  - coachos-design-tokens
+  - brand-voices
+  - dezzy-design-md
   - baoyu-article-illustrator
-  - kanban-worker
   external_dirs:
   - /home/kensei/.hermes/skills
   enabled_skills:
@@ -33,4 +37,4 @@ skills:
   - dezzy-design-systems
   - kanban-worker
   - site-teardown
-  enforcement_mode: shadow
+  enforcement_mode: enforce

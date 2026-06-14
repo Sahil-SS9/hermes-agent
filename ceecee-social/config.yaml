@@ -34,4 +34,4 @@ skills:
   - ceecee-platform-content
   - kanban-worker
   - social-content
-  enforcement_mode: shadow
+  enforcement_mode: enforce

@@ -244,6 +244,7 @@ tts:
   piper:
     voice: en_US-lessac-medium
   voice: pocket:marius
+  speed: 1.3
 stt:
   enabled: true
   provider: local
@@ -292,9 +293,13 @@ goals:
   max_turns: 20
 skills:
   always_skills:
+  - kanban-worker
   - gbrain-knowledge
   - memory-promotion
   - codebase-consolidation
+  - obsidian
+  - llm-wiki
+  - avoid-ai-writing
   external_dirs:
   - /home/kensei/.hermes/skills
   template_vars: true
@@ -307,7 +312,7 @@ skills:
   - codebase-consolidation
   - gbrain-knowledge
   - memory-promotion
-  enforcement_mode: shadow
+  enforcement_mode: enforce
 curator:
   enabled: true
   interval_hours: 168
@@ -430,6 +435,7 @@ platform_toolsets:
 plugins:
   enabled:
   - disk-cleanup
+  - kenseivoice
   disabled: []
 smart_model_routing:
   enabled: false

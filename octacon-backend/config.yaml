@@ -34,9 +34,14 @@ skills:
   - loom
   - octacon-arch-review
   - kanban-worker
+  - code-security
+  - test-driven-development
+  - systematic-debugging
+  - subagent-driven-development
   external_dirs:
   - /home/kensei/.hermes/skills
   enabled_skills:
+  - agent-modes
   - codebase-inspection
   - kanban-worker
   - loom
@@ -44,4 +49,4 @@ skills:
   - octacon-code-index
   - writing-plans
   - zoom-out
-  enforcement_mode: shadow
+  enforcement_mode: enforce

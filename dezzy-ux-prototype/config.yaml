@@ -27,6 +27,7 @@ skills:
   - dezzy-html-prototype
   - dogfood
   - kanban-worker
+  - design-system-review
   external_dirs:
   - /home/kensei/.hermes/skills
   enabled_skills:
@@ -35,4 +36,4 @@ skills:
   - dogfood
   - kanban-worker
   - mobile-screen-spec
-  enforcement_mode: shadow
+  enforcement_mode: enforce

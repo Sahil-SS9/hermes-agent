@@ -35,7 +35,7 @@ CHAT_CMDS = ["hermes chat", "hermes_cli.main chat"]
 KNOWN_SPECIALIST_SERVICES = {
     "hermes-gateway-ceecee", "hermes-gateway-denji", "hermes-gateway-dezzy",
     "hermes-gateway-gojo", "hermes-gateway-light", "hermes-gateway-misa-misa",
-    "hermes-gateway-miyagi", "hermes-gateway-octacon", "hermes-gateway-quan",
+    "hermes-gateway-mrhermagi", "hermes-gateway-octacon", "hermes-gateway-quan",
     "hermes-gateway-remii", "hermes-gateway-wesker",
 }
 

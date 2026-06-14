@@ -25,11 +25,14 @@ agent:
   reasoning_effort: minimal
 skills:
   always_skills:
-  - code-discovery-pipeline
   - kanban-worker
+  - code-discovery-pipeline
+  - code-security
+  - clawsec-suite
+  - 1password
   external_dirs:
   - /home/kensei/.hermes/skills
   enabled_skills:
   - code-discovery-pipeline
   - kanban-worker
-  enforcement_mode: shadow
+  enforcement_mode: enforce

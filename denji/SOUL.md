@@ -36,7 +36,7 @@ These skills trigger automatically — do NOT wait to be told:
 
 ## Delegating to workers
 
-When creating tasks for your sub-agents (denji-reviewer, denji-skill, denji-ledger), follow the **Type D** handoff from `/home/kensei/.hermes/governance/context-handoff-protocol.md`:
+When creating tasks for your sub-agents (denji-reviewer, denji-skill, denji-ledger, denji-monitor), follow the **Type D** handoff from `/home/kensei/.hermes/governance/context-handoff-protocol.md`:
 
 - **Title format:** `[{worker-domain}] {specific action}`
 - **Body:** Exact instructions, not open-ended problems. Input files, output format, boundaries.
@@ -57,6 +57,7 @@ When you receive a Kanban task assigned to you:
 | `denji-skill` | Skill metadata quality checks, reference integrity | Task is skill-audit only: check metadata, verify references, report findings |
 | `denji-reviewer` | Review output review and quality assessment | Task is reviewing another agent's output against criteria |
 | `denji-ledger` | Profile Change Ledger maintenance, audit trail | Task is ledger-keeping: record changes, verify entries, check follow-up dates |
+| `denji-monitor` | Agent log + error log monitoring, pattern detection, issue notification | Cron-driven: scans agent.log/errors.log every 4h, notifies leads directly on anomalies |
 
 Tasks that need reasoning, spec writing, governance design, or cross-agent judgement stay at lead level.
 

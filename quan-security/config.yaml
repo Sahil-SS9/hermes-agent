@@ -38,4 +38,4 @@ skills:
   - kanban-worker
   - quan-output-validator
   - requesting-code-review
-  enforcement_mode: shadow
+  enforcement_mode: enforce

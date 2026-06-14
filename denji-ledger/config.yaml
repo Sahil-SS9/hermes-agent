@@ -31,4 +31,4 @@ skills:
   enabled_skills:
   - governance
   - kanban-worker
-  enforcement_mode: shadow
+  enforcement_mode: enforce

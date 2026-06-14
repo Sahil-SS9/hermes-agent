@@ -1,0 +1,125 @@
+{
+  "https://portal.nousresearch.com": {
+    "data": {
+      "paidRecommendedModels": [
+        {
+          "modelName": "qwen3.7-plus",
+          "displayName": "qwen3.7-plus",
+          "source": "local",
+          "href": null,
+          "tokenPrice": "in $0.40 / out $1.60 per 1M",
+          "contextLength": null,
+          "inputModalities": [],
+          "outputModalities": [],
+          "position": 0,
+          "isVisionModel": false,
+          "isCompactionModel": false,
+          "updatedAt": "2026-06-05T00:11:19.667Z"
+        },
+        {
+          "modelName": "nvidia/nemotron-3-ultra:free",
+          "displayName": "nvidia/nemotron-3-ultra:free",
+          "source": "local",
+          "href": null,
+          "tokenPrice": "$0.00/1M",
+          "contextLength": null,
+          "inputModalities": [],
+          "outputModalities": [],
+          "position": 1,
+          "isVisionModel": false,
+          "isCompactionModel": false,
+          "updatedAt": "2026-06-05T00:11:19.667Z"
+        },
+        {
+          "modelName": "stepfun/step-3.7-flash:free",
+          "displayName": "stepfun/step-3.7-flash:free",
+          "source": "local",
+          "href": null,
+          "tokenPrice": "$0.00/1M",
+          "contextLength": null,
+          "inputModalities": [],
+          "outputModalities": [],
+          "position": 2,
+          "isVisionModel": false,
+          "isCompactionModel": false,
+          "updatedAt": "2026-06-05T00:11:19.667Z"
+        },
+        {
+          "modelName": "zai/GLM-5.1:US",
+          "displayName": "zai/GLM-5.1:US",
+          "source": "local",
+          "href": null,
+          "tokenPrice": "in $1.20 / out $4.40 per 1M",
+          "contextLength": null,
+          "inputModalities": [],
+          "outputModalities": [],
+          "position": 3,
+          "isVisionModel": false,
+          "isCompactionModel": false,
+          "updatedAt": "2026-06-05T00:11:19.667Z"
+        }
+      ],
+      "freeRecommendedModels": [
+        {
+          "modelName": "stepfun/step-3.7-flash:free",
+          "displayName": "stepfun/step-3.7-flash:free",
+          "source": "local",
+          "href": null,
+          "tokenPrice": "$0.00/1M",
+          "contextLength": null,
+          "inputModalities": [],
+          "outputModalities": [],
+          "position": 0,
+          "isVisionModel": true,
+          "isCompactionModel": true,
+          "updatedAt": "2026-06-05T00:11:19.667Z"
+        },
+        {
+          "modelName": "nvidia/nemotron-3-ultra:free",
+          "displayName": "nvidia/nemotron-3-ultra:free",
+          "source": "local",
+          "href": null,
+          "tokenPrice": "$0.00/1M",
+          "contextLength": null,
+          "inputModalities": [],
+          "outputModalities": [],
+          "position": 1,
+          "isVisionModel": false,
+          "isCompactionModel": false,
+          "updatedAt": "2026-06-05T00:11:19.667Z"
+        }
+      ],
+      "paidRecommendedVisionModel": null,
+      "paidRecommendedCompactionModel": null,
+      "freeRecommendedVisionModel": {
+        "modelName": "stepfun/step-3.7-flash:free",
+        "displayName": "stepfun/step-3.7-flash:free",
+        "source": "local",
+        "href": null,
+        "tokenPrice": "$0.00/1M",
+        "contextLength": null,
+        "inputModalities": [],
+        "outputModalities": [],
+        "position": 0,
+        "isVisionModel": true,
+        "isCompactionModel": true,
+        "updatedAt": "2026-06-05T00:11:19.667Z"
+      },
+      "freeRecommendedCompactionModel": {
+        "modelName": "stepfun/step-3.7-flash:free",
+        "displayName": "stepfun/step-3.7-flash:free",
+        "source": "local",
+        "href": null,
+        "tokenPrice": "$0.00/1M",
+        "contextLength": null,
+        "inputModalities": [],
+        "outputModalities": [],
+        "position": 0,
+        "isVisionModel": true,
+        "isCompactionModel": true,
+        "updatedAt": "2026-06-05T00:11:19.667Z"
+      }
+    },
+    "ts": 1781265251.8332212
+  }
+}

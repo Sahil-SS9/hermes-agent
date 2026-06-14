@@ -21,7 +21,6 @@ terminal:
 skills:
   always_skills:
   - kanban-worker
-  - skill-research-core
   - external-skill-integration
   - denji-write-skill
   - code-security
@@ -32,5 +31,4 @@ skills:
   - denji-write-skill
   - external-skill-integration
   - kanban-worker
-  - skill-research-core
-  enforcement_mode: shadow
+  enforcement_mode: enforce

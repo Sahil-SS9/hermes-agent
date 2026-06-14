@@ -18,8 +18,9 @@ agent:
 skills:
   always_skills:
   - kanban-worker
+  - kanban-router
   external_dirs:
   - /home/kensei/.hermes/skills
   enabled_skills:
   - kanban-worker
-  enforcement_mode: shadow
+  enforcement_mode: enforce

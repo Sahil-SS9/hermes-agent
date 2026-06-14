@@ -32,6 +32,10 @@ skills:
   - debugging-hermes-tui-commands
   - hermes-session-hygiene
   - kanban-worker
+  - discord-gateway-operations
+  - hermes-update
+  - config-directory-gitops
+  - hermes-workspace-ops
   external_dirs:
   - /home/kensei/.hermes/skills
   enabled_skills:
@@ -40,4 +44,7 @@ skills:
   - hermes-s6-container-supervision
   - hermes-session-hygiene
   - kanban-worker
-  enforcement_mode: shadow
+  enforcement_mode: enforce
+onboarding:
+  seen:
+    tool_progress_prompt: true

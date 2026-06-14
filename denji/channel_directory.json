@@ -1,5 +1,5 @@
 {
-  "updated_at": "2026-06-05T00:14:05.791484",
+  "updated_at": "2026-06-12T15:35:44.711442",
   "platforms": {
     "discord": [
       {
@@ -169,6 +169,7 @@
     "irc": [],
     "line": [],
     "ntfy": [],
+    "photon": [],
     "simplex": [],
     "teams": []
   }

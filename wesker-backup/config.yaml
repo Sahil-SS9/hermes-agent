@@ -26,9 +26,11 @@ skills:
   always_skills:
   - wesker-inventory-scan
   - kanban-worker
+  - 1password
+  - hermes-cron-operations
   external_dirs:
   - /home/kensei/.hermes/skills
   enabled_skills:
   - kanban-worker
   - wesker-inventory-scan
-  enforcement_mode: shadow
+  enforcement_mode: enforce

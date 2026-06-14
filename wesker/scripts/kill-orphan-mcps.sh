@@ -2,8 +2,9 @@
 # kill-orphan-mcps.sh — Kill MCP orphan processes from dead interactive sessions
 #
 # Interactive Hermes chat / Claude Code sessions spawn their own MCP processes
-# (workspace-mcp, ms-365-mcp-server, nanobanana-mcp) that orphan when the
-# interactive session exits. The production gateway's MCPs must be preserved.
+# (workspace-mcp, ms-365-mcp, gitnexus, mailbox_cleaner, adaptive_rate_limiter,
+# github-mcp) that orphan when the interactive session exits. The production
+# gateway's MCPs must be preserved.
 #
 # This script identifies orphans by checking each MCP process against
 # three safe-keep conditions (in order):
@@ -51,15 +52,15 @@ echo "Gateway PID: ${GATEWAY_PID:-<not found>}"
 echo "My PID: $KANBAN_PID"
 echo ""
 
-# Find all MCP processes (workspace-mcp, ms-365-mcp, nanobanana-mcp, uv that launched them)
+# Find all MCP processes
 MCP_PIDS=$(ps -eo pid,comm,args --no-headers \
-    | grep -iE 'workspace-mcp|ms-365-mcp|nanobanana-mcp' \
+    | grep -iE 'workspace-mcp|ms-365-mcp|gitnexus.*mcp|mailbox_cleaner_mcp|adaptive_rate_limiter|github-mcp' \
     | grep -v grep \
     | awk '{print $1}')
 
-# Also include the uv launchers and npm exec wrappers
+# Also include the uv launchers and node exec wrappers
 LAUNCHER_PIDS=$(ps -eo pid,args --no-headers \
-    | grep -E 'uv tool uvx workspace-mcp|npm exec.*nanobanana' \
+    | grep -E 'uv tool uvx (workspace-mcp|gitnexus)|node.*(gitnexus mcp|ms-365-mcp)' \
     | grep -v grep \
     | awk '{print $1}')
 
@@ -182,16 +183,24 @@ if $DRY_RUN; then
     echo "Pass --apply to execute."
 else
     echo "KILLING orphans..."
+    TOTAL_RSS=0
     for pid in "${KILL_LIST[@]}"; do
         comm=$(ps -o comm= -p "$pid" 2>/dev/null | tr -d ' ' || echo "<gone>")
+        rss=$(ps -o rss= -p "$pid" 2>/dev/null | tr -d ' ' || echo "0")
         # Kill the whole subtree
         subtree=$(ps --ppid "$pid" -o pid= 2>/dev/null || true)
-        for child in $subtree; do kill -TERM "$child" 2>/dev/null || true; done
-        kill -TERM "$pid" 2>/dev/null && echo "  killed: PID $pid ($comm)" || echo "  already gone: PID $pid ($comm)"
+        for child in $subtree; do
+            child_rss=$(ps -o rss= -p "$child" 2>/dev/null | tr -d ' ' || echo "0")
+            TOTAL_RSS=$((TOTAL_RSS + child_rss))
+            kill -TERM "$child" 2>/dev/null || true
+        done
+        kill -TERM "$pid" 2>/dev/null && echo "  killed: PID $pid ($comm, RSS=${rss}KB)" && TOTAL_RSS=$((TOTAL_RSS + rss)) || echo "  already gone: PID $pid ($comm)"
         KILLED=$((KILLED + 1))
     done
+    TOTAL_MB=$((TOTAL_RSS / 1024))
     echo ""
     echo "Killed $KILLED orphan processes."
-    echo "Total RSS reclaimed: see 'free -m' output below"
+    echo "Total RSS reclaimed: ~${TOTAL_MB}MB"
+    echo ""
     free -m | head -2
 fi

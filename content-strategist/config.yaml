@@ -29,6 +29,12 @@ skills:
   - avoid-ai-writing
   - content-review
   - social-content
+  - plenishd-voice
+  - coachos-voice
+  - matchdaymaestro-voice
+  - sahil-twitter-voice
+  - sahil-linkedin-voice
+  - humanizer
   external_dirs:
   - /home/kensei/.hermes/skills
   enabled_skills:
@@ -37,4 +43,4 @@ skills:
   - content-review
   - kanban-worker
   - social-content
-  enforcement_mode: shadow
+  enforcement_mode: enforce

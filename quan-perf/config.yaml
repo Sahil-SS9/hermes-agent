@@ -31,10 +31,15 @@ skills:
   - dogfood
   - mobile-app-qa
   - kanban-worker
+  - systematic-debugging
+  - hermes-session-hygiene
   external_dirs:
   - /home/kensei/.hermes/skills
   enabled_skills:
   - dogfood
   - kanban-worker
   - mobile-app-qa
-  enforcement_mode: shadow
+  enforcement_mode: enforce
+onboarding:
+  seen:
+    tool_progress_prompt: true

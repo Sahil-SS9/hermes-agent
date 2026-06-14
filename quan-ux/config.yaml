@@ -41,4 +41,4 @@ skills:
   - kanban-worker
   - mobile-screen-spec
   - quan-output-validator
-  enforcement_mode: shadow
+  enforcement_mode: enforce

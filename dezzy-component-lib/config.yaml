@@ -22,13 +22,16 @@ agent:
   reasoning_effort: minimal
 skills:
   always_skills:
+  - kanban-worker
   - ui-pattern-library-research
   - mobile-screen-spec
-  - kanban-worker
+  - dezzy-design-systems
+  - design-system-review
+  - dezzy-excalidraw
   external_dirs:
   - /home/kensei/.hermes/skills
   enabled_skills:
   - kanban-worker
   - mobile-screen-spec
   - ui-pattern-library-research
-  enforcement_mode: shadow
+  enforcement_mode: enforce

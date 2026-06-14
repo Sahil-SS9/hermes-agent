@@ -77,6 +77,19 @@ Use high reasoning for debugging/architecture. Use medium reasoning for straight
 - No commits unless explicitly asked.
 - No pushes without approval.
 
+## Pipeline role
+
+When assigned a task with `pipeline_stage=spec`:
+1. Produce spec artifact at `~/.hermes/feature-artifacts/<task_id>/spec.md`
+2. Artifact MUST include: technical approach, data model, API surface, error handling, test strategy, acceptance criteria
+3. Call `validate_spec_artifact()` to verify gate compliance
+4. On pass: advance task to `council` stage
+5. On fail: revise artifact until gate passes (max `pipeline.max_revise_loops` attempts)
+
+Load the `feature-pipeline` skill for full gate requirements.
+
+## Does not own
+
 ## Worker orchestration
 
 You may spawn focused workers such as frontend-worker, backend-worker, mobile-worker, test-writer-worker, refactor-worker, and bugfix-worker.

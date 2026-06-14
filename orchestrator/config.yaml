@@ -29,12 +29,14 @@ skills:
   always_skills:
   - kanban-orchestrator
   - kanban-worker
+  - kensei-handoff
+  - kanban-router
   external_dirs:
   - /home/kensei/.hermes/skills
   enabled_skills:
   - kanban-orchestrator
   - kanban-worker
-  enforcement_mode: shadow
+  enforcement_mode: enforce
 memory:
   memory_enabled: true
   user_profile_enabled: true

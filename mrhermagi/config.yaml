@@ -1,14 +1,17 @@
 model:
-  default: gpt-oss:120b
-  provider: ollama-cloud
-  base_url: https://ollama.com/v1
+  default: moonshotai/Kimi-K2.6
+  provider: custom:CommandCode
+  base_url: https://api.commandcode.ai/provider/v1
 fallback_providers:
-- provider: ollama-cloud
-  model: gemma4:31b
-  base_url: https://ollama.com/v1
-- provider: ollama-cloud
-  model: qwen3-next:80b
-  base_url: https://ollama.com/v1
+- provider: opencode-zen
+  model: deepseek-v4-flash
+  base_url: https://opencode.ai/zen/v1
+- provider: opencode-go
+  model: minimax-m3
+  base_url: https://opencode.ai/zen/go/v1
+- provider: nous
+  model: qwen/qwen3.6-plus
+  base_url: https://inference-api.nousresearch.com/v1
 credential_pool_strategies: {}
 toolsets:
 - web
@@ -31,11 +34,11 @@ agent:
   image_input_mode: auto
   disabled_toolsets: []
   verbose: false
-  reasoning_effort: medium
+  reasoning_effort: low
 terminal:
   backend: local
   modal_mode: auto
-  cwd: /home/kensei/.hermes/profiles/miyagi
+  cwd: /home/kensei/.hermes/profiles/mrhermagi
   timeout: 180
   env_passthrough: []
   shell_init_files: []
@@ -150,7 +153,21 @@ discord:
   auto_thread: true
   reactions: true
   channel_prompts:
-    '1507397516642091149': "You are MrHermagi, Sahil's personal AI/ML teacher.\n\n\n      TEACHING APPROACH: Patient, analogy-driven, Socratic. You explain every concept\n      from scratch using analogies tied to Sahil's experience (PM work, indie dev,\n      daily AI tool use). He knows Claude Code, Codex CLI, Cursor, and Hermes Agent.\n      He does NOT know ML fundamentals, model architecture, or how any AI model processes\n      data internally.\n\n\n      British English. Direct. No fluff. No gatekeeping. Start every answer with \"Why\n      this matters\" and connect to something he uses daily.\n\n\n      For topics you need to research before answering, use web_search. For deep-dives,\n      suggest a future lesson slot in the #ai-ml-learning forum.\n\n\n      If Sahil asks about something covered in a past lesson, reference the lesson\n      and build on it. The curriculum is: Week 1 (Foundations: tokens, parameters,\n      inference, model families), Week 2 (architecture + all modalities), Week 3 (running/comparing\n      models), Week 4 (advanced: agents, fine-tuning, production).\n\n\n      "
+    '1507397516642091149': "You are MrHermagi, Sahil's personal AI/ML teacher.\n\n\
+      \n      TEACHING APPROACH: Patient, analogy-driven, Socratic. You explain every\
+      \ concept\n      from scratch using analogies tied to Sahil's experience (PM\
+      \ work, indie dev,\n      daily AI tool use). He knows Claude Code, Codex CLI,\
+      \ Cursor, and Hermes Agent.\n      He does NOT know ML fundamentals, model architecture,\
+      \ or how any AI model processes\n      data internally.\n\n\n      British English.\
+      \ Direct. No fluff. No gatekeeping. Start every answer with \"Why\n      this\
+      \ matters\" and connect to something he uses daily.\n\n\n      For topics you\
+      \ need to research before answering, use web_search. For deep-dives,\n     \
+      \ suggest a future lesson slot in the #ai-ml-learning forum.\n\n\n      If Sahil\
+      \ asks about something covered in a past lesson, reference the lesson\n    \
+      \  and build on it. The curriculum is: Week 1 (Foundations: tokens, parameters,\n\
+      \      inference, model families), Week 2 (architecture + all modalities), Week\
+      \ 3 (running/comparing\n      models), Week 4 (advanced: agents, fine-tuning,\
+      \ production).\n\n\n      "
   extra:
     gateway_restart_notification: false
     allow_bots: mentions
@@ -213,7 +230,7 @@ skills:
   - obsidian
   - spotify
   - youtube-content
-  enforcement_mode: shadow
+  enforcement_mode: enforce
 curator:
   enabled: false
 kanban:
@@ -229,7 +246,7 @@ logging:
   backup_count: 3
 cron:
   wrap_response: true
-  max_parallel_jobs:
+  max_parallel_jobs: null
 hierarchical:
   enabled: false
 model_catalog:
@@ -271,3 +288,9 @@ platform_toolsets:
   - cronjob
   - messaging
   - no_mcp
+providers:
+  custom:CommandCode:
+    base_url: https://api.commandcode.ai/provider/v1
+    api_key: ''
+    request_timeout_seconds: 1800
+    stale_timeout_seconds: 300

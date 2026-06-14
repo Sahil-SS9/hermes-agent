@@ -39,7 +39,7 @@ weeks:
     status: delivered
   milestone:
     title: Model Selection Demo
-    desc: Miyagi walks through 3 real scenarios and picks the right model
+    desc: MrHermagi walks through 3 real scenarios and picks the right model
 - week: 2
   theme: Architecture & All Modalities
   days:
@@ -65,28 +65,32 @@ weeks:
   - day: 13
     title: 'Video Models: How AI Generates Motion'
     topic: Temporal attention, frame prediction, latent spaces
-    status: next
+    status: delivered
   - day: 14
     title: 'Multimodal Models: How Everything Connects'
     topic: Modality alignment, joint embedding spaces
+    status: delivered
   milestone:
     title: Multi-Modal Trace Demo
-    desc: Miyagi feeds the same request across text-only vs multimodal models
+    desc: MrHermagi feeds the same request across text-only vs multimodal models
 - week: 3
   theme: Running & Comparing Models
   days:
   - day: 15
     title: 'Quantisation: Making Big Models Fit'
     topic: Q2-Q8, GGUF, GPTQ, AWQ — size vs quality tradeoffs
+    status: delivered
   - day: 16
     title: 'Context Windows: Lost in the Middle'
     topic: Effective vs maximum context, attention distribution
+    status: delivered
   - day: 17
     title: 'Benchmarks: What Scores Mean'
     topic: MMLU, HumanEval, MT-Bench, Chatbot Arena
+    status: next
   - day: 18
     title: Model Evaluation Workshop
-    topic: Miyagi runs eval framework, shows real output
+    topic: MrHermagi runs eval framework, shows real output
   - day: 19
     title: Token-Maxxing Strategies
     topic: 'Practical optimisation: shorter prompts, caching, structuring'
@@ -98,7 +102,7 @@ weeks:
     topic: DARE, TIES, SLERP — combining models conceptually
   milestone:
     title: Full Model Comparison
-    desc: Miyagi runs 3 models on same tasks, compares speed/quality/cost
+    desc: MrHermagi runs 3 models on same tasks, compares speed/quality/cost
 - week: 4
   theme: 'Advanced: Agents, Fine-tuning, Production'
   days:
