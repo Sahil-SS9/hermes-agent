@@ -21,6 +21,8 @@ import threading
 import time
 from typing import Any, Optional
 
+_UNSET = object()
+
 from agent.display import (
     KawaiiSpinner,
     build_tool_preview as _build_tool_preview,
@@ -181,6 +183,115 @@ def _tool_search_scoped_names(agent) -> frozenset:
     return names
 
 
+# Tools that must always be reachable regardless of toolset scope, so a
+# scoped session can discover/borrow capability rather than being silently
+# stuck. Mirrors the Tool Search bridge exemption.
+_SCOPE_FENCE_ESCAPE_HATCHES = frozenset({
+    "tool_search",
+    "skill_request",
+    "tool_request",
+    "skill_view",
+    "skills_list",
+})
+
+
+def _allowed_tool_names_for_agent(agent) -> Optional[frozenset]:
+    """Resolve (and cache) the set of tool names ``agent`` may execute.
+
+    Returns ``None`` when the session is unrestricted (enabled_toolsets is
+    None), matching the None=everything semantics of
+    ``model_tools.resolve_allowed_tool_names``.
+    """
+    enabled = getattr(agent, "enabled_toolsets", None)
+    disabled = getattr(agent, "disabled_toolsets", None)
+    key = (
+        tuple(enabled) if enabled is not None else None,
+        tuple(disabled) if disabled is not None else (),
+        bool(os.environ.get("HERMES_KANBAN_TASK")),
+    )
+
+    cached = getattr(agent, "_allowed_tool_names", _UNSET)
+    cached_key = getattr(agent, "_allowed_tool_names_key", _UNSET)
+    if cached is not _UNSET and cached_key == key:
+        return cached
+    try:
+        import model_tools
+        names = model_tools.resolve_allowed_tool_names(
+            enabled_toolsets=enabled,
+            disabled_toolsets=disabled,
+        )
+        allowed = frozenset(names) if names is not None else None
+    except Exception:
+        allowed = None
+    try:
+        agent._allowed_tool_names = allowed
+        agent._allowed_tool_names_key = key
+    except Exception:
+        pass
+    return allowed
+
+
+def _tool_scope_decision(agent, function_name: str) -> Optional[str]:
+    """Return ``None`` if ``function_name`` is in scope, else the mode that fired.
+
+    Returns "shadow" or "enforce" when the fence would apply, depending on
+    ``get_tool_enforcement_mode()``. Returns ``None`` (no fence) when mode is
+    "off", the session is unrestricted, or the tool is allowed/escape-hatched.
+    """
+    if function_name in _SCOPE_FENCE_ESCAPE_HATCHES:
+        return None
+    try:
+        from tools import tool_search as _ts
+        if function_name == _ts.TOOL_CALL_NAME:
+            return None
+    except Exception:
+        pass
+
+    allowed = _allowed_tool_names_for_agent(agent)
+    if allowed is None:
+        return None
+    if function_name in allowed:
+        return None
+    if function_name in _tool_search_scoped_names(agent):
+        return None
+
+    try:
+        from agent.skill_utils import get_tool_enforcement_mode
+        mode = get_tool_enforcement_mode()
+    except Exception:
+        # Fail to "shadow" not "off": a transient config-read error should
+        # still be observable rather than silently disabling the fence.
+        mode = "shadow"
+    if mode == "off":
+        return None
+    return mode
+
+
+def _record_tool_scope_event(agent, function_name: str, mode: str) -> None:
+    """Log a governance event for a tool scope fence firing. Never raises."""
+    try:
+        from hermes_cli.profile_activity_ledger import record_event_if_enabled
+        from tools.skills_tool import _current_profile
+
+        profile = _current_profile()
+        record_event_if_enabled(
+            source="tool.dispatch",
+            actor_profile=profile,
+            target_profile=profile,
+            event_type="tool.access.blocked" if mode == "enforce" else "tool.access.would_block",
+            object_type="tool",
+            object_id=function_name,
+            summary=f"{mode} dispatch of {function_name} (not in enabled toolsets)",
+            payload={
+                "enabled_toolsets": getattr(agent, "enabled_toolsets", None),
+                "disabled_toolsets": getattr(agent, "disabled_toolsets", None),
+                "kanban_task_env": bool(os.environ.get("HERMES_KANBAN_TASK")),
+            },
+        )
+    except Exception:
+        pass
+
+
 def _apply_tool_request_middleware_for_agent(
     agent,
     *,
@@ -312,6 +423,21 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
                         }, ensure_ascii=False)
         except Exception:
             pass
+
+        # Runtime toolset-scope fence: a resolved (post-unwrap) tool name
+        # outside the session's enabled/disabled toolsets is blocked (or
+        # shadow-logged), same as the Tool Search unwrap scope gate above.
+        if _ts_scope_block is None:
+            _scope_mode = _tool_scope_decision(agent, function_name)
+            if _scope_mode is not None:
+                _record_tool_scope_event(agent, function_name, _scope_mode)
+                if _scope_mode == "enforce":
+                    _ts_scope_block = json.dumps({
+                        "error": (
+                            f"'{function_name}' is not in this session's enabled toolsets. "
+                            "Use tool_search or skill_request to request access."
+                        ),
+                    }, ensure_ascii=False)
 
         function_args, middleware_trace = _apply_tool_request_middleware_for_agent(
             agent,
@@ -817,6 +943,18 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                         )
         except Exception:
             pass
+
+        # Runtime toolset-scope fence; see execute_tool_calls_concurrent for
+        # full rationale.
+        if _ts_scope_block is None:
+            _scope_mode = _tool_scope_decision(agent, function_name)
+            if _scope_mode is not None:
+                _record_tool_scope_event(agent, function_name, _scope_mode)
+                if _scope_mode == "enforce":
+                    _ts_scope_block = (
+                        f"'{function_name}' is not in this session's enabled toolsets. "
+                        "Use tool_search or skill_request to request access."
+                    )
 
         function_args, middleware_trace = _apply_tool_request_middleware_for_agent(
             agent,
