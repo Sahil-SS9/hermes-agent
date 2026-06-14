@@ -256,6 +256,17 @@ def _tool_scope_decision(agent, function_name: str) -> Optional[str]:
         return None
 
     try:
+        from tools.skills_tool import _current_profile
+        from tools import tool_grants
+
+        if tool_grants.has_active_grant(_current_profile(), function_name):
+            return None
+    except Exception:
+        # Fail closed: a broken grant lookup must not widen access, so the
+        # fence still applies as if no grant exists.
+        pass
+
+    try:
         from agent.skill_utils import get_tool_enforcement_mode
         mode = get_tool_enforcement_mode()
     except Exception:

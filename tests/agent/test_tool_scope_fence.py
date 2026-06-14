@@ -133,3 +133,27 @@ def test_tool_scope_decision_fallback_mode_is_shadow_on_exception():
     agent = _make_agent(enabled_toolsets=["terminal_tools"])
     with patch("agent.skill_utils.get_tool_enforcement_mode", side_effect=RuntimeError("boom")):
         assert _tool_scope_decision(agent, "web_search") == "shadow"
+
+
+def test_tool_grant_unblocks_fenced_tool(tmp_path, monkeypatch):
+    """Phase 4: a tool blocked by the fence under enforce becomes allowed once
+    a grant is recorded for the current profile+task via the tool broker."""
+    from hermes_cli import profile_activity_ledger as pal
+    import tools.tool_grants as tg
+
+    db = tmp_path / "ledger.sqlite"
+    monkeypatch.setattr(pal, "ledger_db_path", lambda: db)
+    monkeypatch.setattr(pal, "_governance_root", lambda: tmp_path)
+    monkeypatch.setattr("tools.skills_tool._current_profile", lambda: "octacon")
+
+    agent = _make_agent(enabled_toolsets=["terminal_tools"])
+
+    with patch("agent.skill_utils.get_tool_enforcement_mode", return_value="enforce"):
+        # Blocked before any grant.
+        assert _tool_scope_decision(agent, "web_search") == "enforce"
+
+        decision = tg.grant_tool("octacon", "web_search", "t_1", "need it")
+        assert decision["granted"] is True
+
+        # Allowed after the grant.
+        assert _tool_scope_decision(agent, "web_search") is None

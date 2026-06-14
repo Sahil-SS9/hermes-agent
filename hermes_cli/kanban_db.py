@@ -4467,6 +4467,14 @@ def complete_task(
         revoke_grants_for_task(task_id, "completed")
     except Exception:  # noqa: BLE001
         _log.debug("skill grant auto-revoke failed for %s", task_id, exc_info=True)
+    # Auto-revoke any temporary tool grants scoped to this task (mirrors the
+    # skill broker above). Best-effort: never fail task completion.
+    try:
+        from tools.tool_grants import revoke_grants_for_task as _revoke_tool_grants
+
+        _revoke_tool_grants(task_id, "completed")
+    except Exception:  # noqa: BLE001
+        _log.debug("tool grant auto-revoke failed for %s", task_id, exc_info=True)
     # Clean up the scratch workspace and any stale tmux session for the worker.
     _cleanup_workspace(conn, task_id)
     return True
