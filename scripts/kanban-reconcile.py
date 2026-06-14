@@ -28,6 +28,12 @@ TERMINAL_STATUSES = {"done", "completed", "archived"}
 # (the review itself is the deliverable, recorded as a comment).
 REVIEW_PREFIXES = ("review:", "[review]", "clean up:", "investigate:")
 
+# Manual closure signal: a non-empty status_reason that wasn't written by
+# this script means a human deliberately closed the task with an explanation.
+# These are NOT drift — they're housekeeping. Only skip if the reason is
+# human-authored (not an auto-reopen stamp from a prior reconcile run).
+RECONCILE_REASON_PREFIX = "Auto-reopened by kanban-reconcile"
+
 # Circuit breaker: if a single run would auto-reopen more than this many
 # tasks, something is systemically wrong (bad heuristic, schema change,
 # bulk import) and mass-reopening would create a churn storm. Above the
@@ -111,6 +117,13 @@ def is_review_task(title: str) -> bool:
     return any(t.startswith(p) for p in REVIEW_PREFIXES)
 
 
+def is_manual_closure(status_reason: str | None) -> bool:
+    """A non-empty status_reason not from this script = human housekeeping."""
+    if not status_reason or not status_reason.strip():
+        return False
+    return not status_reason.startswith(RECONCILE_REASON_PREFIX)
+
+
 def reopen_task(conn: sqlite3.Connection, task_id: str, reason: str) -> bool:
     """Reopen a drifted task: set status=triage, log event."""
     now = now_ts()
@@ -150,7 +163,7 @@ def scan_board(name: str, db_path: Path) -> list[dict]:
         return findings
 
     rows = conn.execute(
-        "SELECT id, title, status, assignee, result FROM tasks "
+        "SELECT id, title, status, assignee, result, status_reason FROM tasks "
         "WHERE status IN ('done', 'completed')"
     ).fetchall()
 
@@ -161,6 +174,12 @@ def scan_board(name: str, db_path: Path) -> list[dict]:
         status = task.get("status") or ""
 
         if is_review_task(title):
+            continue
+
+        # Manual closures (human housekeeping with an explanation) are
+        # NOT drift. Skip them so the circuit breaker doesn't trip on
+        # legitimate bulk cleanup sessions.
+        if is_manual_closure(task.get("status_reason")):
             continue
 
         runs = get_runs(conn, tid)
