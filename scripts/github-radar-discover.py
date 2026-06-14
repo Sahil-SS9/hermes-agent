@@ -48,6 +48,7 @@ TEMPLATE_HTML = os.path.expanduser("~/.hermes/templates/dark-report-template.htm
 # ── Static Config ───────────────────────────────────────────────────
 
 RECENCY_DAYS = 7
+CREATED_RECENCY_DAYS = 90  # wider window to exclude truly ancient repos
 MAX_RESULTS_PER_QUERY = 100
 MAX_PAGES = 10
 TRENDING_URL = "https://github.com/trending?since=daily"
@@ -87,7 +88,12 @@ RELEVANCE_SIGNAL_FLOOR = 20  # min relevance for a repo to count as on-mission
 # now centre ~60, top ~75, vs the old curve which inflated most repos into the
 # 80s). HIGH = strong / act-now tier; EXTRACT = on-mission mid tier.
 CLASSIFY_HIGH = 68
-CLASSIFY_EXTRACT = 56
+CLASSIFY_EXTRACT = 60
+
+# Relevance floor: repos classified above INSPIRATION must have at least this
+# relevance score. Prevents high-star but off-mission repos (Logitech drivers,
+# travel planners) from landing in FORK/PRODUCT.
+RELEVANCE_FLOOR = 10
 
 # ── Default thresholds ──────────────────────────────────────────────
 
@@ -285,17 +291,19 @@ def gh_auth_token():
     return None
 
 
-def get_date_filter():
-    cutoff = datetime.now(timezone.utc) - timedelta(days=RECENCY_DAYS)
-    return cutoff.strftime("%Y-%m-%d")
+def get_date_filters():
+    """Return (pushed_cutoff, created_cutoff) for compound recency filter."""
+    pushed_cutoff = datetime.now(timezone.utc) - timedelta(days=RECENCY_DAYS)
+    created_cutoff = datetime.now(timezone.utc) - timedelta(days=CREATED_RECENCY_DAYS)
+    return pushed_cutoff.strftime("%Y-%m-%d"), created_cutoff.strftime("%Y-%m-%d")
 
 
 def github_search(query, sort="stars", order="desc", per_page=100, page=1):
     token = gh_auth_token()
     if not token:
         return [], 0
-    date_q = get_date_filter()
-    full_q = f"{query} created:>{date_q}"
+    pushed_q, created_q = get_date_filters()
+    full_q = f"{query} pushed:>{pushed_q} created:>{created_q}"
     params = urllib.parse.urlencode({
         "q": full_q, "sort": sort, "order": order,
         "per_page": per_page, "page": page
@@ -475,6 +483,10 @@ def score_repo(repo):
             classification, why = "PLUGIN/SKILL", "Agent tooling: worth monitoring."
         elif on_mission:
             classification, why = "EXTRACT", "Interesting architecture or utility: extract if time permits."
+
+    # Relevance floor: demote off-mission repos that scored high on stars alone.
+    if classification != "INSPIRATION" and relevance_score < RELEVANCE_FLOOR:
+        classification, why = "INSPIRATION", "High stars but off-mission: worth noting for future reference."
 
     return score, classification, why
 
