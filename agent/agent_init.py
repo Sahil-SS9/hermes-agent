@@ -58,6 +58,35 @@ from utils import base_url_host_matches
 # from inside that module.)
 logger = logging.getLogger("run_agent")
 
+# One-shot guard so a broken fallback_floor config warns once rather than
+# spamming a line per agent/delegate/aux spawn.
+_FLOOR_WARN_EMITTED = False
+
+
+def apply_fallback_floor(chain, floor, *, primary_provider="", primary_model=""):
+    """Return ``chain`` with a last-resort fallback entry appended, unless that
+    entry is already present or is the primary backend.
+
+    Non-mutating: returns a new list, never touches the input or the config dict
+    it came from. A floor that is falsy, malformed, already in the chain, or
+    equal to the primary provider/model is a no-op, so failing over never loops
+    back to the backend that just failed. Provider and model are compared
+    case-insensitively (a backend is the same backend regardless of casing).
+    """
+    if not isinstance(floor, dict):
+        return chain
+    fp_l = str(floor.get("provider") or "").strip().lower()
+    fm_l = str(floor.get("model") or "").strip().lower()
+    if not fp_l or not fm_l:
+        return chain
+    if fp_l == (primary_provider or "").strip().lower() and fm_l == (primary_model or "").strip().lower():
+        return chain
+    for e in chain:
+        if (str(e.get("provider", "")).strip().lower() == fp_l
+                and str(e.get("model", "")).strip().lower() == fm_l):
+            return chain
+    return list(chain) + [dict(floor)]
+
 
 def _ra():
     """Lazy reference to ``run_agent`` so callers can patch
@@ -939,6 +968,30 @@ def init_agent(
         agent._fallback_chain = [fallback_model]
     else:
         agent._fallback_chain = []
+
+    # Last-resort fallback floor. Guarantees every agent, including in-process
+    # delegated/auxiliary agents initialised without a fallback list, has at
+    # least one reliable escape when its primary is rate-limited (e.g. the
+    # ollama-cloud weekly quota). Guarded: floor logic must never break init.
+    try:
+        from hermes_cli.config import load_config_readonly
+        _floor = load_config_readonly().get(
+            "fallback_floor", {"provider": "opencode-go", "model": "minimax-m3"}
+        )
+        agent._fallback_chain = apply_fallback_floor(
+            agent._fallback_chain, _floor,
+            primary_provider=getattr(agent, "provider", ""),
+            primary_model=getattr(agent, "model", ""),
+        )
+    except Exception as _floor_err:  # noqa: BLE001
+        global _FLOOR_WARN_EMITTED
+        if not _FLOOR_WARN_EMITTED:
+            _FLOOR_WARN_EMITTED = True
+            logger.warning(
+                "fallback floor not applied (agents lose the last-resort escape): %s",
+                _floor_err,
+            )
+
     agent._fallback_index = 0
     agent._fallback_activated = getattr(agent, "_fallback_activated", False)
     # Legacy attribute kept for backward compat (tests, external callers)
