@@ -1113,6 +1113,13 @@ class DiscordAdapter(BasePlatformAdapter):
                             return
                     # "all" falls through; bot is permitted — skip the
                     # human-user allowlist below (bots aren't in it).
+
+                    # ── KENSEI CUSTOM: bot loop guard ──
+                    # Stop replying once this channel's trailing run of
+                    # bot-only messages exceeds max_bot_hops, so two bots
+                    # @mentioning each other don't loop forever.
+                    if adapter_self._bot_loop_would_exceed(message):
+                        return
                 else:
                     # Non-bot: enforce the configured user/role allowlists.
                     # Pass guild + is_dm so role checks are scoped to the
