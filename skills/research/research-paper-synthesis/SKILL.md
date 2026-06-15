@@ -1,11 +1,11 @@
 ---
 name: research-paper-synthesis
-description: "Daily arXiv paper synthesis pipeline — fetches D-14 to D+0 papers from arXiv + Semantic Scholar + HuggingFace + Papers With Code, cross-references against KenseiAgent repos, GitRadar wiki, and product portfolio, produces research digest entries, LLM wiki pages, GitRadar mashup ideas, and content creation briefs."
-version: 2.1.0
+description: "Daily arXiv paper synthesis pipeline — fetches D-14 to D+0 papers from arXiv + Semantic Scholar + HuggingFace + Papers With Code, cross-references against KenseiAgent repos, GitRadar wiki, and product portfolio, produces research digest entries, LLM wiki pages, GitRadar mashup ideas, content creation briefs, and brain fact promotion into ~/brain/ with provenance enforcement (M6)."
+version: 2.2
 author: KENSEI
 metadata:
   hermes:
-    tags: [research, arxiv, synthesis, cross-reference, wiki, content, cron, semantic-scholar, huggingface, papers-with-code]
+    tags: [research, arxiv, synthesis, cross-reference, wiki, content, cron, semantic-scholar, huggingface, papers-with-code, brain, provenance]
     category: research
     related_skills: [arxiv, research-digest, llm-wiki, remii-triage, ceecee-platform-content, brand-voices]
     created_for_profile: kensei
@@ -32,10 +32,11 @@ arXiv ────────→ ┐
 SemScholar ────→ ├─→ Deduplicate → Score → Filter → Synthesize → Cross-Reference → Output
 HF Daily ──────→ │   (by arXiv ID)    (v2)     (≥4)       (top 5)          │
 PapersWCode ───→ ┘                                                        │
-                              ┌───────────────────────────────────────────┼───────────────────────┐
-                              ▼                                           ▼                       ▼
-                        Research Digest                            LLM Wiki + GitRadar       Content Briefs
-                        (1-3 top papers)                          (durable knowledge)      (X/LI/Blog angles)
+                              ┌───────────────────────────────────────────┼───────────────────────┬──────────────┐
+                              ▼                                           ▼                       ▼               ▼
+                        Research Digest                            LLM Wiki + GitRadar       Content Briefs    Brain Facts
+                        (1-3 top papers)                          (durable knowledge)      (X/LI/Blog angles)  (~/brain/)
+                                                                   + raw/papers/                               (v2.2)
 ```
 
 ## Phase 0 — Source Overview
@@ -117,11 +118,30 @@ curl -s "https://huggingface.co/api/daily_papers?limit=30" | python3 -m json.too
 ```
 
 This returns the current day's curated papers with title, paper ID, upvotes,
-and discussion link. For each HF Daily paper:
+and discussion link. The response structure uses `paper.id` which is the raw
+arXiv ID (e.g., `"2606.00467"`) — NOT a URL. However, older API versions may
+return a full URL, so handle both formats.
 
-1. Extract the arXiv ID from the paper link
+**Parsing the arXiv ID from HF Daily:**
+
+```python
+paper_id = p.get('paper', {}).get('id', '')
+arxiv_id = ''
+# Format 1 (current): raw arXiv ID like "2606.00467"
+if paper_id and not paper_id.startswith('http'):
+    arxiv_id = paper_id.split('v')[0] if 'v' in paper_id else paper_id
+# Format 2 (legacy): URL like "https://arxiv.org/abs/2606.00467"
+elif 'arxiv.org/abs/' in paper_id:
+    arxiv_id = paper_id.split('/abs/')[-1].split('v')[0]
+elif 'arxiv.org/pdf/' in paper_id:
+    arxiv_id = paper_id.split('/pdf/')[-1].split('.pdf')[0].split('v')[0]
+```
+
+For each HF Daily paper:
+
+1. Extract the arXiv ID using the dual-format parser above
 2. Cross-reference against our arXiv candidate pool
-3. If a paper appears in BOTH arXiv hits AND HF Daily → bump quality weight by +0.5
+3. If a paper appears in BOTH arXiv hits AND HF Daily → set `hf_featured: true` (quality weight table handles the bump)
 4. If a paper appears on HF Daily but NOT in arXiv hits → add to candidate pool with a `source: hf-daily` tag
 
 ### 1D: Papers With Code (implementation signal)
@@ -166,8 +186,8 @@ vapourware from inflating — a paper must PROVE quality, not just match keyword
 
 | Citation Count | HF Daily Featured? | Published at Top Venue? | Weight |
 |---|---|---|---|
-| 0-2 | No | No | 0.3 |
-| 3-10 | No | No | 0.5 |
+| 0-2 | No | No | 0.5 |
+| 3-10 | No | No | 0.6 |
 | 11-50 | No | No | 0.7 |
 | 0-10 | Yes | No | 0.8 |
 | 11-50 | Yes | No | 0.9 |
@@ -176,6 +196,11 @@ vapourware from inflating — a paper must PROVE quality, not just match keyword
 | 100+ | Yes | No | 1.1 |
 | Any | Yes | Yes (NeurIPS, ICLR, ICML, ACL) | 1.2 |
 | 50+ | No | Yes (top venue) | 1.1 |
+
+**v2.1.1 change:** 0-2 citation floor raised from 0.3→0.5, 3-10 floor raised from 0.5→0.6.
+Also added a **recency boost**: +0.1 weight for papers published in the last 3 days
+(only applied if base relevance score ≥ 4, preventing marginal papers from inflating).
+This prevents brand-new pre-prints from being immediately penalised to Skip tier.
 
 ### Step 3: Implementation Signal (1.0 — 1.3)
 
@@ -198,16 +223,20 @@ Final Score = Base Relevance × Quality Weight × Implementation Multiplier
 
 Examples:
   Paper about agent memory, 30 citations, HF Daily, 200★ repo
-  Old: 4 × 1.1 × 1.3 = 5.7 → capped 5.0
-  New: 4 × 0.9 × 1.2 = 4.3 → Ask First
+  Old: 4 × 0.9 × 1.2 = 4.3 → Ask First
+  New (v2.1.1): 4 × 0.9 × 1.2 = 4.3 → Ask First (unchanged — already fair)
 
   Paper about context compression directly usable by Toolaria, 5 citations, no repo
-  Old: 5 × 0.7 × 1.0 = 3.5 → Ask First
-  New: 5 × 0.5 × 1.0 = 2.5 → File only
+  Old: 5 × 0.5 × 1.0 = 2.5 → File
+  New (v2.1.1): 5 × 0.6 × 1.0 = 3.0 → Ask First (raised from File)
 
   Strong paper: Tool-calling agent paper, 60 citations, HF Daily, top venue, 800★ repo
-  Old: 5 × 1.3 × 1.4 = 9.1 → capped 5.0
-  New: 5 × 1.1 × 1.25 = 6.9 → Write Now (no cap means distinction visible)
+  Old: 5 × 1.1 × 1.25 = 6.9 → Write Now
+  New (v2.1.1): 5 × 1.1 × 1.25 = 6.9 → Write Now (unchanged)
+
+  Brand-new pre-print: agent memory paper, 0 citations, published yesterday, no repo
+  Old: 4 × 0.3 × 1.0 = 1.2 → Skip
+  New (v2.1.1): 4 × 0.5 × 1.0 = 2.0 → File (raised from Skip, recency boost not applied since base=4 but 0.5 floor already covers it)
 ```
 
 **Score thresholds:**
@@ -451,6 +480,65 @@ For each content angle identified:
 4. Notify `#content` Discord channel with summary of new briefs
 5. **New v2:** Include quality signals in brief (citations, stars) for credibility hooks
 
+### Stream 5: Brain Fact Promotion (NEW v2.2)
+
+For scored concepts that cross-link Sahil's product stack or KenseiAgent internals,
+promote a durable one-line fact into `~/brain/`. This is the upward flow from
+research synthesis into the structured GBrain memory tier (D7 fix).
+
+**Activation rule:** Promote only if Phase 4 cross-reference produced a match
+against Sahil's product portfolio (Plenishd, CoachOS, MatchdayMaestro, Kick-tionary,
+Player Portfolio Builder) OR a KenseiAgent internal component (Toolaria, Mnemosyne,
+Kanban, gateway system, delegate system, Hermes-Agent fork, Hermes plugin system).
+Do NOT promote generic AI/ML papers with no stack link.
+
+**Target page mapping:**
+- KenseiAgent/Hermes internal match → `~/brain/conventions/infrastructure.md`
+- GitRadar wiki match → `~/brain/projects/gitradar.md`
+- Job hunt / career match → `~/brain/projects/job-hunt.md`
+- Content engine / marketing match → `~/brain/projects/content-pipeline.md`
+- Product portfolio match (Plenishd, CoachOS, MatchdayMaestro, Kick-tionary,
+  Player Portfolio Builder) → `~/brain/apps/portfolio.md`
+
+**Append format:**
+```
+- YYYY-MM-DD: Research synthesis: <one-line insight> ([[wiki/concepts/<concept-slug>]])
+```
+
+The [[wiki/concepts/...]] link creates a cross-tier reference to the LLM wiki
+concept page, enabling follow-through from ~/brain to the full synthesis.
+
+**Workflow per concept:**
+1. Read the target brain page content (via write_file/read_file or terminal cat)
+2. Check the existing content for mechanical duplication (exact text match on
+   the `<one-line insight>` part — if found anywhere, skip)
+3. If no duplicate, append the formatted bullet line before any section marker
+   (`## See Also`, `---`, `## Changelog`) or at the end of the file
+4. Write the updated content back (preserve-first — never overwrite existing content)
+5. Do NOT create new brain pages. Only append to existing ones.
+
+**Kanban integration:** If a scored concept cross-links a product stack component
+that has no brain page yet, file a kanban task:
+`hermes kanban create "Brain page needed: <product>" --triage --assignee wesker --priority 3`
+This tracks the gap so someone creates the page later.
+
+### Provenance (M6) — Raw source retention lint
+
+Before finalising output for any concept-level run (score ≥3.5 paper), run a
+provenance check using the `scripts/provenance-lint.py` script:
+
+1. Run `python3 scripts/provenance-lint.py` — if it exits with code 1, inspect
+   the flagged concepts and fix or explain each orphan before delivering output.
+2. If a flagged concept is a legitimate non-paper concept (operational note,
+   educational reference, article summary) that was correctly excluded by the
+   script's arXiv-detection heuristic, add a `sources:` field anyway to
+   document its origin and suppress the flag.
+3. Flag any unresolved orphaned concepts in the Discord output.
+4. If the run has no prompt-level insight about new concepts, skip this check.
+
+This prevents concept drift — every durable wiki insight must trace back to a
+verifiable source.
+
 ## Execution Rules
 
 ### Deduplication
@@ -474,7 +562,7 @@ For each content angle identified:
 4. Papers With Code is opportunistic — only for score ≥3.5 papers
 
 ### Fallbacks
-- If Semantic Scholar API is slow/unavailable: use citation-free scoring (quality weight defaults to 0.7)
+- If Semantic Scholar API is slow/unavailable OR rate-limited (HTTP 429): use citation-free scoring (quality weight defaults to 0.7). The batch endpoint is particularly susceptible — if it returns 0 records due to 429, treat it the same as unavailable.
 - If HuggingFace API fails: skip curation cross-ref, note in output
 - If Papers With Code returns nothing: that's fine, implementation multiplier = 1.0
 - If arXiv API is slow (>15s): use cached results from previous run + only fetch new since then
@@ -492,6 +580,7 @@ For each content angle identified:
 **Wiki writes:** Direct to `~/wiki/` following `llm-wiki` conventions.
 **Content briefs:** `~/.hermes/content-briefs/` directory.
 **Kanban tasks:** `research` board for mashup/build ideas.
+**Brain facts:** `~/brain/` pages via file write — see Stream 5.
 
 If the run finds nothing actionable (0 papers scoring ≥2.0): deliver [SILENT].
 
@@ -506,8 +595,12 @@ If the run finds nothing actionable (0 papers scoring ≥2.0): deliver [SILENT].
 
 - [ ] At least 1 paper scored ≥3.5 per run (or [SILENT])
 - [ ] Every wiki page created has valid frontmatter with quality metadata
+- [ ] Provenance lint passed (run `python3 scripts/provenance-lint.py` — 0 orphaned concepts)
 - [ ] Every cross-reference match cites specific file/repo/wiki page
 - [ ] Content briefs include paper ID + date + target voice + quality signals
+- [ ] Stack-relevant concepts promoted to ~/brain with [[wiki/concepts/...]] links (v2.2)
+- [ ] No duplicate brain facts (mechanical dedup before append)
+- [ ] Speculative mashup ideas did NOT auto-file kanban tasks
 - [ ] All 4 sources were attempted (even if some returned empty)
 - [ ] No duplicate wiki pages or kanban tasks created
 - [ ] All external links verified (no 404s)
@@ -519,7 +612,7 @@ If the run finds nothing actionable (0 papers scoring ≥2.0): deliver [SILENT].
 - **Scoring over-match is the #1 pitfall.** Initial keyword-based scoring on broad terms ("agent", "multi-agent", "orchestration") will produce 50-100+ score-5 papers from a 30-result batch. Always use a **two-pass scoring approach**: pass 1 = broad keyword detection, pass 2 = tighten with exact phrases and manual review of score-5 candidates. A good tight-scoring script should produce 10-40 score-5 papers from 140+ unique D-14 results.
 - **Write Python scripts to disk, not inline heredocs.** On setups where `python3 << 'PYEOF'` triggers pending approval, write the script to a `.py` file with `write_file`, then execute with `terminal`.
 - **Recency boost can over-inflate scores.** Adding +1 to ALL papers published in the last 3 days pushes marginally-relevant papers to score 5. Only apply recency boost to papers that already scored ≥4 on content relevance.
-- **Semantic Scholar rate limit: 1 req/s.** Batch requests (use `|` pipe for multi-ID lookups). With an API key, 100 req/s.
+- **Semantic Scholar rate limit: 1 req/s for individual lookups, but the batch endpoint (`/paper/batch`) has tighter undocumented limits.** On 2026-06-13, 3 batch calls (10 IDs each) with 1.1s sleep between them triggered a 429 response. The batch endpoint appears to count each ID in the batch toward the rate limit, or has a lower per-second cap than individual lookups. **Recommendation:** either (a) use an API key for 100 req/s, (b) stagger batch calls with 3s+ between them, or (c) accept that brand-new pre-prints won't have Semantic Scholar data yet and rely on the fallback weight (0.7). The fallback is often the pragmatic choice for the daily cron — brand-new papers rarely have citations.
 - **HuggingFace Daily Papers are TODAY ONLY.** The API returns the current day's curated papers. There's no date-range query. Check the `publishedDate` field — if it's stale (>24h), skip.
 - **Papers With Code coverage is incomplete.** Many papers don't have linked implementations. That's normal — implementation multiplier = 1.0 in that case.
 - **Paper dates are UTC.** Convert to UK time for the D-14 window.
@@ -531,3 +624,8 @@ If the run finds nothing actionable (0 papers scoring ≥2.0): deliver [SILENT].
 - **Quality weight can demote papers.** A paper scoring 5 on relevance with 0 citations drops to 2.5. This is intentional — it prevents recommending vapourware. Trust the methodology.
 - **Source metadata conflicts.** If arXiv says one thing and Semantic Scholar says another, prefer Semantic Scholar (it has editorial review).
 - **Don't double-count sources.** A paper that appears on both arXiv and HF Daily is ONE paper, not two. Deduplicate by arXiv ID.
+- **Script implementation reference:** See `references/script-implementation-notes.md` for the working fetch script pattern, HF Daily dual-format parsing, Semantic Scholar rate-limit workaround, Firecrawl credit fallback strategy, and arXiv HTTPS + URL encoding fix (all validated 2026-06-13 through 2026-06-14).
+- **Pre-processing script URL encoding:** The `research_paper_preprocess.py` script MUST use `https://` (not `http://`) for arXiv API calls, and MUST URL-encode query strings with `urllib.parse.quote()`. Unencoded keyword queries like `all:"coding agent"` will crash with `http.client.InvalidURL`. This was fixed 2026-06-14 — if the script is ever edited or regenerated, verify both `https://` and `quote()` are present.
+- **Pre-processing script integration:** See `references/pre-processing-script-integration.md` for the Phase 3 Python pre-processor that offloads API fetching + dedup + scoring from the LLM. Integrated 14/06/26.
+- **Provenance lint script:** The `scripts/provenance-lint.py` script determines paper-derivation by arXiv ID pattern match. Some non-paper concepts (operational notes from vulnerability reports, platform documentation) may be flagged as candidates — add a `sources:` field to document their origin and suppress the flag rather than ignoring the linter.
+- **Brain page write access:** The cron agent writes to `~/brain/*.md` using file/toolset write operations. If `gbrain_put` becomes available as a tool call in the cron's toolset, prefer it over file writes for the additional path-traversal guard it provides. Until then, direct file writes are safe because the brain is markdown-native as of Phase 2.5.
