@@ -1,4 +1,4 @@
-"""Blog stream configuration — the single source of per-stream truth.
+"""Blog stream configuration - the single source of per-stream truth.
 
 Three streams map to the VERIFIED SahilBlog ingestion contract:
   - ai:      tier=pm + an AI-recognised tag (surfaced on /ai). source=research-paper.

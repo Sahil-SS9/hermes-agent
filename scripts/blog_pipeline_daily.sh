@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SahilBlog content pipeline — daily cron wrapper (no-agent).
+# SahilBlog content pipeline - daily cron wrapper (no-agent).
 #
 # Runs the blog pipeline for all configured streams (ai, pm, builder),
 # staging approved:false draft MDX posts into ~/repos/SahilBlog. The

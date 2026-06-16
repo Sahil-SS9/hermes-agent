@@ -1,4 +1,4 @@
-"""Blog publisher — git stage/commit (draft) + approval flip + build + push.
+"""Blog publisher - git stage/commit (draft) + approval flip + build + push.
 
 Draft posts are written with approved:false (hidden). Publishing = flip to
 approved:true in the MDX frontmatter, pnpm build (verify exit 0), commit,

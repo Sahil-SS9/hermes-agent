@@ -1,4 +1,4 @@
-"""Blog generator — stream-aware long-form draft generation.
+"""Blog generator - stream-aware long-form draft generation.
 
 Reuses article_generator building blocks (the LLM call chain, title extraction,
 signal enrichment, KB retrieval) but injects the stream voice, word_target,

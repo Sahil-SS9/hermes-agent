@@ -1,4 +1,4 @@
-"""Blog pipeline orchestrator — run_stream / run_all + CLI.
+"""Blog pipeline orchestrator - run_stream / run_all + CLI.
 
 Order of operations (mirrors article_pipeline):
   1. blog_router.choose(stream)  -> plan or None (skip)
@@ -9,10 +9,10 @@ Order of operations (mirrors article_pipeline):
   6. blog_router.record(stream, topic_id, title)  -> (on success only)
 
 Status values:
-  - "skipped_disabled" — BLOG_ENABLED is False
-  - "skipped_router"   — router returned None
-  - "skipped_generator" — generator returned None (LLM dead or gate fail)
-  - "ok"               — draft staged + topic recorded
+  - "skipped_disabled" - BLOG_ENABLED is False
+  - "skipped_router"   - router returned None
+  - "skipped_generator" - generator returned None (LLM dead or gate fail)
+  - "ok"               - draft staged + topic recorded
 """
 from __future__ import annotations
 import argparse

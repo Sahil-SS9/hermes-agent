@@ -1,4 +1,4 @@
-"""Blog assembler — emit MDX with valid frontmatter into SahilBlog.
+"""Blog assembler - emit MDX with valid frontmatter into SahilBlog.
 
 Writes approved:false draft posts to SAHILBLOG_REPO/src/content/blog/<slug>.mdx
 with frontmatter matching the VERIFIED content.config.ts schema. Images are

@@ -1,4 +1,4 @@
-"""Blog illustrator — hero + per-section images via imagery_transplant.
+"""Blog illustrator - hero + per-section images via imagery_transplant.
 
 Reuses imagery_transplant.generate (the validated nano-banana-pro/edit
 dual-anchor transplant). One hero image + up to BLOG_MAX_SECTION_IMAGES

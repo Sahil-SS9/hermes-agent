@@ -1,4 +1,4 @@
-"""Blog topic router — per-stream topic selection + cross-run dedup.
+"""Blog topic router - per-stream topic selection + cross-run dedup.
 
 Mirrors article_pipeline._recent_article_topic_ids / _record_article_topics
 but keys under brand=f"blog_{stream}" so each stream has its own dedup window.
