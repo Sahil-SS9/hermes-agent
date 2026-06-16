@@ -5,6 +5,7 @@ IMPORTANT: Every API call costs credits. Image generation is ~£0.005 each.
 Video generation is ~£0.16-0.40 per 5-second clip. Use sparingly.
 """
 import _no_proxy  # noqa: F401  (strips dead Privoxy from env on import)
+import base64
 import os
 import time
 import uuid
@@ -205,6 +206,93 @@ def generate_image(
                 time.sleep(wait)
 
     print(f"FAL {model}: all {attempts} attempts failed")
+    return None
+
+
+def upload_file(path, content_type: str = "image/jpeg") -> Optional[str]:
+    """Upload a local file to FAL storage and return a public URL.
+
+    Used to hand reference anchors to the edit endpoint. Falls back to a base64
+    data URI when the storage API is unavailable, so anchoring still works.
+    """
+    p = Path(path)
+    if not FAL_KEY or requests is None or not p.exists():
+        return None
+    try:
+        init = requests.post(
+            "https://rest.alpha.fal.ai/storage/upload/initiate",
+            headers={"Authorization": f"Key {FAL_KEY}", "Content-Type": "application/json"},
+            json={"content_type": content_type, "file_name": f"{uuid.uuid4().hex}{p.suffix}"},
+            timeout=30,
+        )
+        if init.status_code == 200:
+            d = init.json()
+            put = requests.put(d["upload_url"], data=p.read_bytes(),
+                               headers={"Content-Type": content_type}, timeout=90)
+            if put.status_code in (200, 201):
+                return d["file_url"]
+    except Exception as e:  # noqa: BLE001 (degrade to data URI)
+        print(f"FAL upload error: {e}")
+    suffix = p.suffix.lower().lstrip(".")
+    mime = {"png": "image/png", "webp": "image/webp"}.get(suffix, "image/jpeg")
+    return f"data:{mime};base64," + base64.b64encode(p.read_bytes()).decode()
+
+
+def generate_image_edit(
+    prompt: str,
+    image_urls: list,
+    model: str = "fal-ai/nano-banana-pro/edit",
+    aspect: str = "4:5",
+    resolution: str = "2K",
+    output_dir: str = "/home/kensei/repos/KenseiAgent/content_engine/output",
+    filename: Optional[str] = None,
+    attempts: int = 2,
+) -> Optional[str]:
+    """Reference-anchored (img2img/edit) generation via the nano-banana-pro/edit
+    endpoint. ``image_urls`` are anchor URLs (or data URIs). Sync first, queue
+    fallback. Returns a local PNG path or None.
+    """
+    if not FAL_KEY or requests is None:
+        print("FAL_KEY not set or requests unavailable. Skipping edit generation.")
+        return None
+    payload = {"prompt": prompt, "image_urls": list(image_urls),
+               "aspect_ratio": aspect, "num_images": 1, "resolution": resolution}
+    headers = _headers()
+    for attempt in range(1, attempts + 1):
+        try:
+            r = requests.post(f"https://fal.run/{model}", json=payload,
+                              headers=headers, timeout=240)
+            if r.status_code == 200:
+                imgs = _images_from(r.json())
+                if imgs:
+                    url = imgs[0].get("url") if isinstance(imgs[0], dict) else imgs[0]
+                    return _download(url, output_dir, "edit", filename) if url else None
+                print(f"FAL edit: no images (keys {list(r.json().keys())[:8]})")
+                return None
+            if r.status_code not in (202, 429):
+                print(f"FAL edit failed: {r.status_code} {r.text[:160]}")
+            qr = requests.post(f"https://queue.fal.run/{model}", json=payload,
+                              headers=headers, timeout=30)
+            if qr.status_code != 200:
+                raise RuntimeError(f"queue submit {qr.status_code}")
+            rid = qr.json().get("request_id")
+            if not rid:
+                raise RuntimeError("no request_id")
+            result = _poll_queue_result(model, rid, timeout=300)
+            if not result:
+                raise RuntimeError("poll returned nothing")
+            imgs = _images_from(result)
+            if not imgs:
+                print("FAL edit queue: no images")
+                return None
+            url = imgs[0].get("url") if isinstance(imgs[0], dict) else imgs[0]
+            return _download(url, output_dir, "edit", filename) if url else None
+        except Exception as e:  # noqa: BLE001 (retry transient failures)
+            wait = 2 ** attempt
+            print(f"FAL edit attempt {attempt}/{attempts} error: {e}; retry in {wait}s")
+            if attempt < attempts:
+                time.sleep(wait)
+    print("FAL edit: all attempts failed")
     return None
 
 

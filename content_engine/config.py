@@ -275,3 +275,20 @@ ARTICLE_MAX_IMAGES = int(os.getenv("ARTICLE_MAX_IMAGES", "6"))
 # Cross-run dedup: a signal that became an article is off-limits for this many
 # days so consecutive daily cron runs cannot re-pick the same top signal.
 ARTICLE_TOPIC_RECENCY_DAYS = int(os.getenv("ARTICLE_TOPIC_RECENCY_DAYS", "30"))
+
+# ── Reference-anchored imagery (personal brands) ───────────────────────
+# Validated 2026-06-16: nano-banana-pro/edit dual-anchor transplant (baoyu
+# layout + style/palette exemplar) beats text-to-image decisively. DNA is the
+# CRAFT thread (texture/type/density), not a fixed palette; the selector rotates
+# a palette system for variety. See brand_imagery_standard.md.
+IMAGERY_ANCHORS_DIR = os.path.expanduser(
+    os.getenv("CONTENT_IMAGERY_ANCHORS", "~/content-references"))
+# Brands routed through the transplant path (others keep the legacy path).
+IMAGERY_TRANSPLANT_BRANDS = tuple(
+    b.strip() for b in os.getenv(
+        "CONTENT_TRANSPLANT_BRANDS", "sahil_twitter,sahil_linkedin").split(",")
+    if b.strip())
+IMAGERY_EDIT_MODEL = os.getenv("CONTENT_EDIT_MODEL", "fal-ai/nano-banana-pro/edit").strip()
+IMAGERY_EDIT_COST_GBP = float(os.getenv("CONTENT_EDIT_COST_GBP", "0.12"))
+# How many recent (palette|layout) picks to avoid re-using, per brand.
+IMAGERY_ROTATION_MEMORY = int(os.getenv("CONTENT_IMAGERY_ROTATION_MEMORY", "6"))

@@ -158,6 +158,22 @@ def generate_post_image(draft, model=None, output_dir=None, scene_prompt=None):
     text, regenerate (reseed -> nano-banana) on failure within budget. Returns a
     publish-ready PNG path with text already in the artwork (no overlay)."""
     import os
+
+    # Personal brands use the reference-anchored transplant path for
+    # infographic-family content (validated 2026-06-16, brand_imagery_standard.md).
+    # Falls through to the legacy chain for scene/hero, explicit-model calls, or
+    # on any failure.
+    try:
+        from config import IMAGERY_TRANSPLANT_BRANDS
+        if (draft.get("brand") in IMAGERY_TRANSPLANT_BRANDS
+                and not scene_prompt and not model):
+            import imagery_transplant
+            _p = imagery_transplant.generate(draft, draft.get("brand"), out_dir=output_dir)
+            if _p and os.path.exists(_p):
+                return _p
+    except Exception as _exc:  # noqa: BLE001 (never let the new path break generation)
+        print(f"[draft_media] transplant path error: {_exc}; using legacy")
+
     import budget
     from fal_client import MODEL_COST_GBP
     from prompt_engine import build_image_prompt
