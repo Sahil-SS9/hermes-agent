@@ -11,10 +11,34 @@ Key changes in v2.1:
 
 import json
 import random
+import re
 import sys
 import uuid
 from datetime import datetime, timedelta
 from typing import List, Dict, Any
+
+# Strip git/commit artefacts so a raw commit subject never becomes a post topic
+# or title (e.g. "feat(content): non-infographic scene transplant" leaking in).
+_COMMIT_PREFIX = re.compile(
+    r"^(?:feat|fix|chore|docs|refactor|style|test|perf|build|ci|revert|merge|wip|hotfix)"
+    r"(?:\([^)]*\))?!?:\s*", re.I)
+_TRAILER = re.compile(r"\s*(?:Co-Authored-By:|Signed-off-by:).*$", re.I | re.S)
+
+
+def _clean_topic_summary(text: str) -> str:
+    """Turn a raw signal summary (often a git commit subject) into clean topic
+    text: drop conventional-commit prefixes, sign-off trailers, merge noise.
+    Returns "" for pure git noise so the caller can fall back to the pillar."""
+    s = (text or "").strip()
+    s = _TRAILER.sub("", s).strip()
+    for _ in range(2):  # handle a doubled prefix, e.g. "feat: fix: ..."
+        stripped = _COMMIT_PREFIX.sub("", s).strip()
+        if stripped == s:
+            break
+        s = stripped
+    if re.match(r"^merge\b", s, re.I):  # bare merge commits carry no topic
+        return ""
+    return s
 
 try:
     import requests
@@ -295,7 +319,7 @@ def _signal_to_topic(signal: dict, platform: str) -> Dict[str, Any]:
     if signal_type == "github_push":
         topic = f"Just pushed {variables['repo_name']}"
     elif signal_type == "hermes_pr":
-        topic = f"Submitted: {variables['pr_title']}"
+        topic = f"Submitted: {_clean_topic_summary(variables['pr_title']) or variables['pr_title']}"
     elif signal_type == "hermes_skill":
         topic = f"New skill: {variables['skill_name']}"
     elif signal_type == "research_tool":
@@ -368,6 +392,7 @@ def get_topics(brand: str, count: int = 6, skip_used: bool = True) -> List[Dict]
                            or signal.get("variables", {}).get("summary", "")
                            or signal.get("variables", {}).get("repo_name", "")
                            or signal.get("variables", {}).get("title", ""))
+                summary = _clean_topic_summary(summary)
                 topic_text = f"{pillar}: {summary}" if summary else pillar
                 try:
                     context = context_enrich.enrich(signal)

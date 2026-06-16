@@ -371,21 +371,31 @@ _SELF_CALL = False
 When False (cron mode), the cron agent handles generation via its own prompt."""
 
 
-# Built-in free-tier fallback chain. These run when the env-configured endpoint
-# is dead (quota/promo-ended) so the pipeline NEVER silently reverts to the
-# frozen static templates without trying a working free model first. Verified
-# 2026-06-15: mimo-v2.5-free @ zen/v1 returns 200; qwen3.7-plus @ zen/go/v1 was
-# quota-dead, which is what had collapsed all output to canned strings.
+# Canonical generation chain (verified live 2026-06-17, both return 200):
+#   1. OpenCode Zen Go — deepseek-v4-flash: cheap/mid tier, fast, strong prose.
+#   2. Ollama-Cloud — gpt-oss:120b: different model family for true redundancy.
+# These run after any CONTENT_LLM_* env override so the pipeline NEVER collapses
+# to frozen canned templates while a healthy provider exists. Each entry names its
+# provider so the right API key is attached (opencode vs ollama).
 _FREE_FALLBACK_CHAIN = [
-    {"base": "https://opencode.ai/zen/v1", "model": "mimo-v2.5-free"},
+    {"base": "https://opencode.ai/zen/go/v1", "model": "deepseek-v4-flash", "provider": "opencode"},
+    {"base": "https://ollama.com/v1", "model": "gpt-oss:120b", "provider": "ollama"},
 ]
 
 
 def _opencode_key() -> str:
     """Bearer key shared across opencode zen/go endpoints."""
-    return (os.getenv("CONTENT_LLM_API_KEY", "")
+    return (os.getenv("OPENCODE_GO_API_KEY", "")
+            or os.getenv("CONTENT_LLM_API_KEY", "")
             or os.getenv("OPENCODE_API_KEY", "")
             or os.getenv("OPENCODE_ZEN_API_KEY", "")).strip()
+
+
+def _key_for(provider: str) -> str:
+    """Resolve the bearer key for a chain entry's provider."""
+    if provider == "ollama":
+        return os.getenv("OLLAMA_API_KEY", "").strip()
+    return _opencode_key()
 
 
 def _llm_configs() -> list[dict]:
@@ -396,20 +406,21 @@ def _llm_configs() -> list[dict]:
     attempted in turn until one returns usable text, so a single quota-exhausted
     provider degrades to the next free provider instead of to canned templates.
     """
-    key = _opencode_key()
     configs: list[dict] = []
     seen: set = set()
 
+    # Optional operator override (tried first when set). Uses the opencode key.
     base = os.getenv("CONTENT_LLM_BASE_URL", "").strip().rstrip("/")
     model = os.getenv("CONTENT_LLM_MODEL", "").strip()
     if base and model:
-        configs.append({"base": base, "model": model, "key": key})
+        configs.append({"base": base, "model": model, "key": _opencode_key()})
         seen.add((base, model))
 
     for fb in _FREE_FALLBACK_CHAIN:
         sig = (fb["base"], fb["model"])
         if sig not in seen:
-            configs.append({**fb, "key": key})
+            configs.append({"base": fb["base"], "model": fb["model"],
+                            "key": _key_for(fb.get("provider", "opencode"))})
             seen.add(sig)
 
     return configs
