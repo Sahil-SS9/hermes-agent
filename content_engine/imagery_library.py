@@ -60,7 +60,9 @@ PALETTES: dict[str, dict] = {
     },
 }
 
-# content_router type -> candidate baoyu layout stems (the dense, designed shapes)
+# content_router type -> the infographic family gate (which types get a transplant
+# at all). Layout CHOICE within these is decided by match_layout (semantic), not by
+# picking from this broad pool — see below.
 LAYOUT_MAP: dict[str, list[str]] = {
     "comparison": ["comparison-table", "scale-balance"],
     "flowchart": ["funnel", "journey-path", "bridge", "circular-flow"],
@@ -69,7 +71,40 @@ LAYOUT_MAP: dict[str, list[str]] = {
                   "fishbone", "tree-hierarchy"],
     "infographic": ["pyramid", "iceberg", "feature-list", "layers-stack", "grid-cards"],
 }
-_DEFAULT_LAYOUTS = LAYOUT_MAP["infographic"]
+
+# Semantic layout matching. A specific layout carries MEANING (priority-quadrants
+# = Eisenhower 2x2, venn = overlap, fishbone = cause analysis, timeline = sequence)
+# and must only be used when the content actually has that shape — otherwise the
+# template distorts the topic. Each entry: (cue tokens, layouts to allow). Order
+# matters: the first matching cue group wins.
+_CUE_LAYOUTS: list[tuple[tuple[str, ...], list[str]]] = [
+    (("quadrant", "matrix", "2x2", "2 x 2", "urgent", "prioritis", "prioritiz",
+      "eisenhower"), ["priority-quadrants"]),
+    (("venn", "overlap", "intersection", "in common", "shared between",
+      "where they meet"), ["venn", "nested-circles"]),
+    (("root cause", "why does", "causes of", "fishbone", "contributing factor"),
+     ["fishbone"]),
+    (("timeline", "history of", "roadmap", "evolution", "over time", "milestones"),
+     ["timeline-horizontal", "journey-path"]),
+    ((" vs ", " vs.", "versus", "compared to"), ["comparison-table", "scale-balance"]),
+    (("pros and cons", "pros/cons", "trade-off", "tradeoff", "weigh", "for and against"),
+     ["scale-balance"]),
+    (("do and don", "do/don", "do's and", "dos and don"), ["do-dont"]),
+    (("level", "tier", "maturity", " stack", "hierarchy", "ladder", "pyramid of"),
+     ["pyramid", "layers-stack", "tree-hierarchy"]),
+    (("step", "steps", "process", "pipeline", "stages", "workflow", "funnel",
+      "how i ", "how to"), ["funnel", "journey-path"]),
+    (("hidden", "what you see", "beneath the surface", "iceberg", "tip of"),
+     ["iceberg"]),
+    (("org chart", "reporting line", "tree of", "taxonomy", "breakdown of"),
+     ["tree-hierarchy"]),
+    (("mind map", "map of", "ecosystem of", "landscape of", "branches"),
+     ["mind-map", "nested-circles"]),
+]
+# Safe, semantically-neutral layouts when no specific cue fires. Deliberately
+# EXCLUDES quadrants/venn/fishbone/timeline so they never appear uncued.
+_GENERAL_LAYOUTS = ["feature-list", "grid-cards", "pyramid", "iceberg", "layers-stack"]
+_DEFAULT_LAYOUTS = _GENERAL_LAYOUTS
 
 
 def _layout_path(stem: str) -> Path:
@@ -112,6 +147,24 @@ def _pick(options: list[str], recent: list[str], rng: random.Random) -> str:
     return min(options, key=lambda o: -recent[::-1].index(o) if o in recent else 0)
 
 
+def match_layout(draft: dict) -> list[str]:
+    """Return semantically-valid layout stems for the draft, most-specific first.
+
+    A specific layout only fires when its meaning is cued in the title/body; this
+    prevents e.g. an Eisenhower priority-quadrants template being slapped on a
+    topic that is not a 2x2. Falls back to neutral general layouts. Results are
+    filtered to those whose anchor file exists.
+    """
+    text = ((draft.get("title") or "") + " " + (draft.get("body_text") or "")
+            + " " + (draft.get("topic") or "")).lower()
+    for cues, layouts in _CUE_LAYOUTS:
+        if any(c in text for c in cues):
+            hit = _existing(layouts)
+            if hit:
+                return hit
+    return _existing(_GENERAL_LAYOUTS)
+
+
 def is_transplant_type(ctype: str) -> bool:
     """Transplant covers the infographic family. Scene/hero fall back elsewhere."""
     return ctype in LAYOUT_MAP
@@ -126,7 +179,9 @@ def select_recipe(draft: dict, brand: str, ctype: str | None = None,
     ctype = ctype or content_type_for(draft)
     if not is_transplant_type(ctype):
         return None
-    layouts = _existing(LAYOUT_MAP.get(ctype, _DEFAULT_LAYOUTS)) or _existing(_DEFAULT_LAYOUTS)
+    # Layout is chosen by semantic cue, not by the broad ctype pool, so a
+    # meaning-bearing layout never misrepresents the content.
+    layouts = match_layout(draft) or _existing(_DEFAULT_LAYOUTS)
     palettes = _palettes_for(brand)
     if not layouts or not palettes:
         return None

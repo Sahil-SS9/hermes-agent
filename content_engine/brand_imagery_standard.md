@@ -54,6 +54,10 @@ Demo tools: tools/bakeoff*.py, validate_standard.py, transplant_demo.py, palette
 
 ## 1. Visual DNA (constant across both brands, every lane)
 
+> NOTE: the single fixed palette below is SUPERSEDED by the VALIDATED MODEL at
+> the top — DNA is the craft thread; colour is a rotated palette system. The
+> essence/typography/texture/composition guidance here still holds.
+
 **Essence:** "cyber-classical research lab" — myth + cyberpunk + retro-tech +
 analog print. Intellectual, gritty, underground, scroll-stopping. NOT corporate,
 NOT clean SaaS, NOT formal.

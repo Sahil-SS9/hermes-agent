@@ -34,7 +34,7 @@ def test_select_recipe_infographic(monkeypatch, tmp_path):
     r = lib.select_recipe(draft, "sahil_twitter", seed=1)
     if r is None:
         pytest.skip("baoyu anchors not present on this box")
-    assert r["layout"] in lib.LAYOUT_MAP["infographic"]
+    assert r["layout"] and r["layout_path"].exists()
     assert r["palette"] in lib.PALETTES
     assert "sahil_twitter" in lib.PALETTES[r["palette"]]["brands"]
     assert r["layout_path"].exists() and r["style_path"].exists()
@@ -49,6 +49,44 @@ def test_select_recipe_linkedin_excludes_twitter_only_palettes(monkeypatch, tmp_
         if r is None:
             pytest.skip("baoyu anchors not present")
         assert r["palette"] not in ("acid_duotone", "synthwave")
+
+
+def _has_anchors():
+    return bool(lib._existing(lib._GENERAL_LAYOUTS))
+
+
+def test_match_layout_levels_not_quadrants():
+    """Regression: a 'levels/stack' topic must NOT get the Eisenhower quadrants
+    template (the bug that reframed 'Agentic Autonomy Stack' as Do-First/Delegate)."""
+    if not _has_anchors():
+        import pytest; pytest.skip("anchors not present")
+    got = lib.match_layout({"title": "5 Levels of Agent Autonomy", "body_text": "tiers"})
+    assert "priority-quadrants" not in got
+    assert any(x in got for x in ("pyramid", "layers-stack", "tree-hierarchy"))
+
+
+def test_match_layout_matrix_uses_quadrants():
+    if not _has_anchors():
+        import pytest; pytest.skip("anchors not present")
+    got = lib.match_layout({"title": "An urgent vs important prioritisation matrix",
+                            "body_text": ""})
+    if lib._layout_path("priority-quadrants").exists():
+        assert got == ["priority-quadrants"]
+
+
+def test_match_layout_generic_is_semantically_neutral():
+    if not _has_anchors():
+        import pytest; pytest.skip("anchors not present")
+    got = lib.match_layout({"title": "Tips for shipping faster", "body_text": "a. b. c."})
+    assert all(x not in got for x in
+               ("priority-quadrants", "venn", "fishbone", "timeline-horizontal"))
+
+
+def test_match_layout_comparison():
+    if not _has_anchors():
+        import pytest; pytest.skip("anchors not present")
+    got = lib.match_layout({"title": "Codex vs Claude for agent loops", "body_text": ""})
+    assert any(x in got for x in ("comparison-table", "scale-balance"))
 
 
 def test_select_recipe_records_rotation(monkeypatch, tmp_path):
