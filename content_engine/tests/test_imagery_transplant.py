@@ -8,6 +8,63 @@ def test_build_edit_prompt_contains_parts():
     assert "FIRST" in p and "SECOND" in p  # preserve-then-add structure
 
 
+def test_build_scene_prompt_textless_and_subject():
+    p = it.build_scene_prompt("My Title", "a transformer's attention as constellations",
+                              "an abstract conceptual illustration", "navy bg", "none")
+    assert "constellations" in p and "NO TEXT" in p.upper()
+    p2 = it.build_scene_prompt("My Title", "x", "a mythic hero", "navy", "title_only")
+    assert "My Title" in p2
+
+
+def test_generate_scene_happy_path(monkeypatch, tmp_path):
+    anchor = tmp_path / "abstract_34.jpeg"; anchor.write_bytes(b"x")
+    recipe = {"kind": "scene", "palette": "cyber_neon", "archetype": "abstract",
+              "anchor_path": anchor, "hex": "navy", "light": False, "aspect": "4:5",
+              "desc": "an abstract illustration", "text_rule": "none"}
+    monkeypatch.setattr(it.lib, "select_recipe", lambda *a, **k: recipe)
+    monkeypatch.setattr(it.budget, "can_spend", lambda c: True)
+    rec = []
+    monkeypatch.setattr(it.budget, "record", lambda c, label="": rec.append(label))
+    monkeypatch.setattr(it.fal_client, "upload_file", lambda p, **k: f"http://u/{p}")
+    raw = tmp_path / "raw.png"; raw.write_bytes(b"x")
+    captured = {}
+    def fake_edit(prompt, urls, **k):
+        captured["urls"] = urls; return str(raw)
+    monkeypatch.setattr(it.fal_client, "generate_image_edit", fake_edit)
+    monkeypatch.setattr(it.pp, "finish_file", lambda r, o, light=False: o)
+    out = it.generate({"title": "t", "id": "s1", "body_text": "b"}, "sahil_twitter", out_dir=tmp_path)
+    assert out and out.endswith("transplant_sahil_twitter_s1.png")
+    assert len(captured["urls"]) == 1  # scene = single anchor
+    assert rec and "abstract" in rec[0]
+
+
+def test_model_for_tiers():
+    assert it._model_for({"kind": "infographic"})[0] == it.IMAGERY_EDIT_MODEL
+    assert it._model_for({"kind": "scene", "ctype": "scene"})[0] == it.IMAGERY_SCENE_MODEL
+    assert it._model_for({"kind": "scene", "ctype": "hero"})[0] == it.IMAGERY_HERO_MODEL
+    # scene default is cheaper than infographic/hero
+    assert it._model_for({"kind": "scene", "ctype": "scene"})[1] < it._model_for({"kind": "infographic"})[1]
+
+
+def test_generate_scene_uses_cheaper_model(monkeypatch, tmp_path):
+    anchor = tmp_path / "a.jpeg"; anchor.write_bytes(b"x")
+    recipe = {"kind": "scene", "palette": "cyber_neon", "archetype": "abstract",
+              "anchor_path": anchor, "hex": "navy", "light": False, "aspect": "4:5",
+              "desc": "abstract", "text_rule": "none", "ctype": "scene"}
+    monkeypatch.setattr(it.lib, "select_recipe", lambda *a, **k: recipe)
+    monkeypatch.setattr(it.budget, "can_spend", lambda c: True)
+    monkeypatch.setattr(it.budget, "record", lambda c, label="": None)
+    monkeypatch.setattr(it.fal_client, "upload_file", lambda p, **k: "http://u")
+    raw = tmp_path / "raw.png"; raw.write_bytes(b"x")
+    seen = {}
+    def fake_edit(prompt, urls, model=None, **k):
+        seen["model"] = model; return str(raw)
+    monkeypatch.setattr(it.fal_client, "generate_image_edit", fake_edit)
+    monkeypatch.setattr(it.pp, "finish_file", lambda r, o, light=False: o)
+    it.generate({"title": "t", "id": "s1"}, "sahil_twitter", out_dir=tmp_path)
+    assert seen["model"] == it.IMAGERY_SCENE_MODEL  # non-pro for default scenes
+
+
 def test_generate_none_when_no_recipe(monkeypatch):
     monkeypatch.setattr(it.lib, "select_recipe", lambda *a, **k: None)
     assert it.generate({"brand": "sahil_twitter"}, "sahil_twitter") is None

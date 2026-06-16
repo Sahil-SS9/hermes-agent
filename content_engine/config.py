@@ -290,6 +290,13 @@ IMAGERY_TRANSPLANT_BRANDS = tuple(
     if b.strip())
 IMAGERY_EDIT_MODEL = os.getenv("CONTENT_EDIT_MODEL", "fal-ai/nano-banana-pro/edit").strip()
 IMAGERY_EDIT_COST_GBP = float(os.getenv("CONTENT_EDIT_COST_GBP", "0.12"))
+# Tiered scene models (validated 2026-06-16): infographics + HERO scenes need
+# nano-banana-pro (text/quality); default (non-hero) scenes use the ~3x cheaper
+# nano-banana non-pro at near-identical quality. qwen was too anchor-literal
+# (reproduced refs) and pollinations is textless-only — both rejected for scenes.
+IMAGERY_SCENE_MODEL = os.getenv("CONTENT_SCENE_MODEL", "fal-ai/nano-banana/edit").strip()
+IMAGERY_SCENE_COST_GBP = float(os.getenv("CONTENT_SCENE_COST_GBP", "0.039"))
+IMAGERY_HERO_MODEL = os.getenv("CONTENT_HERO_EDIT_MODEL", "fal-ai/nano-banana-pro/edit").strip()
 # How many recent (palette|layout) picks to avoid re-using, per brand.
 IMAGERY_ROTATION_MEMORY = int(os.getenv("CONTENT_IMAGERY_ROTATION_MEMORY", "6"))
 

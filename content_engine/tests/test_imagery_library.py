@@ -23,9 +23,18 @@ def test_palette_brand_gating_definition():
     assert "sahil_linkedin" in lib.PALETTES["warm_editorial"]["brands"]
 
 
-def test_select_recipe_scene_returns_none(monkeypatch, tmp_path):
+def test_select_recipe_scene_returns_scene_recipe(monkeypatch, tmp_path):
     monkeypatch.setattr(lib, "_ROTATION", tmp_path / "rot.json")
-    assert lib.select_recipe({"format": "scene", "title": "a calm dawn"}, "sahil_twitter") is None
+    r = lib.select_recipe({"format": "scene", "title": "a calm dawn"}, "sahil_twitter")
+    # Scene types now resolve to a scene recipe (or None if no scene anchors exist).
+    if r is not None:
+        assert r["kind"] == "scene"
+
+
+def test_select_recipe_unknown_type_returns_none(monkeypatch, tmp_path):
+    monkeypatch.setattr(lib, "_ROTATION", tmp_path / "rot.json")
+    # A type that is neither infographic-family nor scene-family.
+    assert lib.select_recipe({}, "sahil_twitter", ctype="bogus") is None
 
 
 def test_select_recipe_infographic(monkeypatch, tmp_path):
@@ -87,6 +96,37 @@ def test_match_layout_comparison():
         import pytest; pytest.skip("anchors not present")
     got = lib.match_layout({"title": "Codex vs Claude for agent loops", "body_text": ""})
     assert any(x in got for x in ("comparison-table", "scale-balance"))
+
+
+def _has_scenes():
+    return bool(lib._existing_scenes(list(lib.SCENE_ARCHETYPES)))
+
+
+def test_match_scene_philosophy_is_abstract():
+    if not _has_scenes():
+        import pytest; pytest.skip("scene anchors not present")
+    got = lib.match_scene({"title": "The ghost in the transformer", "body_text": "nature of meaning"})
+    assert any(a in got for a in ("abstract", "tarot"))
+
+
+def test_match_scene_default_no_figure_bias():
+    if not _has_scenes():
+        import pytest; pytest.skip("scene anchors not present")
+    got = lib.match_scene({"title": "A quiet note", "body_text": "no strong cue here"})
+    assert got and all(a in lib.SCENE_ARCHETYPES for a in got)
+
+
+def test_select_recipe_scene_kind(monkeypatch, tmp_path):
+    monkeypatch.setattr(lib, "_ROTATION", tmp_path / "rot.json")
+    draft = {"title": "The ghost in the transformer",
+             "body_text": "A meditation on what models actually understand."}
+    r = lib.select_recipe(draft, "sahil_twitter", seed=1)
+    if r is None:
+        import pytest; pytest.skip("scene anchors not present")
+    assert r["kind"] == "scene"
+    assert r["archetype"] in lib.SCENE_ARCHETYPES
+    assert r["anchor_path"].exists()
+    assert r["palette"] in lib.PALETTES
 
 
 def test_select_recipe_records_rotation(monkeypatch, tmp_path):
