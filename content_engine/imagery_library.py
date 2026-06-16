@@ -118,8 +118,10 @@ SCENE_ARCHETYPES: dict[str, dict] = {
                  "text": "title_only"},
     "mythic": {"desc": "a mythic, statuary hero composition — Greek-myth gravitas, marble "
                "and shadow, dramatic single subject", "text": "title_only"},
-    "atmospheric": {"desc": "a moody, cinematic atmospheric scene with depth, haze and "
-                    "volumetric light — environment over subject", "text": "none"},
+    "atmospheric": {"desc": "a cinematic, painterly concept-art scene built around ONE "
+                    "strong glowing focal element set in a moody atmospheric environment "
+                    "— dramatic volumetric light, haze, depth and rich detail. NOT a flat "
+                    "photograph, NOT an empty room", "text": "title_only"},
     "tarot": {"desc": "an ornate mystical tarot-card composition with a symbolic central "
               "figure or object and a decorative border", "text": "title_only"},
     "creature": {"desc": "a bold, iconic creature/mascot-style hero — playful, vivid, "
@@ -136,12 +138,9 @@ _SCENE_CUES: list[tuple[tuple[str, ...], list[str]]] = [
     (("launch", "shipped", "introducing", "announcing", "meet ", "v1", "now live"),
      ["creature", "mythic"]),
     (("story", "journey", "week ", "diary", "log", "how it went", "lessons", "retro",
-      "post-mortem", "postmortem"), ["figure"]),
+      "post-mortem", "postmortem"), ["figure", "atmospheric"]),
 ]
-# NOTE: 'atmospheric' is defined in SCENE_ARCHETYPES but PARKED — its validation
-# output read as a generic stock room, not concept-art. Re-enable once it has
-# stronger anchors/brief. Until then it is never selected.
-_DEFAULT_SCENE = ["abstract", "mythic"]
+_DEFAULT_SCENE = ["abstract", "mythic", "atmospheric"]
 _SCENE_TYPES = {"scene", "hero", "metaphor", "typography"}
 
 
