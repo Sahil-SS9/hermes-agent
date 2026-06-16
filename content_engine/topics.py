@@ -24,6 +24,23 @@ except ImportError:
 from config import FOOTBALL_API_BASE
 from database import get_recently_used_topics, log_topic_usage
 
+# ── Lazy-loaded educational components ──
+_EDU_ENRICH = None
+_EDU_KB = None
+
+def _load_edu():
+    global _EDU_ENRICH, _EDU_KB
+    if _EDU_ENRICH is not None:
+        return True
+    try:
+        import context_enrich as ce
+        import kb_retrieve as kb
+        _EDU_ENRICH = ce.enrich
+        _EDU_KB = kb.retrieve
+        return True
+    except ImportError:
+        return False
+
 # ── Stale tech reference gate ──
 STALE_TECH_REFS = [
     "GPT-4o", "gpt-4o", "ChatGPT 4o", "chatgpt 4o",
@@ -39,6 +56,28 @@ def has_stale_tech_reference(text: str) -> tuple[bool, str]:
         if ref in text:
             return True, ref
     return False, ""
+
+# Map signal types to educational pillars per brand
+TWITTER_EDU_SIGNAL_MAP = {
+    "github_push": "Agent Build Notes",
+    "hermes_pr": "Agent Build Notes",
+    "hermes_skill": "Agent Build Notes",
+    "harness_change": "Harness Tuning",
+    "research_tool": "Radar Finds",
+    "research_signal": "Paper Takes",
+    "gitradar_repo": "Radar Finds",
+    "architecture": "AI Patterns",
+}
+LINKEDIN_EDU_SIGNAL_MAP = {
+    "github_push": "AI Engineering Notes",
+    "hermes_pr": "Agentic Systems in Practice",
+    "hermes_skill": "Agentic Systems in Practice",
+    "harness_change": "AI Engineering Notes",
+    "research_tool": "Tooling Signals",
+    "research_signal": "Research to Practice",
+    "gitradar_repo": "Tooling Signals",
+    "architecture": "AI Engineering Notes",
+}
 
 # ── Activity collector (lazy loaded) ──
 _ACTIVITY_COLLECTOR = None
@@ -307,11 +346,52 @@ def get_topics(brand: str, count: int = 6, skip_used: bool = True) -> List[Dict]
 
         topics: List[Dict] = []
         used_ids: List[str] = []
+        brand_config = None
+        try:
+            from config import BRANDS
+            brand_config = BRANDS.get(brand, {})
+        except Exception:
+            pass
+        edu_mix = brand_config.get("educational_mix", 0.65) if brand_config else 0.65
+        edu_count = int(count * edu_mix) if signals else 0
+        edu_signal_map = TWITTER_EDU_SIGNAL_MAP if brand == "sahil_twitter" else LINKEDIN_EDU_SIGNAL_MAP
 
-        # Convert signals to topic objects (recency-gated)
-        for signal in signals[:count]:
+        # Convert educational signals first (enriched with context + KB)
+        edu_signals = signals[:edu_count]
+        if edu_signals and _load_edu():
+            import context_enrich
+            import kb_retrieve
+            for signal in edu_signals:
+                stype = signal.get("signal_type", "")
+                pillar = edu_signal_map.get(stype, "AI Patterns")
+                summary = (signal.get("summary")
+                           or signal.get("variables", {}).get("summary", "")
+                           or signal.get("variables", {}).get("repo_name", "")
+                           or signal.get("variables", {}).get("title", ""))
+                topic_text = f"{pillar}: {summary}" if summary else pillar
+                try:
+                    context = context_enrich.enrich(signal)
+                except Exception:
+                    context = ""
+                try:
+                    kb = kb_retrieve.retrieve(summary, limit=2)
+                except Exception:
+                    kb = []
+                topics.append({
+                    "id": str(uuid.uuid4())[:8],
+                    "pillar": pillar,
+                    "topic": topic_text,
+                    "educational": True,
+                    "context": context,
+                    "kb_snippets": kb,
+                })
+                used_ids.append(signal["signal_id"])
+
+        # Remaining signals use existing non-educational path
+        remaining_signals = signals[edu_count:count]
+        for signal in remaining_signals:
             topic = _signal_to_topic(signal, platform)
-            if topic:  # Skip empty (stale) signals
+            if topic:
                 topics.append(topic)
                 used_ids.append(signal["signal_id"])
 

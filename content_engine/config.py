@@ -107,15 +107,14 @@ BRANDS = {
         "description": "Senior PM / TPM, indie developer, build-in-public",
         "voice_skill": "sahil-twitter-voice",
         "content_pillars": [
-            "Build-in-Public",
-            "AI Tools & Stack",
-            "Sly Product Mentions",
-            "Football (MUFC)",
-            "Wry Observations",
+            "Agent Build Notes", "Harness Tuning", "Paper Takes", "Radar Finds", "AI Patterns",
+            "Build-in-Public", "Wry Observations", "Football (MUFC)",
         ],
+        "educational_pillars": ["Agent Build Notes","Harness Tuning","Paper Takes","Radar Finds","AI Patterns"],
+        "educational_mix": 0.65,
         "visual_strategy": "screenshot_repurposing",
         "post_mix": {"text_only": 0.6, "text_image": 0.3, "video": 0.1},
-        "posts_per_week": 10,
+        "posts_per_week": 28,
         "org_id": "2645662d-a479-4a6a-91ca-a50a7d29f607",
     },
     "sahil_linkedin": {
@@ -131,15 +130,14 @@ BRANDS = {
         "description": "Senior PM / TPM, indie developer, build-in-public",
         "voice_skill": "sahil-linkedin-voice",
         "content_pillars": [
-            "PM Thought Leadership",
-            "Indie Builder Journey",
-            "Enterprise AI Adoption",
-            "Leadership Insights",
-            "RAG Chatbot Case Studies",
+            "Agentic Systems in Practice", "AI Engineering Notes", "Research to Practice", "Tooling Signals",
+            "PM Thought Leadership", "Leadership Insights",
         ],
+        "educational_pillars": ["Agentic Systems in Practice","AI Engineering Notes","Research to Practice","Tooling Signals"],
+        "educational_mix": 0.65,
         "visual_strategy": "screenshot_repurposing",
         "post_mix": {"text_only": 0.7, "text_image": 0.3, "video": 0.0},
-        "posts_per_week": 5,
+        "posts_per_week": 17,
         "org_id": "2645662d-a479-4a6a-91ca-a50a7d29f607",
     },
     "coachos": {
@@ -262,3 +260,15 @@ BUDGET_ALLOCATION = {
     "text_generation": 0.0,
     "buffer": 8.0,
 }
+
+# ── X Articles long-form track (sub-project B, sahil_twitter only) ─────
+# Daily long-form X Article. Quality-gated, illustrated, paste-ready.
+# Defaults are starting points to tune in the live step; all keys env-overridable
+# so a V1 tuning run never needs a code change.
+ARTICLE_ENABLED = os.getenv("ARTICLE_ENABLED", "1").strip() not in ("0", "false", "")
+ARTICLE_DEEP_DIVE_THRESHOLD = int(os.getenv("ARTICLE_DEEP_DIVE_THRESHOLD", "7"))
+ARTICLE_DIGEST_MIN_SIGNALS = int(os.getenv("ARTICLE_DIGEST_MIN_SIGNALS", "4"))
+ARTICLE_MIN_WORDS = int(os.getenv("ARTICLE_MIN_WORDS", "900"))
+ARTICLE_IMG_DENSITY = os.getenv("ARTICLE_IMG_DENSITY", "per-section").strip()
+ARTICLE_DIGEST_WINDOW_DAYS = int(os.getenv("ARTICLE_DIGEST_WINDOW_DAYS", "14"))
+ARTICLE_MAX_IMAGES = int(os.getenv("ARTICLE_MAX_IMAGES", "6"))

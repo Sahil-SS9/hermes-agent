@@ -129,117 +129,72 @@ def _headline_from(draft: dict) -> str:
     return (body[:68].rsplit(" ", 1)[0] if len(body) > 68 else body) or (title or "")
 
 
-def generate_post_image(
-    draft: dict,
-    model: Optional[str] = None,
-    output_dir: Optional[str] = None,
-    scene_prompt: Optional[str] = None,
-) -> Optional[str]:
-    """Full branded pipeline: textless base -> brand treatment -> headline overlay.
+def _verify(path, expected):
+    """OCR gate. Two cases:
 
-    Returns the path to the finished, publish-ready PNG (or None).
-    ``scene_prompt`` overrides the auto-built base prompt (e.g. repurpose cron).
+    - expected is non-empty: every expected string must be present in the
+      OCR output (fuzzy match). Returns (ok, missing).
+    - expected is empty (SCENE/HERO): the image must be textless. If OCR
+      detects significant text, returns (False, ["<unexpected text>"]).
+
+    In both cases, ``ok=False`` triggers a regen with a different model.
     """
-    import postprocess
-    import text_overlay
-    from brand_style import for_brand
-    from prompt_templates import build_scene_prompt, negative_prompt
+    from text_integrity import verify_text, has_significant_text
+    if not expected:
+        # Textless type: reject if the model added text
+        if has_significant_text(path):
+            return False, ["<unexpected text in textless image>"]
+        return True, []
+    return verify_text(path, expected)
 
-    brand = (draft.get("brand") or "").lower()
-    platform = draft.get("platform") or "twitter"
-    draft_id = draft.get("id") or uuid.uuid4().hex[:8]
 
-    # Route: data/comparison/list posts become AI infographics (text rendered by
-    # the model, no overlay). Scene/hero posts stay illustrated. scene_prompt
-    # (legacy/repurpose) always takes the illustrated path.
-    if scene_prompt is None:
-        from content_router import is_infographic
+def _can_spend(cost):
+    import budget
+    return budget.can_spend(cost)
 
-        if is_infographic(draft):
-            import infographic_ai
-            from infographic_content import build_ig_fields
 
-            # Structure the flat draft text into layout-aware labels (left/right
-            # sides, do/don't, ordered points) so the infographic reads cleanly.
-            fields = build_ig_fields(draft)
-            content = {
-                "title": (draft.get("title") or draft.get("topic") or "").strip(),
-                "body": (draft.get("body_text") or "")[:300],
-                "labels": (draft.get("ig_labels") or fields["labels"]).strip(),
-            }
-            ig = infographic_ai.generate_infographic(
-                brand, content, draft_id=draft_id, platform=platform,
-                layout=draft.get("ig_layout") or fields["layout"],
-            )
-            if ig:
-                print(f"[draft_media] infographic image: {ig}")
-                return ig
-            print("[draft_media] infographic path failed; falling back to illustrated")
-
+def generate_post_image(draft, model=None, output_dir=None, scene_prompt=None):
+    """Build a baoyu-method prompt, generate via Seedream, OCR-verify the baked-in
+    text, regenerate (reseed -> nano-banana) on failure within budget. Returns a
+    publish-ready PNG path with text already in the artwork (no overlay)."""
+    import os
     import budget
     from fal_client import MODEL_COST_GBP
-    from model_config import HERO_COST_THRESHOLD_GBP, HERO_MODEL
+    from prompt_engine import build_image_prompt
 
-    # Track A art direction. An explicit scene_prompt (e.g. repurpose cron) wins;
-    # otherwise the prompt engine builds a rich per-post illustrated prompt from a
-    # single subject hook, replacing the old constant per-brand visual_descs.
-    if scene_prompt:
-        prompt, neg = scene_prompt, negative_prompt()
-        chosen = model or BASE_MODEL
-    else:
-        from prompt_engine import build_illustrated_prompt
-
-        subject = (draft.get("visual_description") or draft.get("title")
-                   or draft.get("topic") or (draft.get("body_text", "") or "")[:80]).strip()
-        prompt, neg, eng_model = build_illustrated_prompt(
-            brand, subject, draft_id=draft_id,
-            force_hero=bool(model and model == HERO_MODEL),
+    draft_id = draft.get("id") or os.urandom(4).hex()
+    prompt, aspect, model_key, expected = build_image_prompt(draft)
+    chain = [model or model_key, "seedream45", "nano_banana"]
+    seen, attempts = set(), []
+    for m in chain:
+        if m in seen:
+            continue
+        seen.add(m)
+        cost = MODEL_COST_GBP.get(m, 0.032)
+        if not _can_spend(cost):
+            print(f"[draft_media] budget cap; skip {m}")
+            continue
+        path = generate_draft_image(
+            prompt, brand=draft.get("brand", ""),
+            platform=draft.get("platform", ""), draft_id=draft_id,
+            model=m, negative_prompt="", aspect=aspect,
         )
-        chosen = model or eng_model
-
-    # Budget gate: a hero model only runs if the month's cap allows it; otherwise
-    # degrade to the cheap base. All successful paid gens are recorded.
-    cost = MODEL_COST_GBP.get(chosen, 0.02)
-    if cost > HERO_COST_THRESHOLD_GBP and not budget.can_spend(cost):
-        print(f"[draft_media] budget cap hit; {chosen} -> {BASE_MODEL}")
-        chosen = BASE_MODEL
-        cost = MODEL_COST_GBP.get(chosen, 0.02)
-
-    base = generate_draft_image(
-        prompt, brand=brand, platform=platform, draft_id=draft_id,
-        model=chosen, negative_prompt=neg,
-    )
-    if not base or not os.path.exists(base):
-        return None
-    # Persist the exact prompt fed to the model so the dashboard drawer can show
-    # what generated this image. Best-effort; never fail media gen over it.
-    try:
-        from database import update_draft_image_prompt
-        update_draft_image_prompt(draft_id, prompt)
-    except Exception as exc:  # noqa: BLE001
-        print(f"[draft_media] could not persist image prompt: {exc}")
-    if cost > 0:
-        budget.record(cost, label=f"{chosen}:{draft_id}")
-
-    try:
-        treated = postprocess.process_file(base, base.replace(".png", "_t.png"), brand)
-        headline = _headline_from(draft)
-        sub = draft.get("visual_sub", "") or ""
-        # Kicker gives the post a message anchor; highlight gives colour pop on
-        # the headline. Both optional; eyebrow falls back to the pillar label.
-        eyebrow = (draft.get("eyebrow") or (draft.get("pillar", "") or "").replace("_", " ")
-                   or draft.get("topic", "")).strip()
-        highlight = (draft.get("highlight") or "").strip()
-        final = text_overlay.compose(
-            treated, brand, headline, platform=platform,
-            badge=for_brand(brand).get("badge"), sub=sub,
-            eyebrow=eyebrow, highlight=highlight,
-        )
-        print(f"[draft_media] branded image: {final}")
-        return final
-    except Exception as exc:  # noqa: BLE001 (finishing must not lose the base)
-        print(f"[draft_media] finishing failed ({exc}); returning raw base")
-        return base
+        if not path or not os.path.exists(path):
+            continue
+        budget.record(cost, label=f"{m}:{draft_id}")
+        ok, missing = _verify(path, expected)
+        attempts.append((m, ok, missing))
+        if ok:
+            try:
+                from database import update_draft_image_prompt
+                update_draft_image_prompt(draft_id, prompt)
+            except Exception as exc:
+                print(f"[draft_media] prompt persist failed: {exc}")
+            print(f"[draft_media] image OK via {m}: {path}")
+            return path
+        print(f"[draft_media] {m} text mismatch {missing}; escalating")
+    print(f"[draft_media] all attempts failed text gate: {attempts}; returning last path")
+    return path if 'path' in locals() and path and os.path.exists(path) else None
 
 
 def generate_draft_video(

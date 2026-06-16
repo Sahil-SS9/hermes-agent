@@ -4,6 +4,7 @@ Supports both Hermes native image_gen and direct API for video.
 IMPORTANT: Every API call costs credits. Image generation is ~£0.005 each.
 Video generation is ~£0.16-0.40 per 5-second clip. Use sparingly.
 """
+import _no_proxy  # noqa: F401  (strips dead Privoxy from env on import)
 import os
 import time
 import uuid
@@ -25,6 +26,11 @@ IMAGE_MODELS = {
     "krea_large": "fal-ai/krea/v2/large/text-to-image",    # ~£0.03/img, max detail
     "flux_pro": "fal-ai/flux-2-pro",             # £0.024/img, quality
     "ideogram": "fal-ai/ideogram/v3",            # £0.024/img, typography
+    "qwen": "fal-ai/qwen-image",                  # ~£0.016/img, strong text (LLM-arch), cheapest text-capable
+    "recraft": "fal-ai/recraft/v3/text-to-image", # ~£0.032/img, #1 text/typography benchmark
+    "flux_ultra": "fal-ai/flux-pro/v1.1-ultra",            # ~£0.048/img, 2K/4MP high detail
+    "flux_kontext": "fal-ai/flux-pro/kontext/text-to-image", # ~£0.032/img
+    "qwen2_pro": "fal-ai/qwen-image-2/pro/text-to-image",  # ~£0.06/img, #1 AI-Arena text
     "seedream": "fal-ai/bytedance/seedream/v4/text-to-image",       # ~£0.024, strong text
     "seedream45": "fal-ai/bytedance/seedream/v4.5/text-to-image",   # ~£0.032, best text/value
     "nano_banana": "fal-ai/nano-banana-pro",     # £0.12/img, text+reasoning
@@ -35,7 +41,8 @@ IMAGE_MODELS = {
 MODEL_COST_GBP = {
     "z_image": 0.004, "flux_klein": 0.004, "krea_medium": 0.016,
     "krea_large": 0.024, "flux_pro": 0.024, "ideogram": 0.024,
-    "gpt_image_2": 0.04, "nano_banana": 0.12,
+    "gpt_image_2": 0.04, "nano_banana": 0.12, "qwen": 0.016, "recraft": 0.032,
+    "flux_ultra": 0.048, "flux_kontext": 0.032, "qwen2_pro": 0.06,
     "seedream": 0.024, "seedream45": 0.032,
 }
 

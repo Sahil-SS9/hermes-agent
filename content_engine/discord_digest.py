@@ -5,16 +5,19 @@ real content (not an HTML file of path strings). Uses the Discord REST API
 directly with ``DISCORD_BOT_TOKEN`` (the same bot the gateway already runs), so
 delivery is deterministic and independent of the agent's formatting.
 """
+from __future__ import annotations
 import os
 import time
 from collections import OrderedDict
+from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 from typing import List, Optional
 
 import requests
 
 DISCORD_API = "https://discord.com/api/v10"
-DEFAULT_CHANNEL = "1507448580649123900"
+DEFAULT_CHANNEL = os.getenv("DISCORD_CONTENT_CHANNEL_ID", "1507448580649123900")
 CONTENT_LIMIT = 1900  # Discord hard limit is 2000; leave headroom.
 
 # Stable brand display order for the digest.
@@ -23,6 +26,77 @@ BRAND_ORDER = [
 ]
 
 _TYPE_BADGE = {"text": "📝", "text+image": "🖼️", "text+video": "🎬", "video": "🎬"}
+
+
+# ── Article preview / delivery ──────────────────────────────────────
+
+@dataclass
+class ArticleBundle:
+    """Mirror of article_assembler.ArticleBundle (kept here to avoid an
+    import cycle when discord_digest is used standalone)."""
+    dir: Path
+    article_md: str
+    article_md_path: Path
+    image_paths: List[Path] = field(default_factory=list)
+    title: str = ""
+    lede: str = ""
+    mode: str = ""
+    pillar: str = ""
+
+
+def _section_headers(body_md: str) -> list[str]:
+    """Return the list of `## H2` headings from a markdown article body."""
+    out: list[str] = []
+    for line in body_md.splitlines():
+        if line.startswith("## "):
+            out.append(line[3:].strip())
+    return out
+
+
+def post_article(bundle, channel_id: str = DEFAULT_CHANNEL) -> Optional[str]:
+    """Post the article preview to Discord. Returns the message id of the
+    preview header (or None when the token is missing / delivery fails).
+    """
+    if not _token():
+        print("[discord_digest] DISCORD_BOT_TOKEN not set, cannot deliver article.")
+        return None
+
+    headers = _section_headers(bundle.article_md)
+    stamp = datetime.now().strftime("%d/%m/%y %H:%M")
+    lede = (bundle.lede or "").strip().replace("\n", " ")[:240]
+    preview = "\n".join([
+        f"📰 **Article Preview** · {stamp}",
+        f"**Title**: {bundle.title}",
+        f"**Mode**: {bundle.mode}  ·  Pillar: {bundle.pillar}",
+        f"**Bundle**: `{bundle.dir}`  ·  **Images**: {len(bundle.image_paths)}",
+        f"**Lede**: {lede}",
+        "",
+        "**Sections**:",
+        "\n".join(f"- {h}" for h in headers) or "(none)",
+    ])
+
+    target = channel_id
+    if _channel_type(channel_id) == 15:
+        thread_id = _create_forum_thread(
+            channel_id, f"Article Preview · {bundle.title[:80]}", preview,
+        )
+        if not thread_id:
+            print("[discord_digest] could not open forum thread for article.")
+            return None
+        target = thread_id
+    else:
+        _post(target, preview)
+
+    # Attach the hero image (first image, if any) to a follow-up message.
+    if bundle.image_paths:
+        hero = bundle.image_paths[0]
+        if Path(hero).exists():
+            _post(target, "Hero image:", file_path=str(hero))
+
+    # Send the lede paragraph as a follow-up so the preview card stays compact.
+    if lede:
+        _post(target, f"**Lede**: {lede}")
+    return target
 
 
 def _token() -> str:
