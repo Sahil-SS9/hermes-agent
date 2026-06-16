@@ -135,3 +135,61 @@ def test_write_generates_description(monkeypatch):
     draft = bg.write(plan, stream="builder")
     assert draft["description"]
     assert len(draft["description"]) <= 200
+
+
+def test_write_threads_retry_feedback_into_prompt(monkeypatch):
+    """When retry_feedback is set, it appears in the system prompt sent to the LLM."""
+    plan = {"topic_id": "t1", "title_hint": "t", "tags": [], "source": "manual",
+            "signals": [{"signal_id": "t1", "summary": "s"}]}
+    captured = []
+    def capture_llm(sys_prompt, usr_prompt):
+        captured.append((sys_prompt, usr_prompt))
+        return _FAKE_BODY
+    monkeypatch.setattr(bg, "_call_llm_first", capture_llm)
+    monkeypatch.setattr(bg, "_load_voice_skill", lambda brand: "VOICE")
+    monkeypatch.setattr(bg, "enrich_signal", lambda s: "CTX")
+    monkeypatch.setattr(bg, "retrieve_kb", lambda t, limit=3: [])
+    bg.write(plan, stream="ai", retry_feedback="too short, needs 1700 words")
+    assert len(captured) == 1
+    assert "too short, needs 1700 words" in captured[0][0], \
+        "retry_feedback must be threaded into the system prompt"
+
+
+def test_write_with_gate_retry_uses_feedback_not_double_spend(monkeypatch):
+    """On gate failure, write_with_gate retries once with feedback in a single
+    LLM call - not two calls with the feedback discarded."""
+    plan = {"topic_id": "t1", "title_hint": "t", "tags": [], "source": "manual",
+            "signals": [{"signal_id": "t1", "summary": "s"}]}
+    call_count = {"n": 0}
+    prompts_seen = []
+    def fake_llm(sys_prompt, usr_prompt):
+        call_count["n"] += 1
+        prompts_seen.append(sys_prompt)
+        return _FAKE_BODY
+    monkeypatch.setattr(bg, "_call_llm_first", fake_llm)
+    monkeypatch.setattr(bg, "_load_voice_skill", lambda brand: "VOICE")
+    monkeypatch.setattr(bg, "enrich_signal", lambda s: "CTX")
+    monkeypatch.setattr(bg, "retrieve_kb", lambda t, limit=3: [])
+
+    # Force gate to fail first time, pass second time.
+    fail_first = {"fail": True}
+    import article_gates as ag
+    real_check = ag.check
+    def fake_check(draft):
+        if fail_first["fail"]:
+            fail_first["fail"] = False
+            return ag.GateResult(passed=False, issues=["too short"],
+                                redacted_body=draft.get("body_md", ""),
+                                redacted_context="", slop_score=8)
+        return real_check(draft)
+    monkeypatch.setattr(ag, "check", fake_check)
+    monkeypatch.setattr(bg, "gate_check",
+                        lambda d: (("ok" if not fail_first["fail"] else "fail"),
+                                   ["too short"] if fail_first["fail"] else []))
+
+    result = bg.write_with_gate(plan, stream="ai")
+    # Only 2 LLM calls: one for the initial draft, one for the retry with feedback.
+    assert call_count["n"] == 2, f"expected 2 LLM calls, got {call_count['n']}"
+    # The second call's prompt must contain the feedback.
+    assert "too short" in prompts_seen[1], \
+        "retry prompt must contain the gate feedback"

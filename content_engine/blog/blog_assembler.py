@@ -18,19 +18,12 @@ from __future__ import annotations
 
 import re
 import shutil
-from datetime import date, datetime, timezone
+from datetime import date
 from pathlib import Path
 from typing import Optional
 
 from config import SAHILBLOG_REPO
-
-
-def _slugify(title: str) -> str:
-    """Kebab-case slug, ASCII-only, for blog post filenames."""
-    words = re.findall(r"[a-z0-9]+", (title or "").lower())
-    if not words:
-        return "post"
-    return "-".join(words[:6])
+from blog.blog_slug import slugify
 
 
 def _yaml_value(val) -> str:
@@ -141,7 +134,7 @@ def assemble(draft: dict, images: dict, repo: Optional[str] = None) -> Path:
     Returns the Path to the written MDX file.
     """
     repo_path = Path(repo) if repo else Path(SAHILBLOG_REPO)
-    slug = draft.get("slug") or _slugify(draft.get("title", "post"))
+    slug = draft.get("slug") or slugify(draft.get("title", "post"))
     posts_dir = repo_path / "src/content/blog"
     imgs_dir = repo_path / "public" / "blog" / slug
     posts_dir.mkdir(parents=True, exist_ok=True)

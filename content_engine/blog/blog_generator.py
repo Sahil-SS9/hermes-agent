@@ -1,9 +1,10 @@
 """Blog generator - stream-aware long-form draft generation.
 
-Reuses article_generator building blocks (the LLM call chain, title extraction,
-signal enrichment, KB retrieval) but injects the stream voice, word_target,
-and section_target into the system prompt. Output is a draft dict with the
-blog frontmatter fields (tier, tags, source, format) set from the stream config.
+Reuses the article_generator LLM chain (llm_generate._call_llm / _llm_configs /
+_load_voice_skill / gate_post) and article_gates.check for quality + secret
+scan, but injects the stream voice, word_target, and section_target into the
+system prompt. Output is a draft dict with the blog frontmatter fields
+(tier, tags, source, format) set from the stream config.
 """
 from __future__ import annotations
 import re
@@ -13,6 +14,7 @@ import context_enrich
 import kb_retrieve
 from llm_generate import _call_llm, _llm_configs, _load_voice_skill, gate_post
 from blog.blog_streams import STREAMS, tags_for
+from blog.blog_slug import slugify
 
 
 def enrich_signal(sig: dict) -> str:
@@ -41,14 +43,6 @@ def _extract_title(body: str) -> Optional[str]:
         if m:
             return m.group(1).strip()
     return None
-
-
-def _slugify(title: str) -> str:
-    """Kebab-case slug, ASCII-only, for blog post filenames."""
-    words = re.findall(r"[a-z0-9]+", (title or "").lower())
-    if not words:
-        return "post"
-    return "-".join(words[:6])
 
 
 def _lede_to_description(body_md: str, max_len: int = 180) -> str:
@@ -141,8 +135,13 @@ def build_blog_prompt(stream: str, plan: dict, context_blob: str,
 
 
 def write(plan: dict, stream: str = "ai",
-         max_retries: int = 1) -> Optional[dict]:
-    """Generate one blog draft. Returns None when the LLM chain is dead."""
+         max_retries: int = 1,
+         retry_feedback: Optional[str] = None) -> Optional[dict]:
+    """Generate one blog draft. Returns None when the LLM chain is dead.
+
+    When retry_feedback is set, it is threaded into build_blog_prompt so the
+    LLM sees the gate's issues and can fix them on the retry.
+    """
     if not plan or not plan.get("signals"):
         return None
     s = STREAMS[stream]
@@ -155,7 +154,8 @@ def write(plan: dict, stream: str = "ai",
 
     last_body: Optional[str] = None
     for attempt in range(max_retries + 1):
-        prompts = build_blog_prompt(stream, plan, context_blob, kb)
+        prompts = build_blog_prompt(stream, plan, context_blob, kb,
+                                    retry_feedback=retry_feedback)
         body = _call_llm_first(prompts["system"], prompts["user"])
         if body:
             last_body = body
@@ -178,7 +178,7 @@ def write(plan: dict, stream: str = "ai",
         "title": title,
         "description": description,
         "body_md": last_body.strip(),
-        "slug": _slugify(title),
+        "slug": slugify(title),
         "tier": s["tier"],
         "tags": final_tags,
         "format": s["format"],
@@ -206,6 +206,8 @@ def write_with_gate(plan: dict, stream: str = "ai",
     """Generate a draft, gate it, retry once with feedback on gate failure.
 
     Returns the draft (with redacted body from the gate) on pass, or None.
+    The retry threads the gate's issues into write() -> build_blog_prompt so
+    the LLM sees the feedback and can fix it in a single regenerated call.
     """
     draft = write(plan, stream=stream, max_retries=max_retries)
     if not draft:
@@ -217,18 +219,10 @@ def write_with_gate(plan: dict, stream: str = "ai",
         gate_res = ag.check(draft)
         draft["body_md"] = gate_res.redacted_body
         return draft
-    # Retry once with feedback.
-    plan2 = {**plan}
-    s = STREAMS[stream]
-    context_blob = draft.get("context", "")
-    kb = draft.get("kb_snippets", [])
+    # Retry once: thread the gate issues as feedback into a single LLM call.
     feedback = "; ".join(issues) or "rejected by quality gate"
-    prompts = build_blog_prompt(stream, plan2, context_blob, kb, retry_feedback=feedback)
-    body = _call_llm_first(prompts["system"], prompts["user"])
-    if not body:
-        return None
-    draft2 = write({**plan, "title_hint": _extract_title(body) or plan.get("title_hint", "")},
-                   stream=stream, max_retries=0)
+    draft2 = write(plan, stream=stream, max_retries=max_retries,
+                   retry_feedback=feedback)
     if not draft2:
         return None
     status2, issues2 = gate_check(draft2)
