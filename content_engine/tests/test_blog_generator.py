@@ -1,0 +1,137 @@
+"""Tests for blog.blog_generator — stream-aware long-form draft generation.
+
+Reuses article_generator building blocks (build_article_prompt shape,
+_call_llm_first, _extract_title, enrich_signal, retrieve_kb) but injects
+the stream voice, word_target, and section_target into the system prompt.
+Output is a draft dict with the blog frontmatter fields set from the stream.
+"""
+import blog.blog_generator as bg
+from blog.blog_streams import STREAMS
+
+
+_FAKE_BODY = """# Token-Maxing at the Edge
+
+A counterintuitive claim grounded in concrete figures.
+
+## The mechanism
+
+The numbers tell a different story than the hype.
+
+## Worked example
+
+Here is the code that changed everything.
+
+## The trade-offs
+
+Every optimisation has a cost.
+
+## What breaks
+
+The failure modes are instructive.
+
+## How to apply this
+
+Step by step so you can do it too.
+
+## What I'd try next
+
+The takeaway is simple.
+"""
+
+
+def test_build_blog_prompt_includes_stream_voice(monkeypatch):
+    """The stream voice is injected into the system prompt."""
+    plan = {"topic_id": "t1", "title_hint": "token-maxing",
+            "tags": ["ai-adoption"], "source": "research-paper",
+            "signals": [{"signal_id": "t1", "summary": "token-maxing"}]}
+    prompts = bg.build_blog_prompt("ai", plan, context_blob="CTX", kb_snippets=["k1"])
+    assert STREAMS["ai"]["voice"][:30] in prompts["system"]
+    assert "CTX" in prompts["user"]
+    assert "k1" in prompts["user"]
+
+
+def test_build_blog_prompt_includes_word_and_section_target(monkeypatch):
+    """The stream word_target and section_target are in the system prompt."""
+    plan = {"topic_id": "t1", "title_hint": "t", "tags": [], "source": "manual",
+            "signals": [{"signal_id": "t1", "summary": "t"}]}
+    prompts = bg.build_blog_prompt("builder", plan, "", [])
+    assert str(STREAMS["builder"]["word_target"]) in prompts["system"]
+    assert str(STREAMS["builder"]["section_target"]) in prompts["system"]
+
+
+def test_write_returns_draft_with_stream_fields(monkeypatch):
+    """write() returns a draft with tier, tags, source, format set from the stream."""
+    plan = {"topic_id": "t1", "title_hint": "Token-maxing at the edge",
+            "tags": ["ai-adoption"], "source": "research-paper",
+            "signals": [{"signal_id": "t1", "summary": "token-maxing"}]}
+    monkeypatch.setattr(bg, "_call_llm_first", lambda sys, usr: _FAKE_BODY)
+    monkeypatch.setattr(bg, "_load_voice_skill", lambda brand: "VOICE")
+    monkeypatch.setattr(bg, "enrich_signal", lambda s: "CTX")
+    monkeypatch.setattr(bg, "retrieve_kb", lambda t, limit=3: [])
+    draft = bg.write(plan, stream="ai")
+    assert draft is not None
+    assert draft["title"] == "Token-Maxing at the Edge"
+    assert draft["tier"] == "pm"  # from STREAMS["ai"]
+    assert "ai" in draft["tags"]  # base tag
+    assert "ai-adoption" in draft["tags"]  # topic tag
+    assert draft["source"] == "research-paper"
+    assert draft["format"] == "essay"
+    assert draft["stream"] == "ai"
+    assert draft["description"]  # non-empty deck
+
+
+def test_write_has_enough_h2_sections(monkeypatch):
+    """The body has >= section_target H2 sections (the illustrator keys off these)."""
+    plan = {"topic_id": "t1", "title_hint": "t", "tags": [], "source": "manual",
+            "signals": [{"signal_id": "t1", "summary": "t"}]}
+    monkeypatch.setattr(bg, "_call_llm_first", lambda sys, usr: _FAKE_BODY)
+    monkeypatch.setattr(bg, "_load_voice_skill", lambda brand: "VOICE")
+    monkeypatch.setattr(bg, "enrich_signal", lambda s: "CTX")
+    monkeypatch.setattr(bg, "retrieve_kb", lambda t, limit=3: [])
+    draft = bg.write(plan, stream="ai")
+    h2_count = sum(1 for line in draft["body_md"].splitlines() if line.startswith("## "))
+    assert h2_count >= STREAMS["ai"]["section_target"]
+
+
+def test_write_returns_none_on_llm_dead(monkeypatch):
+    """write() returns None when the LLM chain is dead (no body)."""
+    plan = {"topic_id": "t1", "title_hint": "t", "tags": [], "source": "manual",
+            "signals": [{"signal_id": "t1", "summary": "t"}]}
+    monkeypatch.setattr(bg, "_call_llm_first", lambda sys, usr: None)
+    monkeypatch.setattr(bg, "_load_voice_skill", lambda brand: "VOICE")
+    monkeypatch.setattr(bg, "enrich_signal", lambda s: "CTX")
+    monkeypatch.setattr(bg, "retrieve_kb", lambda t, limit=3: [])
+    assert bg.write(plan, stream="ai") is None
+
+
+def test_write_returns_none_when_plan_has_no_signals(monkeypatch):
+    plan = {"topic_id": "t1", "title_hint": "t", "tags": [], "source": "manual",
+            "signals": []}
+    assert bg.write(plan, stream="ai") is None
+
+
+def test_write_extracts_title_from_body(monkeypatch):
+    """The title comes from the first # H1 in the body."""
+    plan = {"topic_id": "t1", "title_hint": "WRONG HINT", "tags": [],
+            "source": "manual", "signals": [{"signal_id": "t1", "summary": "s"}]}
+    monkeypatch.setattr(bg, "_call_llm_first", lambda sys, usr: _FAKE_BODY)
+    monkeypatch.setattr(bg, "_load_voice_skill", lambda brand: "VOICE")
+    monkeypatch.setattr(bg, "enrich_signal", lambda s: "CTX")
+    monkeypatch.setattr(bg, "retrieve_kb", lambda t, limit=3: [])
+    draft = bg.write(plan, stream="pm")
+    assert draft["title"] == "Token-Maxing at the Edge"  # from body, not title_hint
+
+
+def test_write_generates_description(monkeypatch):
+    """The draft includes a one-line description (deck) from the lede."""
+    plan = {"topic_id": "t1", "title_hint": "t", "tags": [], "source": "manual",
+            "signals": [{"signal_id": "t1", "summary": "s"}]}
+    body = _FAKE_BODY.replace("A counterintuitive claim grounded in concrete figures.",
+                              "After six months tuning KENSEI, the real wins came from cutting prompts not adding agents.")
+    monkeypatch.setattr(bg, "_call_llm_first", lambda sys, usr: body)
+    monkeypatch.setattr(bg, "_load_voice_skill", lambda brand: "VOICE")
+    monkeypatch.setattr(bg, "enrich_signal", lambda s: "CTX")
+    monkeypatch.setattr(bg, "retrieve_kb", lambda t, limit=3: [])
+    draft = bg.write(plan, stream="builder")
+    assert draft["description"]
+    assert len(draft["description"]) <= 200
