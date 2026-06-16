@@ -43,11 +43,16 @@ def run_stage_1(
     # Personal brands that get LLM generation
     LLM_BRANDS = {"sahil_twitter", "sahil_linkedin"}
 
+    from config import CONTENT_PAUSED_BRANDS
+
     all_drafts = []
 
     for brand in brands:
         if brand not in BRANDS:
             print(f"Unknown brand: {brand}. Skipping.")
+            continue
+        if brand in CONTENT_PAUSED_BRANDS:
+            print(f"[{brand}] paused (CONTENT_PAUSED_BRANDS); skipping.")
             continue
 
         print(f"[{brand}] Generating drafts...")

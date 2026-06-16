@@ -300,6 +300,15 @@ IMAGERY_HERO_MODEL = os.getenv("CONTENT_HERO_EDIT_MODEL", "fal-ai/nano-banana-pr
 # How many recent (palette|layout) picks to avoid re-using, per brand.
 IMAGERY_ROTATION_MEMORY = int(os.getenv("CONTENT_IMAGERY_ROTATION_MEMORY", "6"))
 
+# Temporarily paused brands — skipped by the social generator. Paused 2026-06-16
+# while the personal brands (sahil_twitter/sahil_linkedin) are validated on the
+# new imagery system; product brands stay on the legacy path until re-enabled.
+# Clear CONTENT_PAUSED_BRANDS (or set to "") to resume them.
+CONTENT_PAUSED_BRANDS = frozenset(
+    b.strip() for b in os.getenv(
+        "CONTENT_PAUSED_BRANDS", "plenishd,coachos,matchdaymaestro").split(",")
+    if b.strip())
+
 # ── SahilBlog content pipeline (blog/ subpackage) ─────────────────────
 # Daily long-form blog articles for SahilBlog across 3 streams (AI, PM,
 # Builders Log). Published as draft MDX into the Astro repo, gated behind
