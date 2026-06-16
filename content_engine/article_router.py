@@ -9,8 +9,11 @@ Two modes:
 
 The chosen signal ids are written to the in-memory state['used'] ledger
 so the short-post track cannot re-use the same signal in the same run.
-This is a session-scoped marker, not a DB write; persistence for
-cross-day dedup is left to the existing topic_usage_log.
+Cross-day dedup is handled by the pipeline, which seeds state['used'] with
+the signal ids already used as articles inside the recency window (read from
+topic_usage_log) and writes the day's choice back after a successful run. The
+router stays pure: state['used'] is its single exclusion set whatever its
+source.
 """
 from __future__ import annotations
 from typing import Optional

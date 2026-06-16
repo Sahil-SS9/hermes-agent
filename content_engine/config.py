@@ -272,3 +272,6 @@ ARTICLE_MIN_WORDS = int(os.getenv("ARTICLE_MIN_WORDS", "900"))
 ARTICLE_IMG_DENSITY = os.getenv("ARTICLE_IMG_DENSITY", "per-section").strip()
 ARTICLE_DIGEST_WINDOW_DAYS = int(os.getenv("ARTICLE_DIGEST_WINDOW_DAYS", "14"))
 ARTICLE_MAX_IMAGES = int(os.getenv("ARTICLE_MAX_IMAGES", "6"))
+# Cross-run dedup: a signal that became an article is off-limits for this many
+# days so consecutive daily cron runs cannot re-pick the same top signal.
+ARTICLE_TOPIC_RECENCY_DAYS = int(os.getenv("ARTICLE_TOPIC_RECENCY_DAYS", "30"))

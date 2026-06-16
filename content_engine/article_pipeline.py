@@ -16,7 +16,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
-from config import ARTICLE_ENABLED
+from config import ARTICLE_ENABLED, ARTICLE_TOPIC_RECENCY_DAYS
 import article_assembler as aa
 import article_gates as ag
 import article_generator as gen
@@ -24,6 +24,45 @@ import article_illustrator as ai
 import article_router as ar
 import database as db
 import discord_digest as dd
+
+
+# Article topic recency is tracked under its own brand key so it is independent
+# of the per-platform short-post topic log. The router fans one plan to every
+# brand, so dedup is decided once at the article level, not per platform.
+_ARTICLE_TOPIC_BRAND = "article"
+
+
+def _recent_article_topic_ids() -> list[str]:
+    """Signal ids that became an article within the recency window.
+
+    Read-only and defensive: a DB hiccup must never block today's article, it
+    just degrades to the in-run-only dedup we had before.
+    """
+    try:
+        return db.get_recently_used_topics(
+            _ARTICLE_TOPIC_BRAND, days=ARTICLE_TOPIC_RECENCY_DAYS,
+        )
+    except Exception:
+        return []
+
+
+def _record_article_topics(plan: dict) -> None:
+    """Persist the chosen signal ids so future runs cannot re-pick them.
+
+    Called only after at least one brand published, so a failed generation
+    leaves the topic available to retry tomorrow.
+    """
+    for sig in plan.get("signals", []):
+        sid = sig.get("signal_id")
+        if not sid:
+            continue
+        try:
+            db.log_topic_usage(
+                topic_id=sid, brand=_ARTICLE_TOPIC_BRAND,
+                topic_text=sig.get("summary", "")[:200], platform="article",
+            )
+        except Exception:
+            pass
 
 
 def router_choose(state: dict) -> Optional[dict]:
@@ -177,12 +216,15 @@ def run(out_root: Optional[Path] = None, deliver: bool = True,
     if not ARTICLE_ENABLED:
         return {"status": "skipped_disabled"}
 
-    state: dict = {"used": []}
+    state: dict = {"used": _recent_article_topic_ids()}
     plan = router_choose(state)
     if not plan:
         return {"status": "skipped_router", "state": state}
 
-    return _run_for_brand(plan, brand, out_root or aa.OUTPUT_ROOT, deliver)
+    result = _run_for_brand(plan, brand, out_root or aa.OUTPUT_ROOT, deliver)
+    if result.get("status") == "ok":
+        _record_article_topics(plan)
+    return result
 
 
 def run_all(out_root: Optional[Path] = None, deliver: bool = True,
@@ -196,7 +238,7 @@ def run_all(out_root: Optional[Path] = None, deliver: bool = True,
     if not ARTICLE_ENABLED:
         return {"status": "skipped_disabled", "results": {}}
 
-    state: dict = {"used": []}
+    state: dict = {"used": _recent_article_topic_ids()}
     plan = router_choose(state)
     if not plan:
         return {"status": "skipped_router", "state": state, "results": {}}
@@ -205,4 +247,6 @@ def run_all(out_root: Optional[Path] = None, deliver: bool = True,
     results = {brand: _run_for_brand(plan, brand, out_root, deliver)
                for brand in brands}
     any_ok = any(r.get("status") == "ok" for r in results.values())
+    if any_ok:
+        _record_article_topics(plan)
     return {"status": "ok" if any_ok else "skipped_all", "results": results, "plan": plan}
