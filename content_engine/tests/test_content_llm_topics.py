@@ -31,6 +31,38 @@ def test_llm_configs_attaches_right_keys(monkeypatch):
     assert by_base["https://ollama.com/v1"]["key"] == "ollama-xyz"
 
 
+def test_longform_chain_uses_stronger_models(monkeypatch):
+    monkeypatch.delenv("CONTENT_LLM_BASE_URL", raising=False)
+    monkeypatch.delenv("CONTENT_LLM_MODEL", raising=False)
+    cfgs = lg._llm_configs(longform=True)
+    models = [c["model"] for c in cfgs]
+    assert models[0] == "minimax-m3"          # OpenGo primary for long-form
+    assert "glm-5.2" in models                # Ollama-Cloud fallback
+    # short tier must NOT leak into long-form
+    assert "deepseek-v4-flash" not in models
+
+
+def test_short_and_longform_differ(monkeypatch):
+    monkeypatch.delenv("CONTENT_LLM_BASE_URL", raising=False)
+    monkeypatch.delenv("CONTENT_LLM_MODEL", raising=False)
+    short = [c["model"] for c in lg._llm_configs(longform=False)]
+    long = [c["model"] for c in lg._llm_configs(longform=True)]
+    assert short[0] == "deepseek-v4-flash"
+    assert long[0] == "minimax-m3"
+
+
+def test_fabricated_numbers_catches_growth_metrics():
+    import article_gates as ag
+    # ungrounded audience/growth metrics -> flagged
+    assert ag._fabricated_numbers("Just hit 1,000 users this week", "")
+    assert ag._fabricated_numbers("200 downloads in a day", "")
+    assert ag._fabricated_numbers("conversion rose 45%", "")
+    # narrative integers -> NOT flagged (no false positives)
+    assert not ag._fabricated_numbers("I cut 3 features in 2 weeks", "")
+    # grounded number -> NOT flagged
+    assert not ag._fabricated_numbers("we hit 1,000 users", "the launch reached 1,000 users")
+
+
 def test_env_override_is_tried_first(monkeypatch):
     monkeypatch.setenv("CONTENT_LLM_BASE_URL", "https://example.test/v1")
     monkeypatch.setenv("CONTENT_LLM_MODEL", "custom-model")

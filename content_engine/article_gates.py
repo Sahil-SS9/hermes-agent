@@ -82,7 +82,13 @@ def _fabricated_numbers(body: str, context: str) -> list[str]:
     small bare integers.
     """
     stats = set(re.findall(r"\b\d+(?:\.\d+)?%", body))           # percentages
-    stats |= set(re.findall(r"\b\d{4,}\b", body))                # large figures
+    stats |= set(re.findall(r"\b\d{4,}\b", body))                # large bare figures
+    stats |= set(re.findall(r"\b\d{1,3}(?:,\d{3})+\b", body))    # comma-grouped (1,000)
+    # audience/growth metric claims, e.g. "1,000 users", "200 downloads", "3k stars"
+    stats |= {m.group(0) for m in re.finditer(
+        r"\b\d[\d,.]*\s?[kKmM]?[\s-]*"
+        r"(?:users?|downloads?|customers?|sign-?ups?|subscribers?|installs?|"
+        r"stars?|MAU|DAU|members?|followers?)\b", body, re.I)}
     if not stats:
         return []
     # Compare on the digit core so "4,000" / "4000" / "4000ms" all match.
@@ -145,11 +151,8 @@ def check(draft: dict) -> GateResult:
         issues.append("Missing takeaway section (e.g. '## What I'd try next')")
         slop_score += 2
 
-    # 5. Data integrity: numbers in body must appear in context.
-    bad_nums = _fabricated_numbers(body_clean, ctx_clean)
-    if bad_nums:
-        issues.append(f"Data integrity: numbers in body not in context: {bad_nums}")
-        slop_score += 2
+    # 5. Data integrity (fabricated numbers) now runs inside the shared gate_post
+    #    so short posts get it too; no duplicate check here.
 
     # 6. Secret strip: surface the count even when everything else passed.
     stripped = body_secrets + ctx_secrets

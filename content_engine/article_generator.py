@@ -135,7 +135,8 @@ def build_article_prompt(brand: str, plan: dict, context_blob: str,
         "genuinely covered in depth.",
         "- British English. No em-dashes.",
         "- No AI-isms. No 'Let's dive in' / 'In today's world' / 'Great question'.",
-        "- No invented statistics. Cite only numbers and terms that appear in the context.",
+        "- Do NOT invent statistics, user counts, growth numbers, dates, or metrics. "
+        "Cite only numbers and terms that appear in the context.",
         "- Use real data, tool names, and quotes from the context where they help.",
         "- Prefer concrete specifics over abstraction every time.",
     ]
@@ -195,7 +196,7 @@ def _call_llm_first(system: str, user: str) -> Optional[str]:
     Kept as its own helper so tests can monkeypatch the LLM call without
     coupling to the rest of the chain.
     """
-    for cfg in _llm_configs():
+    for cfg in _llm_configs(longform=True):
         # Long-form: lift the token cap and timeout so a full ~2200-word
         # article completes instead of truncating before its closing section.
         body = _call_llm(system, user, cfg, timeout=180, max_tokens=8000)

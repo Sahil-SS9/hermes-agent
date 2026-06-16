@@ -204,6 +204,9 @@ def build_generation_prompt(
         "## Content Requirements",
         length_rule,
         "- Storytelling: specific, concrete details. Real numbers, real tools, real moments.",
+        "- Do NOT invent statistics, user counts, growth numbers, dates, or metrics. "
+        "Use ONLY numbers supplied in the topic/context; if none are given, write "
+        "without invented figures.",
         "- British English spelling (organise, colour, behaviour, centre).",
         "- No em-dashes (use commas or line breaks instead).",
         "- No AI-isms: no 'Let's dive in', 'In today's world', 'Great question'.",
@@ -357,6 +360,19 @@ def gate_post(body_text: str, platform: str, context: str = "") -> dict:
         issues.append("Too generic, no concrete from source")
         slop_score += 3
 
+    # 7. Fabricated metrics: audience/growth numbers (users, %, large figures)
+    #    that are not grounded in the provided context. Lazy import avoids the
+    #    article_gates <-> llm_generate import cycle.
+    if context:
+        try:
+            from article_gates import _fabricated_numbers
+            bad = _fabricated_numbers(body_text, context)
+            if bad:
+                issues.append(f"Fabricated numbers not in context: {', '.join(bad)}")
+                slop_score += 3
+        except Exception:
+            pass
+
     return {
         "slop_score": min(slop_score, 10),
         "issues": issues,
@@ -382,6 +398,14 @@ _FREE_FALLBACK_CHAIN = [
     {"base": "https://ollama.com/v1", "model": "gpt-oss:120b", "provider": "ollama"},
 ]
 
+# Long-form / factual tier (articles + blog): stronger, lower-hallucination models
+# where prose quality matters more than per-call cost. Low volume, so the modest
+# extra cost is fine. minimax-m3 (OpenGo) primary, glm-5.2 (Ollama-Cloud) fallback.
+_LONGFORM_CHAIN = [
+    {"base": "https://opencode.ai/zen/go/v1", "model": "minimax-m3", "provider": "opencode"},
+    {"base": "https://ollama.com/v1", "model": "glm-5.2", "provider": "ollama"},
+]
+
 
 def _opencode_key() -> str:
     """Bearer key shared across opencode zen/go endpoints."""
@@ -398,13 +422,14 @@ def _key_for(provider: str) -> str:
     return _opencode_key()
 
 
-def _llm_configs() -> list[dict]:
+def _llm_configs(longform: bool = False) -> list[dict]:
     """Ordered list of generation endpoints to try, best/most-specific first.
 
     The env-configured endpoint (CONTENT_LLM_BASE_URL/MODEL) is tried first when
-    set, then the built-in free chain. Deduped by (base, model). Each endpoint is
+    set, then the built-in chain (short-post by default; the long-form/factual
+    chain when ``longform=True``). Deduped by (base, model). Each endpoint is
     attempted in turn until one returns usable text, so a single quota-exhausted
-    provider degrades to the next free provider instead of to canned templates.
+    provider degrades to the next provider instead of to canned templates.
     """
     configs: list[dict] = []
     seen: set = set()
@@ -416,7 +441,8 @@ def _llm_configs() -> list[dict]:
         configs.append({"base": base, "model": model, "key": _opencode_key()})
         seen.add((base, model))
 
-    for fb in _FREE_FALLBACK_CHAIN:
+    chain = _LONGFORM_CHAIN if longform else _FREE_FALLBACK_CHAIN
+    for fb in chain:
         sig = (fb["base"], fb["model"])
         if sig not in seen:
             configs.append({"base": fb["base"], "model": fb["model"],
