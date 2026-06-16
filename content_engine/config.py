@@ -292,3 +292,16 @@ IMAGERY_EDIT_MODEL = os.getenv("CONTENT_EDIT_MODEL", "fal-ai/nano-banana-pro/edi
 IMAGERY_EDIT_COST_GBP = float(os.getenv("CONTENT_EDIT_COST_GBP", "0.12"))
 # How many recent (palette|layout) picks to avoid re-using, per brand.
 IMAGERY_ROTATION_MEMORY = int(os.getenv("CONTENT_IMAGERY_ROTATION_MEMORY", "6"))
+
+# ── SahilBlog content pipeline (blog/ subpackage) ─────────────────────
+# Daily long-form blog articles for SahilBlog across 3 streams (AI, PM,
+# Builders Log). Published as draft MDX into the Astro repo, gated behind
+# human approval. Mirrors the article track shape with per-stream dedup
+# via database.topic_usage_log (brand=f"blog_{stream}").
+SAHILBLOG_REPO = os.path.expanduser(os.getenv("SAHILBLOG_REPO", "~/repos/SahilBlog"))
+BLOG_ENABLED = os.getenv("BLOG_ENABLED", "1").strip() not in ("0", "false", "")
+BLOG_STREAMS = tuple(s.strip() for s in os.getenv("BLOG_STREAMS", "ai,pm,builder").split(",") if s.strip())
+# Per-section images cap. Default hero + 1 section keeps daily spend under
+# the £10/mo cap (see Task 4 budget note). Set 0 for hero-only.
+BLOG_MAX_SECTION_IMAGES = int(os.getenv("BLOG_MAX_SECTION_IMAGES", "1"))
+BLOG_TOPIC_RECENCY_DAYS = int(os.getenv("BLOG_TOPIC_RECENCY_DAYS", "45"))
