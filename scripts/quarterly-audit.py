@@ -44,8 +44,8 @@ conn.close()
             if ":" in line:
                 status, count = line.split(":")
                 out.append(f"• Crons <b>{status}</b>: <code>{count}</code>")
-except:
-    out.append("• Cron DB: could not read")
+except Exception as ex:
+    out.append(f"• Cron DB: could not read ({ex})")
 
 # === Worker Failure Analysis trend ===
 log_dir = Path("/home/kensei/.hermes/governance/logboard")

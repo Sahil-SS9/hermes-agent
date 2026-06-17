@@ -1,1 +1,0 @@
-/home/kensei/.hermes/scripts/gitops/hermes-auto-commit.sh
