@@ -60,7 +60,7 @@ def _make_fake_png(path):
 
 def test_illustrate_returns_hero_and_section_paths(monkeypatch, tmp_path):
     """illustrate() returns {hero_path, section_paths: {h2_heading: path}}."""
-    def fake_generate(draft, brand, out_dir=None, ctype=None):
+    def fake_generate(draft, brand, out_dir=None, ctype=None, **kw):
         return _make_fake_png(Path(out_dir) / f"fake_{ctype or 'hero'}.png")
     monkeypatch.setattr(bi, "generate", fake_generate)
     monkeypatch.setattr(bi.budget, "can_spend", lambda cost: True)
@@ -79,7 +79,7 @@ def test_illustrate_caps_at_max_sections(monkeypatch, tmp_path):
     body = "# T\n\nLede\n\n" + "\n\n".join(f"## Section {i}\n\nText." for i in range(10))
     draft = {**_DRAFT, "body_md": body}
     calls = []
-    def fake_generate(draft, brand, out_dir=None, ctype=None):
+    def fake_generate(draft, brand, out_dir=None, ctype=None, **kw):
         calls.append(ctype)
         return _make_fake_png(Path(out_dir) / f"fake_{len(calls)}.png")
     monkeypatch.setattr(bi, "generate", fake_generate)
@@ -101,7 +101,7 @@ def test_illustrate_skips_when_budget_blocked(monkeypatch, tmp_path):
 def test_illustrate_uses_sahil_twitter_brand(monkeypatch, tmp_path):
     """All streams pass brand='sahil_twitter' to imagery_transplant (palette reuse)."""
     received_brands = []
-    def fake_generate(draft, brand, out_dir=None, ctype=None):
+    def fake_generate(draft, brand, out_dir=None, ctype=None, **kw):
         received_brands.append(brand)
         return _make_fake_png(Path(out_dir) / f"fake_{len(received_brands)}.png")
     monkeypatch.setattr(bi, "generate", fake_generate)
@@ -112,7 +112,7 @@ def test_illustrate_uses_sahil_twitter_brand(monkeypatch, tmp_path):
 
 def test_illustrate_section_paths_keyed_by_h2_heading(monkeypatch, tmp_path):
     """Section image paths are keyed by the H2 heading text."""
-    def fake_generate(draft, brand, out_dir=None, ctype=None):
+    def fake_generate(draft, brand, out_dir=None, ctype=None, **kw):
         return _make_fake_png(Path(out_dir) / f"fake_{ctype or 'hero'}.png")
     monkeypatch.setattr(bi, "generate", fake_generate)
     monkeypatch.setattr(bi.budget, "can_spend", lambda cost: True)
@@ -126,7 +126,7 @@ def test_illustrate_section_paths_keyed_by_h2_heading(monkeypatch, tmp_path):
 def test_illustrate_hero_only_when_max_sections_zero(monkeypatch, tmp_path):
     """max_sections=0 produces hero only (no section images)."""
     calls = []
-    def fake_generate(draft, brand, out_dir=None, ctype=None):
+    def fake_generate(draft, brand, out_dir=None, ctype=None, **kw):
         calls.append(ctype)
         return _make_fake_png(Path(out_dir) / f"fake_{len(calls)}.png")
     monkeypatch.setattr(bi, "generate", fake_generate)
@@ -138,7 +138,7 @@ def test_illustrate_hero_only_when_max_sections_zero(monkeypatch, tmp_path):
 
 def test_default_max_sections_from_config(monkeypatch, tmp_path):
     """illustrate() defaults max_sections to config.BLOG_MAX_SECTION_IMAGES."""
-    def fake_generate(draft, brand, out_dir=None, ctype=None):
+    def fake_generate(draft, brand, out_dir=None, ctype=None, **kw):
         return _make_fake_png(Path(out_dir) / f"fake_{ctype or 'hero'}.png")
     monkeypatch.setattr(bi, "generate", fake_generate)
     monkeypatch.setattr(bi.budget, "can_spend", lambda cost: True)

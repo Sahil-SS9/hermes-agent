@@ -72,8 +72,14 @@ _DEPTH_CONTRACT = (
 
 def build_blog_prompt(stream: str, plan: dict, context_blob: str,
                       kb_snippets: list[str],
-                      retry_feedback: Optional[str] = None) -> dict:
-    """System + user prompt for the blog LLM call, stream-aware."""
+                      retry_feedback: Optional[str] = None,
+                      verification: Optional[dict] = None) -> dict:
+    """System + user prompt for the blog LLM call, stream-aware.
+
+    When ``verification`` is set (from news_verify), inject verified snippets
+    or an unverified warning into the system prompt so the AI never fabricates
+    an unverified named event.
+    """
     s = STREAMS[stream]
     voice = s["voice"]
     word_target = s["word_target"]
@@ -99,6 +105,23 @@ def build_blog_prompt(stream: str, plan: dict, context_blob: str,
     ]
     if retry_feedback:
         rules.append(f"- Previous attempt rejected: {retry_feedback}")
+
+    # Inject verification context into the system rules.
+    if verification:
+        claim = verification.get("query", "")
+        if verification.get("verified"):
+            snippets = verification.get("snippets", [])
+            lines = [f"- Verified background for '{claim}':"]
+            for s_ in snippets[:2]:
+                lines.append(
+                    f"  - {s_.get('title', '')}: {s_.get('snippet', '')}"
+                )
+            rules.extend(lines)
+        else:
+            rules.append(
+                f"- WARNING: The event '{claim}' is UNVERIFIED. Do NOT state it "
+                "as fact. Write the durable pattern or economics instead."
+            )
 
     system = "\n".join([
         f"You are writing a long-form blog essay for SahilBlog, stream '{stream}'.",
@@ -136,11 +159,13 @@ def build_blog_prompt(stream: str, plan: dict, context_blob: str,
 
 def write(plan: dict, stream: str = "ai",
          max_retries: int = 1,
-         retry_feedback: Optional[str] = None) -> Optional[dict]:
+         retry_feedback: Optional[str] = None,
+         verification: Optional[dict] = None) -> Optional[dict]:
     """Generate one blog draft. Returns None when the LLM chain is dead.
 
     When retry_feedback is set, it is threaded into build_blog_prompt so the
     LLM sees the gate's issues and can fix them on the retry.
+    When verification is set (from news_verify), it is injected into the prompt.
     """
     if not plan or not plan.get("signals"):
         return None
@@ -155,7 +180,8 @@ def write(plan: dict, stream: str = "ai",
     last_body: Optional[str] = None
     for attempt in range(max_retries + 1):
         prompts = build_blog_prompt(stream, plan, context_blob, kb,
-                                    retry_feedback=retry_feedback)
+                                    retry_feedback=retry_feedback,
+                                    verification=verification)
         body = _call_llm_first(prompts["system"], prompts["user"])
         if body:
             last_body = body
@@ -202,14 +228,18 @@ def gate_check(draft: dict) -> tuple[str, list[str]]:
 
 
 def write_with_gate(plan: dict, stream: str = "ai",
-                    max_retries: int = 1) -> Optional[dict]:
+                    max_retries: int = 1,
+                    verification: Optional[dict] = None) -> Optional[dict]:
     """Generate a draft, gate it, retry once with feedback on gate failure.
 
     Returns the draft (with redacted body from the gate) on pass, or None.
     The retry threads the gate's issues into write() -> build_blog_prompt so
     the LLM sees the feedback and can fix it in a single regenerated call.
+    ``verification`` is passed through to write() for AI stream named-event
+    grounding.
     """
-    draft = write(plan, stream=stream, max_retries=max_retries)
+    draft = write(plan, stream=stream, max_retries=max_retries,
+                  verification=verification)
     if not draft:
         return None
     status, issues = gate_check(draft)
@@ -222,7 +252,7 @@ def write_with_gate(plan: dict, stream: str = "ai",
     # Retry once: thread the gate issues as feedback into a single LLM call.
     feedback = "; ".join(issues) or "rejected by quality gate"
     draft2 = write(plan, stream=stream, max_retries=max_retries,
-                   retry_feedback=feedback)
+                   retry_feedback=feedback, verification=verification)
     if not draft2:
         return None
     status2, issues2 = gate_check(draft2)
