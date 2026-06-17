@@ -10,6 +10,7 @@ Key changes in v2.1:
 """
 
 import json
+import os
 import random
 import re
 import sys
@@ -350,14 +351,68 @@ def _signal_to_topic(signal: dict, platform: str) -> Dict[str, Any]:
     }
 
 
+def _screenshot_topics(brand: str, platform: str, max_n: int) -> List[Dict]:
+    """Ingest dropped screenshots into captioned, high-priority topics (feature 1).
+
+    Reads CONTENT_SCREENSHOT_INBOX, captions each image via free Gemini vision,
+    and moves the file to a processed/ subdir so it is ingested exactly once.
+    Returns [] when vision is unavailable, the inbox is empty, or anything fails.
+    """
+    if max_n <= 0:
+        return []
+    try:
+        import config as cfg
+        if not cfg.GEMINI_VISION_ENABLED:
+            return []
+        import gemini_vision
+        if not gemini_vision.available():
+            return []
+        inbox = cfg.CONTENT_SCREENSHOT_INBOX
+        if not os.path.isdir(inbox):
+            return []
+        exts = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".heic")
+        files = sorted(
+            os.path.join(inbox, f) for f in os.listdir(inbox)
+            if f.lower().endswith(exts) and os.path.isfile(os.path.join(inbox, f))
+        )[:max_n]
+        if not files:
+            return []
+        processed = os.path.join(inbox, "processed")
+        os.makedirs(processed, exist_ok=True)
+        out: List[Dict] = []
+        for path in files:
+            topic = gemini_vision.describe_screenshot(path, brand)
+            # Move out of the inbox regardless of usability so it is not retried.
+            dest = os.path.join(processed, os.path.basename(path))
+            try:
+                os.replace(path, dest)
+            except OSError:
+                pass
+            if topic:
+                topic["id"] = str(uuid.uuid4())[:8]
+                topic["screenshot_path"] = dest
+                out.append(topic)
+        return out
+    except Exception as e:  # noqa: BLE001 (ingestion must degrade, not crash)
+        print(f"[topics] screenshot ingestion failed: {e}", file=sys.stderr)
+        return []
+
+
 def get_topics(brand: str, count: int = 6, skip_used: bool = True) -> List[Dict]:
     """Return N topic objects, mixing real activity for personal brands with static banks.
-    
+
     If skip_used=True, topics used within the last 30 days are excluded.
     """
 
-    # ── Personal brands: mix real activity + static fallback ──
-    if brand in ("sahil_twitter", "sahil_linkedin") and _load_activity():
+    # ── Personal brands: screenshot ingestion + real activity + static ──
+    if brand in ("sahil_twitter", "sahil_linkedin"):
+        platform = "twitter" if brand == "sahil_twitter" else "linkedin"
+        from config import SCREENSHOT_MAX_PER_RUN
+        shot_topics = _screenshot_topics(brand, platform, min(SCREENSHOT_MAX_PER_RUN, count))
+    else:
+        shot_topics = []
+
+    if brand in ("sahil_twitter", "sahil_linkedin") and (_load_activity() or shot_topics):
         platform = "twitter" if brand == "sahil_twitter" else "linkedin"
         try:
             result = _ACTIVITY_COLLECTOR()
@@ -368,7 +423,8 @@ def get_topics(brand: str, count: int = 6, skip_used: bool = True) -> List[Dict]
             signals = []
             state = {"used_signals": []}
 
-        topics: List[Dict] = []
+        topics: List[Dict] = list(shot_topics)  # screenshots take priority
+        slots = max(0, count - len(topics))     # capacity left for activity/static
         used_ids: List[str] = []
         brand_config = None
         try:
@@ -377,7 +433,7 @@ def get_topics(brand: str, count: int = 6, skip_used: bool = True) -> List[Dict]
         except Exception:
             pass
         edu_mix = brand_config.get("educational_mix", 0.65) if brand_config else 0.65
-        edu_count = int(count * edu_mix) if signals else 0
+        edu_count = int(slots * edu_mix) if signals else 0
         edu_signal_map = TWITTER_EDU_SIGNAL_MAP if brand == "sahil_twitter" else LINKEDIN_EDU_SIGNAL_MAP
 
         # Convert educational signals first (enriched with context + KB)
@@ -413,7 +469,7 @@ def get_topics(brand: str, count: int = 6, skip_used: bool = True) -> List[Dict]
                 used_ids.append(signal["signal_id"])
 
         # Remaining signals use existing non-educational path
-        remaining_signals = signals[edu_count:count]
+        remaining_signals = signals[edu_count:slots]
         for signal in remaining_signals:
             topic = _signal_to_topic(signal, platform)
             if topic:

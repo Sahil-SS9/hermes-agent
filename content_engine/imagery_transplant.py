@@ -15,7 +15,9 @@ from pathlib import Path
 from typing import Optional
 
 import budget
+import config as cfg
 import fal_client
+import gemini_vision
 import imagery_library as lib
 import postprocess as pp
 from config import (
@@ -111,37 +113,71 @@ def generate(draft: dict, brand: str, out_dir: Optional[Path] = None,
 
     out_dir = Path(out_dir or _OUT)
     title = (draft.get("title") or draft.get("topic") or "").strip()
+    is_scene = recipe.get("kind") == "scene"
 
-    if recipe.get("kind") == "scene":
-        prompt = build_scene_prompt(title, _concept(draft), recipe["desc"],
-                                    recipe["hex"], recipe["text_rule"])
+    if is_scene:
+        base_prompt = build_scene_prompt(title, _concept(draft), recipe["desc"],
+                                         recipe["hex"], recipe["text_rule"])
         urls = [fal_client.upload_file(recipe["anchor_path"])]
+        qa_content = _concept(draft)
     else:
-        prompt = build_edit_prompt(title, _labels(draft), recipe["hex"])
+        base_prompt = build_edit_prompt(title, _labels(draft), recipe["hex"])
         urls = [fal_client.upload_file(recipe["layout_path"]),
                 fal_client.upload_file(recipe["style_path"])]
+        qa_content = _labels(draft)
     if not all(urls):
         print("[imagery_transplant] anchor upload failed")
         return None
 
     did = draft.get("id") or uuid.uuid4().hex[:8]
-    raw = fal_client.generate_image_edit(
-        prompt, urls, model=model,
-        aspect=recipe["aspect"], output_dir=str(out_dir),
-        filename=f"transplant_{brand}_{did}_raw.png",
-    )
-    if not raw or not os.path.exists(raw):
-        return None
     _pick = recipe.get("layout") or recipe.get("archetype") or "?"
-    budget.record(cost, label=f"transplant:{brand}:{recipe['palette']}:{_pick}")
-
     fin_dir = out_dir / "fal_images"
     fin_dir.mkdir(parents=True, exist_ok=True)
-    fin = fin_dir / f"transplant_{brand}_{did}.png"
-    try:
-        pp.finish_file(raw, str(fin), light=recipe["light"])
-    except Exception as exc:  # noqa: BLE001 (finish is enhancement, not gate)
-        print(f"[imagery_transplant] finish failed: {exc}; returning raw")
-        return raw
-    print(f"[imagery_transplant] {brand} {recipe['palette']}|{_pick} -> {fin}")
-    return str(fin)
+    brief = {"title": title, "content": qa_content, "palette": recipe["hex"],
+             "kind": recipe.get("kind", "infographic")}
+    qa_on = cfg.IMAGERY_QA_ENABLED and gemini_vision.available()
+
+    # Render, finish, then visual-QA. On a failing QA verdict we regenerate once
+    # (budget permitting) with the issues appended, then accept the best result.
+    best_fin: Optional[str] = None
+    best_score = -1
+    feedback = ""
+    for attempt in range(2):
+        if attempt and not budget.can_spend(cost):
+            break  # no budget for a retry; keep what we have
+        prompt = base_prompt if not feedback else (
+            f"{base_prompt}\n\nFIX THESE ISSUES from the previous attempt: {feedback}")
+        raw = fal_client.generate_image_edit(
+            prompt, urls, model=model,
+            aspect=recipe["aspect"], output_dir=str(out_dir),
+            filename=f"transplant_{brand}_{did}_raw{attempt}.png",
+        )
+        if not raw or not os.path.exists(raw):
+            break
+        budget.record(cost, label=f"transplant:{brand}:{recipe['palette']}:{_pick}")
+
+        # Per-attempt filename so a lower-scoring retry never overwrites a better
+        # earlier attempt that best_fin may still point to.
+        fin = fin_dir / f"transplant_{brand}_{did}_{attempt}.png"
+        try:
+            pp.finish_file(raw, str(fin), light=recipe["light"])
+            fin_path = str(fin)
+        except Exception as exc:  # noqa: BLE001 (finish is enhancement, not gate)
+            print(f"[imagery_transplant] finish failed: {exc}; using raw")
+            fin_path = raw
+
+        if not qa_on:
+            print(f"[imagery_transplant] {brand} {recipe['palette']}|{_pick} -> {fin_path}")
+            return fin_path
+
+        verdict = gemini_vision.qa_image(fin_path, brief)
+        if verdict["score"] > best_score:
+            best_score, best_fin = verdict["score"], fin_path
+        print(f"[imagery_transplant] {brand} {recipe['palette']}|{_pick} "
+              f"QA={verdict['score']}/10 {'PASS' if verdict['passed'] else 'FAIL'} "
+              f"-> {fin_path}")
+        if verdict["passed"]:
+            return fin_path
+        feedback = "; ".join(verdict["issues"])[:400] or "improve text legibility and on-brief accuracy"
+
+    return best_fin

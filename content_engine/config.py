@@ -309,6 +309,31 @@ CONTENT_PAUSED_BRANDS = frozenset(
         "CONTENT_PAUSED_BRANDS", "plenishd,coachos,matchdaymaestro").split(",")
     if b.strip())
 
+# ── Free Gemini vision (Google AI Studio key) ─────────────────────────
+# Vision INPUT (image -> text) is FREE on the AI Studio tier; image OUTPUT is
+# paid-only (validated 2026-06-17 against a live key: every image model returns
+# 429 with a zero per-day free quota, and the pricing page lists image output as
+# "Not available" on free tier). So generation stays on FAL; we only use the key
+# for the two free image-understanding features below. Key is read at call time
+# from GEMINI_API_KEY (or GOOGLE_AI_API_KEY); never hardcoded.
+GEMINI_VISION_MODEL = os.getenv("GEMINI_VISION_MODEL", "gemini-2.5-flash").strip()
+GEMINI_VISION_ENABLED = os.getenv("GEMINI_VISION_ENABLED", "1").strip() not in ("0", "false", "")
+
+# Feature 1: screenshot -> topic ingestion. Drop app screenshots / inspiration
+# here and the personal-brand topic mix picks them up, captions them via Gemini
+# vision, and turns each into a high-priority topic. Consumed files move to a
+# processed/ subdir so they are ingested once.
+CONTENT_SCREENSHOT_INBOX = os.path.expanduser(
+    os.getenv("CONTENT_SCREENSHOT_INBOX", "~/content-inbox/screenshots"))
+SCREENSHOT_MAX_PER_RUN = int(os.getenv("CONTENT_SCREENSHOT_MAX", "3"))
+
+# Feature 2: visual-QA of generated heroes. After a transplant render, re-read
+# the finished image with Gemini vision and flag garbled text / off-brief /
+# wrong palette. Below the min score (0-10) we regenerate once with the QA
+# issues appended, then accept best-effort (free check, bounded one retry).
+IMAGERY_QA_ENABLED = os.getenv("CONTENT_IMAGERY_QA", "1").strip() not in ("0", "false", "")
+IMAGERY_QA_MIN_SCORE = int(os.getenv("CONTENT_IMAGERY_QA_MIN_SCORE", "6"))
+
 # ── SahilBlog content pipeline (blog/ subpackage) ─────────────────────
 # Daily long-form blog articles for SahilBlog across 3 streams (AI, PM,
 # Builders Log). Published as draft MDX into the Astro repo, gated behind

@@ -32,8 +32,9 @@ def test_generate_scene_happy_path(monkeypatch, tmp_path):
         captured["urls"] = urls; return str(raw)
     monkeypatch.setattr(it.fal_client, "generate_image_edit", fake_edit)
     monkeypatch.setattr(it.pp, "finish_file", lambda r, o, light=False: o)
+    monkeypatch.setattr(it.gemini_vision, "available", lambda: False)  # single attempt
     out = it.generate({"title": "t", "id": "s1", "body_text": "b"}, "sahil_twitter", out_dir=tmp_path)
-    assert out and out.endswith("transplant_sahil_twitter_s1.png")
+    assert out and out.endswith("transplant_sahil_twitter_s1_0.png")
     assert len(captured["urls"]) == 1  # scene = single anchor
     assert rec and "abstract" in rec[0]
 
@@ -101,11 +102,67 @@ def test_generate_happy_path(monkeypatch, tmp_path):
     fin = []
     monkeypatch.setattr(it.pp, "finish_file",
                         lambda r, o, light=False: fin.append((r, o, light)) or o)
+    monkeypatch.setattr(it.gemini_vision, "available", lambda: False)  # single attempt
     out = it.generate({"brand": "sahil_twitter", "title": "t", "id": "d1"},
                       "sahil_twitter", out_dir=tmp_path)
-    assert out and out.endswith("transplant_sahil_twitter_d1.png")
+    assert out and out.endswith("transplant_sahil_twitter_d1_0.png")
     assert rec and "cyber_neon" in rec[0][1] and "iceberg" in rec[0][1]
     assert fin and fin[0][2] is False  # finished with light=False
+
+
+def _infographic_setup(monkeypatch, tmp_path, scores):
+    """Wire generate() for the QA loop: returns (calls, raw_files) recorders.
+    `scores` is the sequence qa_image returns per attempt."""
+    recipe = {"hex": "navy", "light": False, "aspect": "4:5",
+              "layout_path": tmp_path / "L.webp", "style_path": tmp_path / "S.webp",
+              "palette": "cyber_neon", "layout": "iceberg"}
+    monkeypatch.setattr(it.lib, "select_recipe", lambda *a, **k: recipe)
+    monkeypatch.setattr(it.budget, "can_spend", lambda c: True)
+    monkeypatch.setattr(it.budget, "record", lambda c, label="": None)
+    monkeypatch.setattr(it.fal_client, "upload_file", lambda p, **k: "http://u")
+    calls = {"n": 0}
+
+    def fake_edit(prompt, urls, **k):
+        calls["n"] += 1
+        calls["last_prompt"] = prompt
+        p = tmp_path / k["filename"]
+        p.write_bytes(b"x")
+        return str(p)
+    monkeypatch.setattr(it.fal_client, "generate_image_edit", fake_edit)
+    monkeypatch.setattr(it.pp, "finish_file", lambda r, o, light=False: o)
+    monkeypatch.setattr(it.cfg, "IMAGERY_QA_ENABLED", True)
+    monkeypatch.setattr(it.gemini_vision, "available", lambda: True)
+    seq = iter(scores)
+
+    def fake_qa(path, brief):
+        s = next(seq)
+        return {"passed": s >= 6, "score": s, "issues": ["fix text"] if s < 6 else [],
+                "available": True, "raw": ""}
+    monkeypatch.setattr(it.gemini_vision, "qa_image", fake_qa)
+    return calls
+
+
+def test_generate_qa_pass_first_attempt_no_retry(monkeypatch, tmp_path):
+    calls = _infographic_setup(monkeypatch, tmp_path, scores=[8])
+    out = it.generate({"title": "t", "id": "q1"}, "sahil_twitter", out_dir=tmp_path)
+    assert calls["n"] == 1                       # passed, no retry
+    assert out.endswith("transplant_sahil_twitter_q1_0.png")
+
+
+def test_generate_qa_fail_then_pass_retries_with_feedback(monkeypatch, tmp_path):
+    calls = _infographic_setup(monkeypatch, tmp_path, scores=[3, 8])
+    out = it.generate({"title": "t", "id": "q2"}, "sahil_twitter", out_dir=tmp_path)
+    assert calls["n"] == 2                       # one retry
+    assert "FIX THESE ISSUES" in calls["last_prompt"]
+    assert out.endswith("transplant_sahil_twitter_q2_1.png")  # the passing attempt
+
+
+def test_generate_both_fail_returns_best_scoring(monkeypatch, tmp_path):
+    # attempt 0 scores higher than attempt 1 -> return attempt 0's file
+    calls = _infographic_setup(monkeypatch, tmp_path, scores=[5, 2])
+    out = it.generate({"title": "t", "id": "q3"}, "sahil_twitter", out_dir=tmp_path)
+    assert calls["n"] == 2
+    assert out.endswith("transplant_sahil_twitter_q3_0.png")  # best of the two
 
 
 def test_generate_returns_raw_when_finish_fails(monkeypatch, tmp_path):
@@ -121,6 +178,7 @@ def test_generate_returns_raw_when_finish_fails(monkeypatch, tmp_path):
     def boom(*a, **k):
         raise RuntimeError("finish broke")
     monkeypatch.setattr(it.pp, "finish_file", boom)
+    monkeypatch.setattr(it.gemini_vision, "available", lambda: False)  # single attempt
     out = it.generate({"brand": "sahil_twitter", "title": "t", "id": "d2"},
                       "sahil_twitter", out_dir=tmp_path)
     assert out == str(raw)  # degrades to raw rather than failing
