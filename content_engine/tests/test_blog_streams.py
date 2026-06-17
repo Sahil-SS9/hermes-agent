@@ -21,6 +21,7 @@ def test_streams_shape():
         assert isinstance(s["section_target"], int) and s["section_target"] >= 3, f"{name}: section_target"
         assert isinstance(s["sources"], list) and s["sources"], f"{name}: sources non-empty list"
         assert "image_palette_brand" in s, f"{name}: image_palette_brand required"
+        assert s.get("structure") and len(s["structure"]) > 20, f"{name}: structure required"
 
 
 def test_ai_is_pm_tier_with_ai_tag():
@@ -44,8 +45,9 @@ def test_pm_tier_is_pm_non_ai_tag():
     assert not any(t.lower() in ai_tags for t in tags), "pm stream base_tags must not include AI tags"
 
 
-def test_pm_source_is_manual():
-    assert bs.STREAMS["pm"]["source"] == "manual"
+def test_pm_source_is_research_paper():
+    """PM stream now leads from research findings."""
+    assert bs.STREAMS["pm"]["source"] == "research-paper"
 
 
 def test_builder_tier_is_builder():
@@ -80,17 +82,16 @@ def test_ai_voice_is_analytical_numbers_first():
     assert "analytical" in v or "numbers-first" in v or "thesis" in v
 
 
-def test_builder_voice_is_direct_dense():
-    """Builder stream voice matches the magnus919 code-blocks-as-proof style."""
+def test_builder_voice_is_practitioner_log():
+    """Builder stream voice is a practitioner learning log with hype-vs-reality."""
     v = bs.STREAMS["builder"]["voice"].lower()
-    assert "direct" in v or "dense" in v or "skimmable" in v
-    assert "code" in v  # code-blocks-as-proof
+    assert "practitioner" in v or "learning log" in v or "hype-vs-reality" in v
 
 
-def test_pm_voice_is_reflective():
-    """PM stream voice is reflective/considered per the blog page."""
+def test_pm_voice_is_educational():
+    """PM stream voice translates research to PM practice (educational)."""
     v = bs.STREAMS["pm"]["voice"].lower()
-    assert "reflective" in v or "considered" in v
+    assert "educational" in v or "translate" in v or "pm market" in v
 
 
 def test_image_palette_brand_is_sahil_twitter():
