@@ -35,6 +35,7 @@ IMAGE_MODELS = {
     "seedream": "fal-ai/bytedance/seedream/v4/text-to-image",       # ~£0.024, strong text
     "seedream45": "fal-ai/bytedance/seedream/v4.5/text-to-image",   # ~£0.032, best text/value
     "nano_banana": "fal-ai/nano-banana-pro",     # £0.12/img, text+reasoning
+    "nano_banana_2": "fal-ai/nano-banana-2/edit", # $0.08/img, Google Nano Banana 2 edit
     "gpt_image_2": "fal-ai/gpt-image-2",         # ~£0.04/img, SOTA text/layout (hero fallback)
 }
 
@@ -42,7 +43,7 @@ IMAGE_MODELS = {
 MODEL_COST_GBP = {
     "z_image": 0.004, "flux_klein": 0.004, "krea_medium": 0.016,
     "krea_large": 0.024, "flux_pro": 0.024, "ideogram": 0.024,
-    "gpt_image_2": 0.04, "nano_banana": 0.12, "qwen": 0.016, "recraft": 0.032,
+    "gpt_image_2": 0.04, "nano_banana": 0.12, "nano_banana_2": 0.064, "qwen": 0.016, "recraft": 0.032,
     "flux_ultra": 0.048, "flux_kontext": 0.032, "qwen2_pro": 0.06,
     "seedream": 0.024, "seedream45": 0.032,
 }

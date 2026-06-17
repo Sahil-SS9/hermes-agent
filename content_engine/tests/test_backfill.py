@@ -11,3 +11,10 @@ def test_streams_have_structural_rules():
     assert "hype" in bs.STREAMS["builder"]["structure"].lower() or \
            "reality" in bs.STREAMS["builder"]["structure"].lower()
     assert "verify" in bs.STREAMS["ai"]["structure"].lower()
+
+
+def test_blog_image_model_is_nano_banana_2():
+    """Config should point to nano-banana-2 with a positive backfill cap."""
+    import config as cfg
+    assert cfg.BLOG_IMAGE_MODEL == "fal-ai/nano-banana-2/edit"
+    assert cfg.BACKFILL_SPEND_CAP_GBP > 0
