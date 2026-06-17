@@ -239,7 +239,8 @@ def is_scene_type(ctype: str) -> bool:
     return ctype in _SCENE_TYPES
 
 
-def _select_scene(draft: dict, brand: str, ctype: str, rng: random.Random) -> dict | None:
+def _select_scene(draft: dict, brand: str, ctype: str, rng: random.Random,
+                  palette: str | None = None) -> dict | None:
     arcs = match_scene(draft)
     palettes = _palettes_for(brand)
     if not arcs or not palettes:
@@ -247,7 +248,7 @@ def _select_scene(draft: dict, brand: str, ctype: str, rng: random.Random) -> di
     rotation = _load_rotation().get(brand, [])
     recent_pal = [k.split("|", 1)[0] for k in rotation][-IMAGERY_ROTATION_MEMORY:]
     recent_arc = [k.split("|", 1)[1] for k in rotation if "|" in k][-IMAGERY_ROTATION_MEMORY:]
-    palette = _pick(palettes, recent_pal, rng)
+    palette = palette if palette and palette in palettes else _pick(palettes, recent_pal, rng)
     arc = _pick(arcs, recent_arc, rng)
     anchor = _scene_anchor(arc, rng)
     if not anchor:
@@ -263,11 +264,14 @@ def _select_scene(draft: dict, brand: str, ctype: str, rng: random.Random) -> di
 
 
 def select_recipe(draft: dict, brand: str, ctype: str | None = None,
-                  seed: int | None = None) -> dict | None:
+                  seed: int | None = None, palette: str | None = None) -> dict | None:
     """Choose an imagery recipe for a draft. Returns a dict with `kind`:
       * "infographic" — dual-anchor (baoyu layout + style/palette)
       * "scene"       — single-anchor (a Sahil archetype ref)
     or None for content types we don't transplant. Records the pick for rotation.
+
+    When ``palette`` is given and valid for the brand, it is forced instead of
+    rotating — used by blog_illustrator to lock one style per post.
     """
     ctype = ctype or content_type_for(draft)
     rng = random.Random(seed)
@@ -282,7 +286,7 @@ def select_recipe(draft: dict, brand: str, ctype: str | None = None,
         rotation = _load_rotation().get(brand, [])
         recent_pal = [k.split("|", 1)[0] for k in rotation][-IMAGERY_ROTATION_MEMORY:]
         recent_lay = [k.split("|", 1)[1] for k in rotation if "|" in k][-IMAGERY_ROTATION_MEMORY:]
-        palette = _pick(palettes, recent_pal, rng)
+        palette = palette if palette and palette in palettes else _pick(palettes, recent_pal, rng)
         layout = _pick(layouts, recent_lay, rng)
         _record_rotation(brand, f"{palette}|{layout}")
         p = PALETTES[palette]
@@ -293,6 +297,6 @@ def select_recipe(draft: dict, brand: str, ctype: str | None = None,
         }
 
     if is_scene_type(ctype):
-        return _select_scene(draft, brand, ctype, rng)
+        return _select_scene(draft, brand, ctype, rng, palette=palette)
 
     return None

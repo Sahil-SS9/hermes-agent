@@ -349,3 +349,11 @@ BLOG_STREAMS = tuple(s.strip() for s in os.getenv("BLOG_STREAMS", "ai,pm,builder
 # allocated). See Task 4 budget note.
 BLOG_MAX_SECTION_IMAGES = int(os.getenv("BLOG_MAX_SECTION_IMAGES", "0"))
 BLOG_TOPIC_RECENCY_DAYS = int(os.getenv("BLOG_TOPIC_RECENCY_DAYS", "45"))
+
+# ── Blog back-population image model ──────────────────────────────────────
+# Model = fal-ai/nano-banana-2/edit (confirmed Task 0: $0.08/img ≈ £0.064).
+# Cost confirmed by probing the FAL endpoint on 2026-06-17.
+BLOG_IMAGE_MODEL = os.getenv("BLOG_IMAGE_MODEL", "fal-ai/nano-banana-2/edit").strip()
+BLOG_IMAGE_COST_GBP = float(os.getenv("BLOG_IMAGE_COST_GBP", "0.064"))
+# One-off back-population envelope, separate from MONTHLY_BUDGET_GBP.
+BACKFILL_SPEND_CAP_GBP = float(os.getenv("BACKFILL_SPEND_CAP_GBP", "9.0"))

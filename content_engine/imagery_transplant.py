@@ -101,12 +101,23 @@ def build_scene_prompt(title: str, concept: str, desc: str, palette_hex: str,
 
 
 def generate(draft: dict, brand: str, out_dir: Optional[Path] = None,
-             ctype: Optional[str] = None) -> Optional[str]:
-    """Generate one finished hero via the transplant path. None on skip/failure."""
-    recipe = lib.select_recipe(draft, brand, ctype=ctype)
+             ctype: Optional[str] = None, recipe: Optional[dict] = None,
+             model_override: Optional[str] = None,
+             cost_override: Optional[float] = None) -> Optional[str]:
+    """Generate one finished hero via the transplant path. None on skip/failure.
+
+    When ``recipe`` is given, it is used directly instead of calling
+    ``lib.select_recipe``. When ``model_override`` is set, the model and its
+    cost replace the recipe-derived model (``cost_override`` is required when
+    ``model_override`` is not the recipe's default).
+    """
+    recipe = recipe or lib.select_recipe(draft, brand, ctype=ctype)
     if not recipe:
         return None  # not a transplantable type; caller uses the legacy fallback
     model, cost = _model_for(recipe)
+    if model_override:
+        model = model_override
+        cost = cost_override if cost_override is not None else cost
     if not budget.can_spend(cost):
         print("[imagery_transplant] budget cap; skipping")
         return None

@@ -4,6 +4,10 @@ Reuses imagery_transplant.generate (the validated nano-banana-pro/edit
 dual-anchor transplant). One hero image + up to BLOG_MAX_SECTION_IMAGES
 per-section images. Section images are keyed by H2 heading text.
 
+Style consistency (Task 2): ONE image recipe is selected per post. The hero's
+palette is locked across all section images so the post has zero intra-post
+style drift. Section layouts vary for visual interest within the locked palette.
+
 Budget-gated via budget.can_spend. When the budget cap blocks, all image
 generation is skipped (degrades to a text-only post).
 
@@ -21,6 +25,7 @@ from typing import Optional
 
 import budget
 import config
+import imagery_library as lib
 from blog.blog_streams import STREAMS
 from imagery_transplant import generate  # exposed as bi.generate for monkeypatching
 
@@ -49,6 +54,10 @@ def illustrate(draft: dict, out_dir: Optional[Path] = None,
               max_sections: Optional[int] = None) -> dict:
     """Generate hero + per-section images via the transplant path.
 
+    Locks ONE palette per post: the hero recipe is selected first, then every
+    section forces the same palette (with a fresh layout for visual variety).
+    All images use BLOG_IMAGE_MODEL (nano-banana-2/edit) via model_override.
+
     Returns {hero_path: str|None, section_paths: {h2_heading: path}}.
     When the budget cap blocks, all generation is skipped.
     """
@@ -63,10 +72,18 @@ def illustrate(draft: dict, out_dir: Optional[Path] = None,
     result = {"hero_path": None, "section_paths": {}}
 
     # Budget check upfront: if we can't even afford the hero, skip everything.
-    cost = config.IMAGERY_EDIT_COST_GBP
+    cost = config.BLOG_IMAGE_COST_GBP
     if not budget.can_spend(cost):
         print("[blog_illustrator] budget cap; skipping all images")
         return result
+
+    # Select ONE recipe for the hero to lock the palette.
+    hero_recipe = lib.select_recipe(
+        {"title": draft.get("title", ""), "body_text": draft.get("description", ""),
+         "topic": draft.get("title", ""), "format": "infographic"},
+        brand, ctype="infographic",
+    )
+    locked_palette = hero_recipe["palette"] if hero_recipe else None
 
     # Hero image.
     hero_draft = {
@@ -75,11 +92,14 @@ def illustrate(draft: dict, out_dir: Optional[Path] = None,
         "topic": draft.get("title", ""),
         "format": "infographic",
     }
-    hero = generate(hero_draft, brand=brand, out_dir=out_dir, ctype="infographic")
+    hero = generate(hero_draft, brand=brand, out_dir=out_dir, ctype="infographic",
+                    recipe=hero_recipe,
+                    model_override=config.BLOG_IMAGE_MODEL,
+                    cost_override=config.BLOG_IMAGE_COST_GBP)
     if hero:
         result["hero_path"] = hero
 
-    # Section images, capped at max_sections.
+    # Section images, capped at max_sections. Same locked palette, fresh layout.
     if max_sections <= 0:
         return result
 
@@ -89,7 +109,13 @@ def illustrate(draft: dict, out_dir: Optional[Path] = None,
             print(f"[blog_illustrator] budget cap after {len(result['section_paths'])} sections")
             break
         sec_draft = _section_draft(draft.get("title", ""), heading, draft.get("body_md", ""))
-        img = generate(sec_draft, brand=brand, out_dir=out_dir, ctype="infographic")
+        sec_recipe = lib.select_recipe(
+            sec_draft, brand, ctype="infographic", palette=locked_palette,
+        )
+        img = generate(sec_draft, brand=brand, out_dir=out_dir, ctype="infographic",
+                       recipe=sec_recipe,
+                       model_override=config.BLOG_IMAGE_MODEL,
+                       cost_override=config.BLOG_IMAGE_COST_GBP)
         if img:
             result["section_paths"][heading] = img
 
