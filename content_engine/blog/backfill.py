@@ -42,6 +42,25 @@ else:
     pass
 
 
+def _stagger_dates(num_posts: int, span_days: int = 21) -> list[str]:
+    """Spread ``num_posts`` dates evenly across the past ``span_days`` days.
+
+    Returns a list of YYYY-MM-DD strings, oldest first. The most recent date
+    is yesterday (today is reserved for already-generated validation posts).
+    """
+    from datetime import date, timedelta
+    today = date.today()
+    if num_posts <= 0:
+        return []
+    dates = []
+    for i in range(num_posts):
+        # Even spread: post 0 -> oldest, post N-1 -> most recent (yesterday)
+        offset_days = span_days - round(i * span_days / max(num_posts - 1, 1))
+        d = today - timedelta(days=offset_days)
+        dates.append(d.isoformat())
+    return dates
+
+
 def _budget_check(cost_gbp: float) -> bool:
     """Check if a backfill spend stays within the one-off envelope.
 
@@ -144,6 +163,19 @@ def run(stream: Optional[str] = None, limit: Optional[int] = None,
     total_limit = limit or float("inf")
     per_batch_cost = config.BLOG_IMAGE_COST_GBP * 3  # hero + 2 sections
 
+    # Build a flat list of all topics to assign staggered pubDates. This makes
+    # the blog read as naturally evolving instead of 36 posts all dated today.
+    all_topics_flat: list[tuple[str, dict]] = []
+    for s in streams_to_run:
+        for topic in topics_for(s):
+            all_topics_flat.append((s, topic))
+    # Assign dates spread across the past 3 weeks, oldest first.
+    date_map: dict[str, str] = {}  # topic_title -> YYYY-MM-DD
+    if all_topics_flat:
+        dates = _stagger_dates(len(all_topics_flat))
+        for (s_, t_), d_ in zip(all_topics_flat, dates):
+            date_map[t_["title"]] = d_
+
     for s in streams_to_run:
         if result["generated"] >= total_limit:
             break
@@ -206,7 +238,9 @@ def run(stream: Optional[str] = None, limit: Optional[int] = None,
                     result["total_spend_gbp"] += config.BLOG_IMAGE_COST_GBP
 
             # Assemble MDX and stage as draft.
-            mdx_path = assemble(draft, images, repo=config.SAHILBLOG_REPO)
+            pub_date = date_map.get(title)
+            mdx_path = assemble(draft, images, repo=config.SAHILBLOG_REPO,
+                                pub_date=pub_date)
             slug_staged = stage_draft(str(mdx_path), repo=config.SAHILBLOG_REPO)
             print(f"[backfill] staged [{s}] {slug_staged}")
             result["generated"] += 1

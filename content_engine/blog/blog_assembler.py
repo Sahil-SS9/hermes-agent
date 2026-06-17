@@ -124,12 +124,14 @@ def _resolve_collision(posts_dir: Path, slug: str) -> Path:
         n += 1
 
 
-def assemble(draft: dict, images: dict, repo: Optional[str] = None) -> Path:
+def assemble(draft: dict, images: dict, repo: Optional[str] = None,
+             pub_date: Optional[str] = None) -> Path:
     """Write the MDX post into the SahilBlog repo.
 
     draft: {title, description, body_md, tier, tags, format, source, stream, slug}
     images: {hero_path: str|None, section_paths: {h2_heading: path}}
     repo: path to the SahilBlog repo (defaults to config.SAHILBLOG_REPO).
+    pub_date: optional YYYY-MM-DD string; defaults to today.
 
     Returns the Path to the written MDX file.
     """
@@ -143,7 +145,7 @@ def assemble(draft: dict, images: dict, repo: Optional[str] = None) -> Path:
     fm = {
         "title": draft.get("title", ""),
         "description": draft.get("description", ""),
-        "pubDate": date.today().isoformat(),
+        "pubDate": pub_date or date.today().isoformat(),
         "tags": draft.get("tags", []),
         "tier": draft.get("tier", "pm"),
         "format": draft.get("format", "essay"),
