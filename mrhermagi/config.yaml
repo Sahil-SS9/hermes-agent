@@ -1,17 +1,14 @@
 model:
-  default: moonshotai/Kimi-K2.6
-  provider: custom:CommandCode
-  base_url: https://api.commandcode.ai/provider/v1
+  default: glm-5.2
+  provider: ollama-cloud
+  base_url: https://ollama.com/v1
 fallback_providers:
-- provider: opencode-zen
-  model: deepseek-v4-flash
-  base_url: https://opencode.ai/zen/v1
-- provider: opencode-go
-  model: minimax-m3
-  base_url: https://opencode.ai/zen/go/v1
-- provider: nous
-  model: qwen/qwen3.6-plus
-  base_url: https://inference-api.nousresearch.com/v1
+- provider: ollama-cloud
+  model: gemma3:27b
+  base_url: https://ollama.com/v1
+- provider: ollama-cloud
+  model: glm-5.2
+  base_url: https://ollama.com/v1
 credential_pool_strategies: {}
 toolsets:
 - web
@@ -137,12 +134,13 @@ dashboard:
 privacy:
   redact_pii: false
 tts:
-  provider: edge
+  provider: kenseivoice
   edge:
     voice: en-GB-SoniaNeural
   openai:
     model: gpt-4o-mini-tts
     voice: fable
+  voice: kokoro:bm_george
 stt:
   enabled: false
 timezone: Europe/London
@@ -288,9 +286,4 @@ platform_toolsets:
   - cronjob
   - messaging
   - no_mcp
-providers:
-  custom:CommandCode:
-    base_url: https://api.commandcode.ai/provider/v1
-    api_key: ''
-    request_timeout_seconds: 1800
-    stale_timeout_seconds: 300
+providers: {}

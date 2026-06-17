@@ -1,6 +1,7 @@
 meta:
   title: AI/ML Foundations Sprint
-  description: From zero ML knowledge to practical AI literacy. Conceptual only — no hardware required.
+  description: From zero ML knowledge to practical AI literacy. Conceptual only —
+    no hardware required.
   total_days: 28
   total_weeks: 4
   start_date: 22/05/26
@@ -87,19 +88,23 @@ weeks:
   - day: 17
     title: 'Benchmarks: What Scores Mean'
     topic: MMLU, HumanEval, MT-Bench, Chatbot Arena
-    status: next
+    status: delivered
   - day: 18
     title: Model Evaluation Workshop
     topic: MrHermagi runs eval framework, shows real output
+    status: delivered
   - day: 19
     title: Token-Maxxing Strategies
     topic: 'Practical optimisation: shorter prompts, caching, structuring'
+    status: delivered
   - day: 20
     title: Model Comparison Framework
     topic: Decision tree for choosing between models
+    status: delivered
   - day: 21
     title: Model Merging & Breeding
     topic: DARE, TIES, SLERP — combining models conceptually
+    status: next
   milestone:
     title: Full Model Comparison
     desc: MrHermagi runs 3 models on same tasks, compares speed/quality/cost
