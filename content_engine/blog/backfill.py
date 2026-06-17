@@ -46,15 +46,10 @@ def _budget_check(cost_gbp: float) -> bool:
     """Check if a backfill spend stays within the one-off envelope.
 
     Uses the standard budget module but caps against BACKFILL_SPEND_CAP_GBP
-    instead of the monthly cap. Label prefix ``backfill:`` keeps entries
-    distinguishable in the ledger.
+    instead of the monthly cap. The per-image spend is recorded by
+    imagery_transplant.generate (same ledger), so we only check here.
     """
     return budget.can_spend(cost_gbp, cap_gbp=config.BACKFILL_SPEND_CAP_GBP)
-
-
-def _budget_record(cost_gbp: float, label: str) -> None:
-    """Record a backfill spend with ``backfill:`` prefix."""
-    budget.record(cost_gbp, label=f"backfill:{label}")
 
 
 def _verify_if_needed(topic: dict) -> Optional[dict]:
@@ -195,19 +190,18 @@ def run(stream: Optional[str] = None, limit: Optional[int] = None,
             else:
                 draft["_max_sections"] = 0
 
-            # Illustrate (skip in dry-run mode).
+            # Illustrate (skip in dry-run mode). imagery_transplant.generate
+            # already records each spend to the ledger, so we only track counts
+            # here without double-recording.
             if dry_run:
                 images = {"hero_path": None, "section_paths": {}}
             else:
                 print(f"[backfill] illustrating [{s}] {title}...")
                 images = illustrate(draft, max_sections=draft["_max_sections"])
-                # Record spend for each generated image.
                 if images.get("hero_path"):
-                    _budget_record(config.BLOG_IMAGE_COST_GBP, f"{s}:{slug}:hero")
                     result["total_images"] += 1
                     result["total_spend_gbp"] += config.BLOG_IMAGE_COST_GBP
                 for heading, path in images.get("section_paths", {}).items():
-                    _budget_record(config.BLOG_IMAGE_COST_GBP, f"{s}:{slug}:{heading}")
                     result["total_images"] += 1
                     result["total_spend_gbp"] += config.BLOG_IMAGE_COST_GBP
 

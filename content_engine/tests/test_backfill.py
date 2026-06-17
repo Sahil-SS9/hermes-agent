@@ -71,17 +71,19 @@ def test_backfill_skips_existing_and_respects_cap(monkeypatch, tmp_path):
         }
     monkeypatch.setattr(bf, "write_with_gate", fake_write)
 
-    # Mock illustrate to return fake paths.
+    # Mock illustrate to return fake paths AND record spend (like the real one).
     def fake_illustrate(draft, max_sections=0, **kw):
         out = {"hero_path": None, "section_paths": {}}
         if max_sections > 0:
             hero = tmp_path / "hero.png"
             hero.write_text("x")
             out["hero_path"] = str(hero)
+            bgt.record(cfg.BLOG_IMAGE_COST_GBP, label="test:hero")
         for i in range(max_sections):
             sec = tmp_path / f"sec{i}.png"
             sec.write_text("x")
             out["section_paths"][f"Section {i}"] = str(sec)
+            bgt.record(cfg.BLOG_IMAGE_COST_GBP, label="test:sec")
         return out
     monkeypatch.setattr(bf, "illustrate", fake_illustrate)
 
