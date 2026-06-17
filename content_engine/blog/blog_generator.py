@@ -28,8 +28,12 @@ def retrieve_kb(topic: str, limit: int = 3) -> list[str]:
 
 
 def _call_llm_first(system: str, user: str) -> Optional[str]:
-    """Try the LLM chain once; return first non-empty body or None."""
-    for cfg in _llm_configs():
+    """Try the LLM chain once; return first non-empty body or None.
+
+    Uses the longform chain (minimax-m3, glm-5.2) since blog posts are
+    long-form content where prose quality matters.
+    """
+    for cfg in _llm_configs(longform=True):
         body = _call_llm(system, user, cfg, timeout=180, max_tokens=8000)
         if body:
             return body
@@ -106,6 +110,19 @@ def build_blog_prompt(stream: str, plan: dict, context_blob: str,
     if retry_feedback:
         rules.append(f"- Previous attempt rejected: {retry_feedback}")
 
+    # Stream-specific mandatory sections.
+    stream_mandatory = ""
+    if stream == "pm":
+        stream_mandatory = (
+            "- MANDATORY: The post MUST end with a `## Reflection` section "
+            "containing a short, considered personal take. This is non-negotiable."
+        )
+    elif stream == "builder":
+        stream_mandatory = (
+            "- MANDATORY: Include a candid reality-check section comparing the "
+            "hype vs the real practice. Honest about what is harder than it looks."
+        )
+
     # Inject verification context into the system rules.
     if verification:
         claim = verification.get("query", "")
@@ -128,6 +145,8 @@ def build_blog_prompt(stream: str, plan: dict, context_blob: str,
         "",
         "## Brand voice (use exactly)", voice,
         "",
+        "## Per-stream structure rule", s.get("structure", ""),
+        "",
         _DEPTH_CONTRACT,
         "",
         "## Structure (mandatory)",
@@ -137,6 +156,7 @@ def build_blog_prompt(stream: str, plan: dict, context_blob: str,
         "worked example to trade-offs.",
         "- One `## How to apply this` section with concrete steps.",
         "- One final `## What I'd try next` section.",
+        stream_mandatory,
         "",
         "## Rules", *rules,
     ])
