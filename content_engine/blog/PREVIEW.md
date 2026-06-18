@@ -1,74 +1,73 @@
-# SahilBlog Back-Population: Local Preview Workflow
+# SahilBlog Draft Preview Workflow
 
-## Generating drafts
-
-From `content_engine/`:
-
-```bash
-cd /home/kensei/repos/KenseiAgent/content_engine
-set -a; . ~/.hermes/.env; set +a
-
-# Generate one post per stream for validation
-PYTHONPATH=. ../.venv/bin/python -m blog.backfill --stream ai --limit 1
-PYTHONPATH=. ../.venv/bin/python -m blog.backfill --stream pm --limit 1
-PYTHONPATH=. ../.venv/bin/python -m blog.backfill --stream builder --limit 1
-
-# Full run (all streams, all topics)
-PYTHONPATH=. ../.venv/bin/python -m blog.backfill
-
-# Dry run (text only, no images)
-PYTHONPATH=. ../.venv/bin/python -m blog.backfill --dry-run --limit 3
-```
-
-## Reviewing drafts locally
-
-Drafts land as `approved: false` MDX in `~/repos/SahilBlog/src/content/blog/`.
-They are visible in dev mode but hidden from production builds.
+## Local Astro preview
 
 ```bash
 cd ~/repos/SahilBlog
 pnpm install   # first time only
-pnpm dev
+pnpm dev       # starts on http://localhost:4321
 ```
 
-Open the printed localhost URL (usually http://localhost:4321).
+Open the printed localhost URL in a browser. Draft posts (`approved: false`)
+are visible in dev mode via `import.meta.env.DEV` guards. Production builds
+hide them.
 
-Pages to check:
-- `/` — home (featured + recent)
-- `/ai` — AI essays
-- `/blog/pm` — PM insights
-- `/blog/builder` — Builder's Log
-- `/blog/<slug>` — individual post
+## Review paths
 
-Drafts show alongside approved posts in dev. No visual distinction is applied
-yet; check `approved: false` in the MDX frontmatter to identify drafts.
+- `/ai` — AI Decoding stream
+- `/blog/pm` — PM Insights stream
+- `/blog/builder` — Builder's Log stream
+- `/` — home page with all streams
 
-## Approving a post
+## Identifying drafts
 
-Flip `approved: false` to `approved: true` in the MDX frontmatter, or use:
+Draft posts have `approved: false` in frontmatter. In dev mode they render
+with a visual indicator. Check the frontmatter directly:
 
-```python
+```bash
+grep "approved:" ~/repos/SahilBlog/src/content/blog/<slug>.mdx
+```
+
+## Approving a draft
+
+Flip `approved: false` to `approved: true` in the MDX frontmatter, or use
+the publisher:
+
+```bash
+cd ~/repos/KenseiAgent/content_engine
+set -a; . ~/.hermes/.env; set +a
 PYTHONPATH=. ../.venv/bin/python -c "
 from blog.blog_publisher import approve
-approve('your-post-slug')
+approve('<slug>')
 "
 ```
 
-The `approve()` function flips the flag, builds, commits, and pushes.
-Only use it when ready to publish.
+The publisher flips approval, runs `pnpm build`, commits, and pushes.
+Do NOT auto-approve. Sahil reviews each post first.
 
-## Budget tracking
+## Back-population run
 
-Back-population spend is tracked separately from the monthly cap:
+Generate remaining posts (after Sahil sign-off on the 3 validation samples):
 
 ```bash
-PYTHONPATH=. ../.venv/bin/python -c "import budget; print(budget.status())"
+cd ~/repos/KenseiAgent/content_engine
+set -a; . ~/.hermes/.env; set +a
+PYTHONPATH=. ../.venv/bin/python -m blog.backfill --stream ai
+PYTHONPATH=. ../.venv/bin/python -m blog.backfill --stream pm
+PYTHONPATH=. ../.venv/bin/python -m blog.backfill --stream builder
 ```
 
-Backfill entries are labelled `backfill:<stream>:<slug>:<image>` in the ledger.
-The cap is `BACKFILL_SPEND_CAP_GBP` (default £9), set in `config.py`.
+Check spend:
 
-## Re-running
+```bash
+PYTHONPATH=. ../.venv/bin/python -c "
+import budget, config
+print(budget.status(cap_gbp=config.BACKFILL_SPEND_CAP_GBP))
+"
+```
 
-The backfill is idempotent. Re-running skips topics whose slug MDX already
-exists in the repo. Safe to interrupt and resume.
+Or inspect the backfill ledger directly:
+
+```bash
+cat ~/repos/KenseiAgent/content_engine/output/backfill_ledger.json
+```
