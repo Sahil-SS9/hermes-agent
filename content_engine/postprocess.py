@@ -160,6 +160,34 @@ def process_file(input_path: str, output_path: str, brand: str, intensity: float
     return output_path
 
 
+def finish_imagery(img: Image.Image, light: bool = False, intensity: float = 1.0) -> Image.Image:
+    """Mandatory analog finish for reference-anchored imagery (palette-agnostic).
+
+    The standard requires every generated image to carry analog craft so it never
+    reads as "too clean". Dark palettes get scanline + grain + vignette; light
+    palettes (e.g. warm-editorial) get paper texture + grain instead, so the look
+    stays appropriate. See brand_imagery_standard.md section 6.
+    """
+    img = img.convert("RGB")
+    img = _contrast(img, 1.10 * intensity)
+    img = _halftone(img, 0.22 * intensity)
+    if light:
+        img = _paper_texture(img, 0.5 * intensity)
+        img = _film_grain(img, 0.5 * intensity)
+    else:
+        img = _scanlines(img, 0.25 * intensity)
+        img = _film_grain(img, 0.7 * intensity)
+        img = _vignette(img, 0.4 * intensity)
+    return img
+
+
+def finish_file(input_path: str, output_path: str, light: bool = False,
+                intensity: float = 1.0) -> str:
+    out = finish_imagery(Image.open(input_path), light=light, intensity=intensity)
+    out.save(output_path, "PNG")
+    return output_path
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("input")

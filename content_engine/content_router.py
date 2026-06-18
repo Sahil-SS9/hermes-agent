@@ -29,6 +29,34 @@ def suggest_layout(draft: dict):
     return None
 
 
+_TYPE_CUES = [
+    ("comparison", (" vs ", " vs.", "versus", " vs ")),
+    ("flowchart", ("step 1", "steps to", "how i ", "how to", "process", "pipeline")),
+    ("framework", ("framework", "matrix", "quadrant", "the 6-minute", "system", "stack")),
+    ("timeline", ("timeline", "history of", "evolution", "roadmap", "week ")),
+    ("infographic", ("reasons", "ways to", "tips", "checklist", "top ", "metrics", "stats")),
+]
+_STORY_TYPES = {"hero", "scene", "metaphor", "typography"}
+_VALID_TYPES = {"infographic", "comparison", "framework", "flowchart", "timeline"} | _STORY_TYPES
+
+
+def content_type_for(draft: dict) -> str:
+    """Map a draft to a baoyu Type. Explicit draft['format'] wins. Structured
+    cues -> data types; otherwise -> 'scene' (story/atmospheric)."""
+    fmt = (draft.get("format") or "").lower()
+    if fmt in _VALID_TYPES:
+        return fmt
+    text = ((draft.get("title") or "") + " " + (draft.get("body_text") or "")
+            + " " + (draft.get("pillar") or "")).lower()
+    pillar = (draft.get("pillar") or "").lower()
+    if pillar in _IG_PILLARS or is_infographic(draft):
+        for t, cues in _TYPE_CUES:
+            if any(c in text for c in cues):
+                return t
+        return "infographic"
+    return "scene"
+
+
 def is_infographic(draft: dict) -> bool:
     fmt = (draft.get("format") or "").lower()
     if fmt == "infographic":

@@ -10,11 +10,36 @@ Key changes in v2.1:
 """
 
 import json
+import os
 import random
+import re
 import sys
 import uuid
 from datetime import datetime, timedelta
 from typing import List, Dict, Any
+
+# Strip git/commit artefacts so a raw commit subject never becomes a post topic
+# or title (e.g. "feat(content): non-infographic scene transplant" leaking in).
+_COMMIT_PREFIX = re.compile(
+    r"^(?:feat|fix|chore|docs|refactor|style|test|perf|build|ci|revert|merge|wip|hotfix)"
+    r"(?:\([^)]*\))?!?:\s*", re.I)
+_TRAILER = re.compile(r"\s*(?:Co-Authored-By:|Signed-off-by:).*$", re.I | re.S)
+
+
+def _clean_topic_summary(text: str) -> str:
+    """Turn a raw signal summary (often a git commit subject) into clean topic
+    text: drop conventional-commit prefixes, sign-off trailers, merge noise.
+    Returns "" for pure git noise so the caller can fall back to the pillar."""
+    s = (text or "").strip()
+    s = _TRAILER.sub("", s).strip()
+    for _ in range(2):  # handle a doubled prefix, e.g. "feat: fix: ..."
+        stripped = _COMMIT_PREFIX.sub("", s).strip()
+        if stripped == s:
+            break
+        s = stripped
+    if re.match(r"^merge\b", s, re.I):  # bare merge commits carry no topic
+        return ""
+    return s
 
 try:
     import requests
@@ -23,6 +48,23 @@ except ImportError:
 
 from config import FOOTBALL_API_BASE
 from database import get_recently_used_topics, log_topic_usage
+
+# ── Lazy-loaded educational components ──
+_EDU_ENRICH = None
+_EDU_KB = None
+
+def _load_edu():
+    global _EDU_ENRICH, _EDU_KB
+    if _EDU_ENRICH is not None:
+        return True
+    try:
+        import context_enrich as ce
+        import kb_retrieve as kb
+        _EDU_ENRICH = ce.enrich
+        _EDU_KB = kb.retrieve
+        return True
+    except ImportError:
+        return False
 
 # ── Stale tech reference gate ──
 STALE_TECH_REFS = [
@@ -39,6 +81,28 @@ def has_stale_tech_reference(text: str) -> tuple[bool, str]:
         if ref in text:
             return True, ref
     return False, ""
+
+# Map signal types to educational pillars per brand
+TWITTER_EDU_SIGNAL_MAP = {
+    "github_push": "Agent Build Notes",
+    "hermes_pr": "Agent Build Notes",
+    "hermes_skill": "Agent Build Notes",
+    "harness_change": "Harness Tuning",
+    "research_tool": "Radar Finds",
+    "research_signal": "Paper Takes",
+    "gitradar_repo": "Radar Finds",
+    "architecture": "AI Patterns",
+}
+LINKEDIN_EDU_SIGNAL_MAP = {
+    "github_push": "AI Engineering Notes",
+    "hermes_pr": "Agentic Systems in Practice",
+    "hermes_skill": "Agentic Systems in Practice",
+    "harness_change": "AI Engineering Notes",
+    "research_tool": "Tooling Signals",
+    "research_signal": "Research to Practice",
+    "gitradar_repo": "Tooling Signals",
+    "architecture": "AI Engineering Notes",
+}
 
 # ── Activity collector (lazy loaded) ──
 _ACTIVITY_COLLECTOR = None
@@ -256,7 +320,7 @@ def _signal_to_topic(signal: dict, platform: str) -> Dict[str, Any]:
     if signal_type == "github_push":
         topic = f"Just pushed {variables['repo_name']}"
     elif signal_type == "hermes_pr":
-        topic = f"Submitted: {variables['pr_title']}"
+        topic = f"Submitted: {_clean_topic_summary(variables['pr_title']) or variables['pr_title']}"
     elif signal_type == "hermes_skill":
         topic = f"New skill: {variables['skill_name']}"
     elif signal_type == "research_tool":
@@ -287,14 +351,68 @@ def _signal_to_topic(signal: dict, platform: str) -> Dict[str, Any]:
     }
 
 
+def _screenshot_topics(brand: str, platform: str, max_n: int) -> List[Dict]:
+    """Ingest dropped screenshots into captioned, high-priority topics (feature 1).
+
+    Reads CONTENT_SCREENSHOT_INBOX, captions each image via free Gemini vision,
+    and moves the file to a processed/ subdir so it is ingested exactly once.
+    Returns [] when vision is unavailable, the inbox is empty, or anything fails.
+    """
+    if max_n <= 0:
+        return []
+    try:
+        import config as cfg
+        if not cfg.GEMINI_VISION_ENABLED:
+            return []
+        import gemini_vision
+        if not gemini_vision.available():
+            return []
+        inbox = cfg.CONTENT_SCREENSHOT_INBOX
+        if not os.path.isdir(inbox):
+            return []
+        exts = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".heic")
+        files = sorted(
+            os.path.join(inbox, f) for f in os.listdir(inbox)
+            if f.lower().endswith(exts) and os.path.isfile(os.path.join(inbox, f))
+        )[:max_n]
+        if not files:
+            return []
+        processed = os.path.join(inbox, "processed")
+        os.makedirs(processed, exist_ok=True)
+        out: List[Dict] = []
+        for path in files:
+            topic = gemini_vision.describe_screenshot(path, brand)
+            # Move out of the inbox regardless of usability so it is not retried.
+            dest = os.path.join(processed, os.path.basename(path))
+            try:
+                os.replace(path, dest)
+            except OSError:
+                pass
+            if topic:
+                topic["id"] = str(uuid.uuid4())[:8]
+                topic["screenshot_path"] = dest
+                out.append(topic)
+        return out
+    except Exception as e:  # noqa: BLE001 (ingestion must degrade, not crash)
+        print(f"[topics] screenshot ingestion failed: {e}", file=sys.stderr)
+        return []
+
+
 def get_topics(brand: str, count: int = 6, skip_used: bool = True) -> List[Dict]:
     """Return N topic objects, mixing real activity for personal brands with static banks.
-    
+
     If skip_used=True, topics used within the last 30 days are excluded.
     """
 
-    # ── Personal brands: mix real activity + static fallback ──
-    if brand in ("sahil_twitter", "sahil_linkedin") and _load_activity():
+    # ── Personal brands: screenshot ingestion + real activity + static ──
+    if brand in ("sahil_twitter", "sahil_linkedin"):
+        platform = "twitter" if brand == "sahil_twitter" else "linkedin"
+        from config import SCREENSHOT_MAX_PER_RUN
+        shot_topics = _screenshot_topics(brand, platform, min(SCREENSHOT_MAX_PER_RUN, count))
+    else:
+        shot_topics = []
+
+    if brand in ("sahil_twitter", "sahil_linkedin") and (_load_activity() or shot_topics):
         platform = "twitter" if brand == "sahil_twitter" else "linkedin"
         try:
             result = _ACTIVITY_COLLECTOR()
@@ -305,13 +423,56 @@ def get_topics(brand: str, count: int = 6, skip_used: bool = True) -> List[Dict]
             signals = []
             state = {"used_signals": []}
 
-        topics: List[Dict] = []
+        topics: List[Dict] = list(shot_topics)  # screenshots take priority
+        slots = max(0, count - len(topics))     # capacity left for activity/static
         used_ids: List[str] = []
+        brand_config = None
+        try:
+            from config import BRANDS
+            brand_config = BRANDS.get(brand, {})
+        except Exception:
+            pass
+        edu_mix = brand_config.get("educational_mix", 0.65) if brand_config else 0.65
+        edu_count = int(slots * edu_mix) if signals else 0
+        edu_signal_map = TWITTER_EDU_SIGNAL_MAP if brand == "sahil_twitter" else LINKEDIN_EDU_SIGNAL_MAP
 
-        # Convert signals to topic objects (recency-gated)
-        for signal in signals[:count]:
+        # Convert educational signals first (enriched with context + KB)
+        edu_signals = signals[:edu_count]
+        if edu_signals and _load_edu():
+            import context_enrich
+            import kb_retrieve
+            for signal in edu_signals:
+                stype = signal.get("signal_type", "")
+                pillar = edu_signal_map.get(stype, "AI Patterns")
+                summary = (signal.get("summary")
+                           or signal.get("variables", {}).get("summary", "")
+                           or signal.get("variables", {}).get("repo_name", "")
+                           or signal.get("variables", {}).get("title", ""))
+                summary = _clean_topic_summary(summary)
+                topic_text = f"{pillar}: {summary}" if summary else pillar
+                try:
+                    context = context_enrich.enrich(signal)
+                except Exception:
+                    context = ""
+                try:
+                    kb = kb_retrieve.retrieve(summary, limit=2)
+                except Exception:
+                    kb = []
+                topics.append({
+                    "id": str(uuid.uuid4())[:8],
+                    "pillar": pillar,
+                    "topic": topic_text,
+                    "educational": True,
+                    "context": context,
+                    "kb_snippets": kb,
+                })
+                used_ids.append(signal["signal_id"])
+
+        # Remaining signals use existing non-educational path
+        remaining_signals = signals[edu_count:slots]
+        for signal in remaining_signals:
             topic = _signal_to_topic(signal, platform)
-            if topic:  # Skip empty (stale) signals
+            if topic:
                 topics.append(topic)
                 used_ids.append(signal["signal_id"])
 

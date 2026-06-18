@@ -1,269 +1,200 @@
-"""Track A: art-direction prompt engine for illustrated/photographic images.
+"""Assemble Seedream prompts from the baoyu dimensional method.
 
-Replaces the old constant per-brand ``visual_descs`` dict (the cause of every
-post for a brand looking identical) with rich, fully art-directed prompts that
-vary per post. Proven 2026-06-08: the same cheap model goes from "embarrassingly
-poor" to good purely on prompt craft, so this is the main quality lever.
+The dimensional method (per baoyu_refs/references/style-presets.md):
+    prompt = Type (7 options) x Style (23 options) x optional Palette (4 options)
+    x per-brand art-direction reference.
 
-A prompt is composed from: subject + composition + lighting + medium/lens +
-palette + mood + quality tail + strong negatives. Each axis rotates by a
-deterministic hash of the draft id, so a brand's output is varied but
-reproducible (no random churn between runs).
+Each brand declares its preferred PRESETS for scene-style and data-style
+content. ``build_image_prompt`` reads the type from ``content_router`` and
+emits a fully-art-directed prompt by embedding the upstream style/palette
+files verbatim — never paraphrased, since the exact wording reproduces the
+canonical baoyu look.
 
-Usage:
-    p, neg, model = build_illustrated_prompt(brand, subject_hint, draft_id)
+Text rules (the OCR regen gate enforces these):
+  - SCENE and HERO: no text in the image. OCR scans for any text; if any
+    significant text is found, the image is rejected and regenerated.
+  - DATA types (infographic, comparison, framework, flowchart, timeline):
+    short labels (1-3 words) and key-value pairs only. OCR verifies them.
+    Title is included as a section header, not rendered as a banner.
 """
+
 from __future__ import annotations
+from typing import Tuple
 
-import hashlib
-from typing import Optional, Tuple
+import baoyu_loader as bl
+from content_router import content_type_for
+from infographic_content import build_structured
 
-from model_config import BASE_MODEL, HERO_MODEL
-
-QUALITY = ("photorealistic, sharp focus, high detail, high dynamic range, "
-           "professional, well composed")
-ILLUS_QUALITY = ("highly detailed, clean linework, cohesive palette, "
-                 "professional illustration, well composed")
-NEGATIVE = ("text, letters, words, captions, watermark, logo, signature, gibberish, "
-            "cartoon, lowres, oversaturated, harsh flash, cluttered, messy, amateur, "
-            "deformed hands, extra fingers, blurry, jpeg artifacts, plastic skin, distorted")
-
-# Per brand -> genre -> art-direction axes. {subject} is the per-post hook.
-# Genres mirror the signed-off Track A taxonomy.
-GENRES = {
+# Per-brand preset map. Each brand picks a canonical scene-style and a
+# canonical data-style from the upstream baoyu preset names (see
+# baoyu_refs/SOURCE.md for the full table). The "ref" string is the
+# brand-specific art direction appended to every prompt.
+BRAND_STYLE_MAP = {
     "plenishd": {
-        "food_photo": {
-            "base": "Warm editorial food photography of {subject}",
-            "comp": ["overhead flat-lay with generous negative space",
-                     "tight 45-degree hero angle, shallow focus",
-                     "rustic table scene, ingredients scattered around"],
-            "light": ["golden natural morning light, soft shadows",
-                      "warm side light through a kitchen window"],
-            "medium": ["shot on an 85mm lens at f/2.0, creamy bokeh",
-                       "shot on a 50mm lens, crisp appetising detail"],
-            "palette": "amber, warm-neutral and cream tones",
-            "mood": "appetising, inviting, homely",
-            "quality": QUALITY, "model": BASE_MODEL,
-        },
-        "craft_kitchen": {
-            "base": "Hand-drawn editorial illustration of {subject}",
-            "comp": ["cosy kitchen scene, ingredients laid out neatly",
-                     "charming recipe-card composition with space at top"],
-            "light": ["soft warm daylight", "gentle morning glow"],
-            "medium": ["gouache and ink with kraft-paper texture",
-                       "warm watercolour with visible paper grain"],
-            "palette": "muted amber, cream and soft green",
-            "mood": "charming, warm, homely",
-            "quality": ILLUS_QUALITY, "model": BASE_MODEL,
-        },
+        "scene":  "lifestyle",          # scene + watercolor — food/kitchen feel
+        "data":   "warm-knowledge",     # infographic + vector-illustration + warm
+        "model":  "seedream45",
+        "ref":    "warm appetising UK kitchen, soft natural light, hand-painted feel",
     },
     "coachos": {
-        "editorial_sport": {
-            "base": "Premium editorial sports photography of {subject}",
-            "comp": ["tight three-quarter close-up, negative space upper third",
-                     "wide cinematic frame, lone figure, clean grid composition"],
-            "light": ["soft diffused overcast morning light from camera-left",
-                      "flat grey natural light, dew on the grass catching light"],
-            "medium": ["85mm lens at f/2.0, creamy bokeh of an empty pitch",
-                       "documentary 35mm, matte filmic texture"],
-            "palette": "near-monochrome desaturated grade with a single muted emerald-green accent",
-            "mood": "quiet, determined, high craft",
-            "quality": QUALITY, "model": BASE_MODEL,
-        },
-        "analytics_illustration": {
-            "base": "Sophisticated editorial illustration of {subject}",
-            "comp": ["clean modern sports-analytics layout, stylised pitch elements",
-                     "minimal schematic composition, generous whitespace"],
-            "light": ["even studio lighting", "flat editorial lighting"],
-            "medium": ["clean vector-leaning illustration, subtle grain",
-                       "premium infographic-style rendering"],
-            "palette": "near-monochrome with a restrained green accent",
-            "mood": "precise, premium, modern",
-            "quality": ILLUS_QUALITY, "model": BASE_MODEL,
-        },
+        "scene":  "storytelling",       # scene + warm — Saturday morning pitch
+        "data":   "ink-notes-flow",     # flowchart + ink-notes + mono-ink
+        "model":  "seedream45",
+        "ref":    "B&W documentary grassroots football, restrained, one green accent",
     },
     "matchdaymaestro": {
-        "matchday_hero": {
-            "base": "Cinematic matchday-night illustration of {subject}",
-            "comp": ["dramatic low hero angle under floodlights",
-                     "dynamic action framing, deep stadium backdrop"],
-            "light": ["intense stadium floodlights, dramatic rim light",
-                      "crimson and gold rim light against deep blue night"],
-            "medium": ["premium sports-poster render, ultra detailed",
-                       "hyper-detailed cinematic illustration"],
-            "palette": "deep navy night with electric crimson and gold accents",
-            "mood": "energetic, epic, high-contrast",
-            "quality": ILLUS_QUALITY, "model": HERO_MODEL,
-        },
-        # Reference-set learning: mythic engraved hero posters read as premium.
-        "engraved_legend": {
-            "base": "Dark mythic engraved poster of {subject} as a footballing legend",
-            "comp": ["monumental low-angle heroic figure, stadium ruins and floodlight shafts behind",
-                     "tight dramatic portrait, ornate engraved detail, ball and boots rendered like ancient relics"],
-            "light": ["single dramatic shaft of floodlight through smoke, deep chiaroscuro",
-                      "ember-lit haze catching fine engraved linework"],
-            "medium": ["antique copperplate engraving with ink wash, heavy paper grain",
-                       "dark etched poster art, dense crosshatch shading"],
-            "palette": "charcoal black and desaturated navy with a faint crimson-gold glow",
-            "mood": "mythic, reverent, epic",
-            "quality": ILLUS_QUALITY, "model": BASE_MODEL,
-        },
-        "bold_poster": {
-            "base": "Bold dynamic matchday poster illustration of {subject}",
-            "comp": ["stylised silhouette, high-contrast graphic poster art",
-                     "punchy diagonal composition, strong focal subject"],
-            "light": ["dramatic floodlit backlight", "high-contrast stadium glow"],
-            "medium": ["graphic poster illustration, flat bold shapes",
-                       "screen-print poster aesthetic"],
-            "palette": "deep navy with electric crimson and gold",
-            "mood": "punchy, energetic",
-            "quality": ILLUS_QUALITY, "model": BASE_MODEL,
-        },
-    },
-    "kicktionary": {
-        "storybook": {
-            "base": "Award-winning children's picture-book watercolour illustration of {subject}",
-            "comp": ["friendly mid-action poses, open sky at the top",
-                     "playful balanced composition, rounded characters"],
-            "light": ["soft natural sunlight", "bright cheerful daylight"],
-            "medium": ["hand-painted gouache and watercolour, visible paper grain, gentle ink linework",
-                       "soft watercolour textures, modern kids'-book illustration"],
-            "palette": "cheerful grass-green, sky-blue and sunny yellow",
-            "mood": "joyful, wholesome, educational",
-            "quality": ILLUS_QUALITY, "model": BASE_MODEL,
-        },
-        "comic": {
-            "base": "Ligne-claire comic panel of {subject}",
-            "comp": ["dynamic action lines, clear focal character",
-                     "bold panel composition, expressive motion"],
-            "light": ["flat bright comic lighting", "cheerful even lighting"],
-            "medium": ["clean bold outlines, flat cheerful colours, European comic style",
-                       "ligne-claire ink with flat colour fills"],
-            "palette": "bright primary palette",
-            "mood": "fun, lively, educational",
-            "quality": ILLUS_QUALITY, "model": BASE_MODEL,
-        },
+        "scene":  "cinematic",          # scene + screen-print — matchday poster
+        "data":   "editorial-poster",   # comparison + screen-print
+        "model":  "seedream45",
+        "ref":    "retro halftone matchday poster, off-black background, burnt orange and crimson accents",
     },
     "sahil_twitter": {
-        # Modelled on the 2026-06 reference set (~/Reference Images): dense
-        # cyberpunk HUD posters — layered diegetic interface panels, a strong
-        # character focal point, neon rim light, extreme detail density.
-        # Panels carry abstract glyphs only; real text is overlaid in Pillow.
-        "hud_poster": {
-            "base": "Hyper-detailed cyberpunk anime poster of {subject}",
-            "comp": ["lone focal character centre-frame surrounded by layered floating holographic HUD panels and status readouts with abstract glyphs",
-                     "dense diegetic interface panels framing the edges, dramatic depth, rain-slick neon cityscape behind the focal subject"],
-            "light": ["glowing violet and magenta neon rim light against near-black, volumetric haze",
-                      "electric cyan and green terminal glow, deep shadow, cinematic contrast"],
-            "medium": ["ultra-detailed digital anime illustration, intricate gear and cable detail, crisp rendering",
-                       "premium cyberpunk key-art quality, dense environmental storytelling props"],
-            "palette": "near-black with electric violet, magenta and acid-green accents",
-            "mood": "intense, technical, obsessive craft",
-            "quality": ILLUS_QUALITY, "model": HERO_MODEL,
-        },
-        "dark_engraving": {
-            "base": "Dark vintage engraved-etching poster of {subject}",
-            "comp": ["monumental centred heroic figure emerging from shadow, ruined classical architecture behind",
-                     "tight dramatic three-quarter portrait, ornate engraved detail filling the frame"],
-            "light": ["single shaft of pale light from above, deep chiaroscuro",
-                      "smoky atmospheric glow catching fine engraved linework"],
-            "medium": ["antique copperplate engraving and ink wash, heavy paper grain, Gustave Doré influence",
-                       "dark academia etching, dense crosshatch shading"],
-            "palette": "desaturated sepia-green and charcoal black with a faint gold glow",
-            "mood": "epic, mythic, timeless",
-            "quality": ILLUS_QUALITY, "model": BASE_MODEL,
-        },
-        "ai_concept": {
-            "base": "Striking conceptual editorial tech illustration: {subject}",
-            "comp": ["sleek isometric three-quarter perspective, negative space top-right",
-                     "central glowing focal metaphor, dramatic depth"],
-            "light": ["dramatic chiaroscuro lighting, volumetric haze",
-                      "moody key light, deep shadow"],
-            "medium": ["premium WIRED-cover render, intricate circuit-trace detail, crisp 3D-render quality",
-                       "sophisticated editorial tech illustration, fine detail"],
-            "palette": "deep near-black with electric indigo and acid-lime accents",
-            "mood": "sophisticated, cinematic, intelligent",
-            "quality": ILLUS_QUALITY, "model": HERO_MODEL,
-        },
-        "retro_tech": {
-            "base": "Retro 1970s technical illustration of {subject}",
-            "comp": ["vintage science-magazine layout, centred subject",
-                     "charming retro diagram composition"],
-            "light": ["flat retro print lighting", "even vintage illustration light"],
-            "medium": ["halftone print texture, vintage science-magazine aesthetic",
-                       "screen-print retro illustration with grain"],
-            "palette": "warm mustard, rust and teal",
-            "mood": "charming, nostalgic, clever",
-            "quality": ILLUS_QUALITY, "model": BASE_MODEL,
-        },
+        "scene":  "dark-hud",           # infographic + dark-cyberpunk-hud
+        "data":   "dark-hud",           # same dark-hud for technical posts
+        "model":  "seedream45",
+        "ref":    "dev-tool launch, system architecture, performance metrics, command-line announcements, build-in-public",
     },
     "sahil_linkedin": {
-        "editorial_concept": {
-            "base": "Restrained professional editorial illustration: {subject}",
-            "comp": ["uncluttered composition, single clear focal idea, generous whitespace",
-                     "clean modern business-magazine layout"],
-            "light": ["soft neutral studio light", "even editorial lighting"],
-            "medium": ["sophisticated business-magazine illustration, subtle texture",
-                       "premium minimal editorial render"],
-            "palette": "muted grey tones with one restrained indigo accent",
-            "mood": "considered, premium, professional",
-            "quality": ILLUS_QUALITY, "model": BASE_MODEL,
-        },
+        "scene":  "business-compare",   # comparison + elegant
+        "data":   "ink-notes-framework",# framework + ink-notes + mono-ink
+        "model":  "seedream45",
+        "ref":    "HBR-style restrained editorial, monochrome with one indigo accent",
     },
 }
-
-_DEFAULT_BRAND = "sahil_twitter"
-
-
-def _seed(draft_id: str, brand: str) -> int:
-    return int(hashlib.sha256(f"{brand}:{draft_id}".encode()).hexdigest(), 16)
+_DEFAULT = BRAND_STYLE_MAP["sahil_twitter"]
+_DATA_TYPES = {"infographic", "comparison", "framework", "flowchart", "timeline"}
+_TEXTLESS_TYPES = {"scene", "hero"}
+_ASPECT = {"instagram": "portrait_4_5", "tiktok": "portrait_9_16", "linkedin": "landscape"}
 
 
-def _pick(seq, seed: int, salt: int = 0):
-    return seq[(seed + salt) % len(seq)]
+def _aspect(platform: str) -> str:
+    return _ASPECT.get((platform or "").lower(), "square")
 
 
-def pick_genre(brand: str, draft_id: str, pillar: str = "") -> str:
-    """Deterministically choose a genre for this brand+post."""
-    genres = list(GENRES.get(brand, GENRES[_DEFAULT_BRAND]).keys())
-    return _pick(genres, _seed(draft_id, brand), salt=7)
+def _expected_strings(draft: dict, ctype: str) -> list:
+    """Text the model must render correctly (for the OCR gate).
 
-
-def build_illustrated_prompt(
-    brand: str,
-    subject_hint: str,
-    draft_id: str = "",
-    genre: Optional[str] = None,
-    force_hero: bool = False,
-) -> Tuple[str, str, str]:
-    """Return (prompt, negative_prompt, model_key) for an illustrated base image.
-
-    ``subject_hint`` is the per-post hook (topic/title/scene). It is the ONLY
-    free-text input; everything else is art-directed and rotated by draft id.
+    SCENE and HERO are TEXTLESS — the OCR post-check rejects any image with
+    significant text. DATA types render short labels only. The title is
+    the primary expected text. Body labels are returned but the prompt
+    also includes them so the model knows what to render.
     """
-    brand = (brand or "").lower()
-    book = GENRES.get(brand, GENRES[_DEFAULT_BRAND])
-    g = genre if genre in book else pick_genre(brand, draft_id)
-    spec = book[g]
-    seed = _seed(draft_id, brand)
-
-    subject = (subject_hint or "the subject").strip().rstrip(".")
-    parts = [
-        spec["base"].format(subject=subject) + ".",
-        _pick(spec["comp"], seed, 1) + ".",
-        _pick(spec["light"], seed, 2) + ".",
-        _pick(spec["medium"], seed, 3) + ".",
-        f"Colour palette: {spec['palette']}.",
-        f"Mood: {spec['mood']}.",
-        spec["quality"] + ".",
-        "No text anywhere in the image.",
-    ]
-    prompt = " ".join(parts)
-    model = HERO_MODEL if force_hero else spec.get("model", BASE_MODEL)
-    return prompt, NEGATIVE, model
+    if ctype in _TEXTLESS_TYPES:
+        return []
+    if (draft.get("visual_text") or "").lower() == "none":
+        return []
+    out = []
+    t = (draft.get("title") or draft.get("topic") or "").strip()
+    if 0 < len(t) <= 40:
+        out.append(t)
+    # Dedupe, cap at 4
+    seen, deduped = set(), []
+    for s in out:
+        s_norm = s.strip().lower()
+        if s_norm and s_norm not in seen and len(deduped) < 4:
+            seen.add(s_norm)
+            deduped.append(s)
+    return deduped
 
 
-if __name__ == "__main__":
-    for b in GENRES:
-        p, n, m = build_illustrated_prompt(b, "a worked example subject", draft_id="demo123")
-        print(f"\n## {b}  (model={m})\n{p}")
+def _expected_body_labels(body: str, max_labels: int = 5, max_len: int = 24) -> list:
+    """Short body labels to render in the image. These are returned separately
+    from _expected_strings so the OCR check can be looser (the model often
+    paraphrases or abbreviates)."""
+    import re
+    parts = re.split(r"[.;\n]|\bbut\b|\bwhereas\b|\bwhile\b", body or "")
+    out = []
+    for p in parts:
+        p = p.strip(" ,;:.-")
+        if 1 < len(p.split()) <= 4 and len(p) <= max_len:
+            out.append(p)
+        if len(out) >= max_labels:
+            break
+    return out
+
+
+def _structured_block(draft: dict, ctype: str) -> str:
+    """Build the data-type content block. Emits short labels, not full sentences."""
+    s = build_structured(draft, ctype)
+    title = (s.get("title") or "").strip()
+    parts = [f"{ctype.upper()} illustration titled '{title}'."] if title else [f"{ctype.upper()} illustration."]
+    if s.get("items"):
+        parts.append("Key-value rows:")
+        for i in s["items"][:4]:
+            parts.append(f"  - {i['name'][:18]}: {i['value'][:24]}")
+    if s.get("steps"):
+        parts.append("Ordered steps:")
+        for n, step in enumerate(s["steps"][:5], 1):
+            parts.append(f"  {n}. {step[:30]}")
+    if s.get("nodes"):
+        parts.append("Nodes:")
+        for n, node in enumerate(s["nodes"][:5], 1):
+            parts.append(f"  [{n}] {node[:20]}")
+    if s.get("points"):
+        parts.append("Points:")
+        for p in s["points"][:5]:
+            parts.append(f"  - {p[:30]}")
+    if s.get("takeaway"):
+        parts.append(f"Bottom: {s['takeaway'][:50]}")
+    return "\n".join(parts)
+
+
+def _scene_block(draft: dict, ctype: str, brand_ref: str) -> str:
+    subject = (draft.get("visual_description") or draft.get("title")
+               or draft.get("topic") or "").strip()
+    return (
+        f"{ctype.upper()} scene.\n"
+        f"Subject: {subject}.\n"
+        f"World: {brand_ref}.\n"
+        f"ABSOLUTELY NO TEXT anywhere in the image. No titles, captions, labels, "
+        f"watermarks, page numbers, or any other text. Pure visual only."
+    )
+
+
+def _prompt_parts(ctype: str, preset: dict, content_block: str,
+                  brand_ref: str) -> list:
+    """Assemble the prompt section list."""
+    parts = [f"TYPE: {ctype.upper()} illustration."]
+    style = preset.get("style", "")
+    if style:
+        parts.append(f"STYLE:\n{bl.style_block(style)}")
+    palette = preset.get("palette")
+    if palette:
+        pb = bl.palette_block(palette)
+        if pb:
+            parts.append(f"PALETTE:\n{pb}")
+    parts.append(content_block)
+    if ctype in _TEXTLESS_TYPES:
+        parts.append("TEXT RULE: No text in the image. No labels, no captions, no watermarks, no titles. Pure visual scene only.")
+    else:
+        parts.append("TEXT RULE: Render only the structured labels listed below. No additional captions, watermarks, or marketing text.")
+    parts.append(bl.universal_rules())
+    return parts
+
+
+def build_image_prompt(draft: dict) -> Tuple[str, str, str, list]:
+    """Return (prompt, aspect, model_key, expected_strings)."""
+    brand = (draft.get("brand") or "").lower()
+    spec = BRAND_STYLE_MAP.get(brand, _DEFAULT)
+    ctype = content_type_for(draft)
+    preset_name = spec["data"] if ctype in _DATA_TYPES else spec["scene"]
+    preset = bl.preset_for(preset_name)
+    preset.setdefault("type", ctype)
+    aspect = _aspect(draft.get("platform"))
+
+    if ctype in _DATA_TYPES:
+        content_block = _structured_block(draft, ctype)
+    else:
+        content_block = _scene_block(draft, ctype, spec["ref"])
+
+    parts = _prompt_parts(ctype, preset, content_block, spec["ref"])
+    expected = _expected_strings(draft, ctype)
+    if expected:
+        # Only the title is enforced via OCR; body labels are aspirational
+        # (the model often paraphrases or abbreviates them).
+        parts.append("Render the title as a top header in the image, exactly:\n"
+                     f'  "{expected[0]}"\n'
+                     "No other text. No captions, watermarks, page numbers.")
+
+    prompt = "\n\n".join(parts)
+    return prompt, aspect, spec["model"], expected

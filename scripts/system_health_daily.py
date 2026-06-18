@@ -273,7 +273,7 @@ def check_stale_crons() -> dict | None:
                         run_dt = dt.datetime.fromisoformat(run_at)
                         if run_dt > n:
                             continue  # Future one-shot — not stale yet
-                    except:
+                    except (ValueError, TypeError):
                         pass
             # Never run but enabled > 24h
             created = j.get("created_at", "")
@@ -282,7 +282,7 @@ def check_stale_crons() -> dict | None:
                     created_dt = dt.datetime.fromisoformat(created)
                     if (n - created_dt).days > 1:
                         stale.append(f"`{j.get('name')}` — never run, created {(n - created_dt).days}d ago")
-                except:
+                except (ValueError, TypeError):
                     pass
             continue
         try:

@@ -331,19 +331,15 @@ def evaluate_credits_notices(
             active.add(CREDITS_USAGE_KEY)
         latch["usage_band"] = target_band
 
-    # ── grant_spent ──────────────────────────────────────────────────────────
-    if grant_cond and "credits.grant_spent" not in active:
-        to_show.append(
-            AgentNotice(
-                text=f"• Grant spent · ${state.purchased_usd} top-up left",
-                level="info",
-                kind=CREDITS_NOTICE_KIND,
-                key="credits.grant_spent",
-                id="credits.grant_spent",
-            )
-        )
-        active.add("credits.grant_spent")
-    elif "credits.grant_spent" in active and not grant_cond:
+    # ── grant_spent (REMOVED) ────────────────────────────────────────────────
+    # The "Grant spent · $X top-up left" sticky notice was removed because it
+    # camps the status bar permanently with no actionable next step. The usage
+    # bands (50/75/90%) and the depleted notice still cover the remaining
+    # escalation path. grant_cond is still computed above for the top-up
+    # suppression logic (a user on purchased credits should not see subscription
+    # cap percentage warnings), but the standalone notice is no longer emitted.
+    # Clear any stale grant_spent notice from a prior session.
+    if "credits.grant_spent" in active:
         to_clear.append("credits.grant_spent")
         active.discard("credits.grant_spent")
 

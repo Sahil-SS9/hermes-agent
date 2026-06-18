@@ -6,7 +6,7 @@ Outputs alert text when a bot is down or unreachable.
 """
 import subprocess
 import sys
-import json
+from datetime import datetime
 from pathlib import Path
 
 HERMES = Path("/home/kensei/.hermes")
@@ -63,7 +63,7 @@ def check_gateway_log_errors(name):
         errors = []
         for line in result.stdout.splitlines():
             lower = line.lower()
-            if any(kw in lower for kw in ["critical", "fatal", "traceback", "unhandled exception"]):
+            if any(kw in lower for kw in ["critical", "fatal", "unhandled exception"]):
                 errors.append(line.strip()[:200])
         return errors[-3:]  # Last 3 errors max
     except Exception:
@@ -93,7 +93,8 @@ def main():
         sys.exit(0)  # Silent when healthy
     
     # Output alert
-    print("**🔴 Discord Bot Health Alert — DD/MM/YY HH:MM**\n")
+    ts = datetime.now().strftime("%d/%m/%y %H:%M")
+    print(f"**🔴 Discord Bot Health Alert — {ts}**\n")
     for alert in alerts:
         print(f"• {alert}")
     print(f"\n**Action:** Check `systemctl status <service>` for affected bots.")

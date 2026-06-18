@@ -40,6 +40,7 @@ MAX_PER_TYPE = {
     "research_signal": 1,
     "gitradar_repo": 2,
     "architecture": 1,
+    "harness_change": 2,
 }
 
 
@@ -494,6 +495,56 @@ def collect_architecture_insights(state: dict) -> list[dict]:
     ]
 
 
+_HARNESS_REPOS = [
+    Path(os.path.expanduser("~/repos/KenseiAgent")),
+    Path(os.path.expanduser("~/.hermes/profiles")),   # declarative config only; READ-ONLY
+]
+_HARNESS_KEYWORDS = ("model", "routing", "fallback", "governance", "profile", "cron",
+                     "context", "memory", "skill", "tool", "harness", "orchestrat")
+
+
+def _git_log(repo: "Path", n: int = 15) -> str:
+    """Recent commits as 'hash\x1fsubject\x1fdate' lines. Empty on any failure."""
+    try:
+        r = subprocess.run(
+            ["git", "-C", str(repo), "log", f"-{n}", "--no-merges",
+             "--pretty=format:%h\x1f%s\x1f%cs", "--since=10.days"],
+            capture_output=True, text=True, timeout=15)
+        return r.stdout if r.returncode == 0 else ""
+    except Exception:
+        return ""
+
+
+def collect_harness_changes(state: dict) -> list:
+    """Surface 'what I adjusted in my agentic harness and why' from KenseiAgent +
+    profiles git logs. Read-only; degrades to [] on any error."""
+    signals = []
+    cap = MAX_PER_TYPE.get("harness_change", 2)
+    for repo in _HARNESS_REPOS:
+        if not (repo / ".git").exists():
+            continue
+        for line in _git_log(repo).splitlines():
+            parts = line.split("\x1f")
+            if len(parts) != 3:
+                continue
+            sha, subject, date = parts
+            if not any(k in subject.lower() for k in _HARNESS_KEYWORDS):
+                continue
+            sid = f"harness:{repo.name}:{sha}"
+            if _is_used(state, sid):
+                continue
+            signals.append({
+                "signal_id": sid, "signal_type": "harness_change",
+                "summary": subject.strip(), "repo": repo.name, "sha": sha, "date": date,
+                "priority": 8, "pillar": "harness_tuning",
+                "freshness_hours": 72,
+                "variables": {"summary": subject.strip(), "repo": repo.name, "sha": sha},
+            })
+            if len(signals) >= cap:
+                return signals
+    return signals
+
+
 def collect_all() -> dict:
     """Run all collectors and return structured activity data.
 
@@ -513,6 +564,7 @@ def collect_all() -> dict:
         collect_research_digest,
         collect_github_radar,
         collect_architecture_insights,
+        collect_harness_changes,
     ]
 
     for collector in collectors:

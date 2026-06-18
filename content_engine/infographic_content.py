@@ -69,3 +69,28 @@ def build_ig_fields(draft: dict) -> dict:
     pts = _parts(body)[:5]
     labels = f"Title: {title}. {('Key points: ' + '; '.join(pts) + '. ') if pts else ''}Takeaway: {takeaway}."
     return {"layout": layout, "labels": labels}
+
+
+def build_structured(draft: dict, ctype: str) -> dict:
+    """Return layout-aware STRUCTURED data (not a model-prompt string) for
+    prompt_engine to render. Shapes: comparison->items[], flowchart/timeline->
+    steps[], framework->nodes[], infographic->points[]."""
+    title = (draft.get("title") or draft.get("topic") or "").strip()
+    body = (draft.get("body_text") or "").strip()
+    parts = _parts(body)
+    takeaway = title or (parts[:1] or [""])[0]
+    base = {"type": ctype, "title": title, "takeaway": takeaway}
+    if ctype == "comparison":
+        items = []
+        for p in parts[:4]:
+            if ":" in p:
+                name, val = p.split(":", 1)
+                items.append({"name": name.strip()[:24], "value": val.strip()[:60]})
+        if not items:
+            items = [{"name": s, "value": ""} for s in (_parts(title) or [title])[:3]]
+        return {**base, "items": items}
+    if ctype in ("flowchart", "timeline"):
+        return {**base, "steps": [p[:70] for p in parts[:6]] or [title]}
+    if ctype == "framework":
+        return {**base, "nodes": [p[:40] for p in parts[:6]] or [title]}
+    return {**base, "points": [p[:70] for p in parts[:6]]}

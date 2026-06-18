@@ -26,7 +26,7 @@ PY
     count=$(printf '%s\n' "$parsed" | sed -n '2p')
     
     # Generate HTML report
-    TOKEN_HEALTH_JSON="$output" /home/kensei/repos/KenseiAgent/.venv/bin/python - <<PY
+    TOKEN_HEALTH_JSON="$output" /home/kensei/repos/KenseiAgent/.venv/bin/python - <<PY > "$report_file"
 import json, os
 d = json.loads(os.environ["TOKEN_HEALTH_JSON"])
 html = '''<!DOCTYPE html>
@@ -38,7 +38,7 @@ h1 { color: #fbbf24; }
 .healthy { color: #4ade80; }
 .warning { color: #fbbf24; }
 .expired { color: #f87171; }
-table { border-collapse: collapse; width: 100%%; margin-top: 1rem; }
+table { border-collapse: collapse; width: 100%; margin-top: 1rem; }
 th, td { padding: 0.5rem 1rem; text-align: left; border-bottom: 1px solid #2c2a28; }
 th { background: #1c1a18; color: #a8a29e; font-size: 0.8rem; text-transform: uppercase; }
 .card { background: #1c1a18; border: 1px solid #34302c; border-radius: 8px; padding: 1rem; margin-bottom: 1rem; }
@@ -65,7 +65,7 @@ for acc in d['accounts']:
 html += '''</table>
 </body></html>'''
 print(html)
-PY > "$report_file"
+PY
     
     if [ "$overall" = "healthy" ]; then
         echo "✅ Token health · all OK ($count)"

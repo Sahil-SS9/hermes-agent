@@ -148,14 +148,27 @@ if $DRY_RUN; then
         echo "  would kill: PID $pid ($comm)"
     done
     echo "Pass --apply to execute."
-else
-    for pid in "${KILL_LIST[@]}"; do
-        comm=$(ps -o comm= -p "$pid" 2>/dev/null | tr -d ' ' || echo "<gone>")
-        subtree=$(ps --ppid "$pid" -o pid= 2>/dev/null || true)
-        for child in $subtree; do kill -TERM "$child" 2>/dev/null || true; done
-        kill -TERM "$pid" 2>/dev/null && echo "killed: PID $pid ($comm)" || true
-        KILLED=$((KILLED + 1))
-    done
-    echo "Killed $KILLED orphan MCP processes."
-    free -m | awk '/^Mem:/{printf "RAM: %s used / %s total\n", $3, $2}'
+    exit 0
 fi
+
+# Kill mode: silent on normal operations (≤5 orphans = routine cron cleanup)
+# Only output when kill count is high (possible runaway) or kills fail
+THRESHOLD=5
+
+for pid in "${KILL_LIST[@]}"; do
+    comm=$(ps -o comm= -p "$pid" 2>/dev/null | tr -d ' ' || echo "<gone>")
+    subtree=$(ps --ppid "$pid" -o pid= 2>/dev/null || true)
+    for child in $subtree; do kill -TERM "$child" 2>/dev/null || true; done
+    kill -TERM "$pid" 2>/dev/null && KILLED=$((KILLED + 1)) || {
+        echo "WARN: failed to kill PID $pid ($comm)"
+    }
+done
+
+# Silent exit for routine cleanup (≤ threshold orphans)
+if [[ $KILLED -le $THRESHOLD ]]; then
+    exit 0
+fi
+
+# Only report large kill batches (possible runaway spawning)
+echo "⚠️ Killed $KILLED orphan MCP processes (threshold: $THRESHOLD)"
+free -m | awk '/^Mem:/{printf "RAM: %s used / %s total\n", $3, $2}'

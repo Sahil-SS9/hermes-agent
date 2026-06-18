@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Mailbox Digest — Monday 08/06/2026. Cross-account Gmail + Outlook audit."""
+"""Mailbox Digest — cross-account Gmail + Outlook audit. Dynamic date support."""
 
 import asyncio
 import json
@@ -24,7 +24,12 @@ OUTLOOK_ACCOUNTS = [
     ("MatchdayMstr", "matchdaymaestro@outlook.com"),
 ]
 
-RUNBOOK_DIR = Path.home() / ".hermes" / "runbooks" / "mailbox-digest" / "2026-06-08"
+NOW = datetime.now(timezone.utc)
+TODAY_STR = NOW.strftime("%Y-%m-%d")
+TODAY_DISPLAY = f"{NOW.strftime('%A %d/%m/%Y')}"
+TODAY_DISPLAY_SHORT = NOW.strftime("%d/%m/%Y")
+DATESTAMP = NOW.strftime("%Y%m%d-%H%M")
+RUNBOOK_DIR = Path.home() / ".hermes" / "runbooks" / "mailbox-digest" / TODAY_STR
 RUNBOOK_DIR.mkdir(parents=True, exist_ok=True)
 
 results = {
@@ -54,27 +59,25 @@ async def call_mcp_tool(session, tool_name, args, raw_return=False):
 
 async def check_gmail_account(session, label, email):
     """Check unread count and fetch recent metadata for a Gmail account."""
-    
+
     # Step 1: Get real unread count with page_size=50 (max visible count)
     raw = await call_mcp_tool(session, "search_gmail_messages", {
         "query": "is:unread",
         "user_google_email": email,
         "page_size": 50,
     })
-    
+
     match = re.search(r'Found\s+(\d+)\s+messages matching', raw)
-    # The count is capped by page_size — if we got 50, true count is >= 50
     reported_count = int(match.group(1)) if match else 0
     ids = re.findall(r'Message ID:\s*(\S+)', raw)
-    
-    # True count: if we got the page_size cap, the actual count is ">= page_size"
+
     if reported_count >= 50:
-        unread = f"50+"
+        unread = "50+"
         display_count = 50
     else:
         unread = str(reported_count)
         display_count = reported_count
-    
+
     info = {
         "label": label,
         "email": email,
@@ -82,11 +85,11 @@ async def check_gmail_account(session, label, email):
         "exact_count": reported_count,
         "status": "ok",
     }
-    
+
     if not ids:
         info["recent"] = []
         return info
-    
+
     # Step 2: Fetch metadata for first 25 messages
     batch_ids = ids[:25]
     batch_raw = await call_mcp_tool(session, "get_gmail_messages_content_batch", {
@@ -94,10 +97,10 @@ async def check_gmail_account(session, label, email):
         "user_google_email": email,
         "format": "metadata",
     })
-    
+
     messages = parse_gmail_metadata(batch_raw)
     info["recent"] = messages
-    
+
     for msg in messages:
         results["all_items"].append({
             "subject": msg.get("subject", ""),
@@ -108,46 +111,40 @@ async def check_gmail_account(session, label, email):
             "account_label": label,
             "id": msg.get("id", ""),
         })
-    
+
     return info
 
 
 def parse_gmail_metadata(text):
-    """Parse Gmail message metadata from batch output.
-    
-    Metadata format output uses 'Message ID:' as delimiter between messages.
-    Fields available: Subject, From, Date, To, Message-ID, List-Unsubscribe, Web Link.
-    No snippet/body in metadata mode.
-    """
+    """Parse Gmail message metadata from batch output."""
     items = []
-    # Split by 'Message ID:' — each block starts with the message ID
     blocks = re.split(r'\n(?=Message ID:\s*\S)', text)
-    
+
     for block in blocks:
         if not block.strip() or block.strip() == '---':
             continue
-        
+
         item = {"id": "", "subject": "", "from": "", "date": "", "snippet": ""}
-        
+
         m_id = re.search(r'Message ID:\s*(\S+)', block)
         if m_id:
             item["id"] = m_id.group(1)
-        
+
         m_subj = re.search(r'Subject:\s*(.+?)(?:\n|$)', block)
         if m_subj:
             item["subject"] = m_subj.group(1).strip()
-        
+
         m_from = re.search(r'From:\s*(.+?)(?:\n|$)', block)
         if m_from:
             item["from"] = m_from.group(1).strip()
-        
+
         m_date = re.search(r'Date:\s*(.+?)(?:\n|$)', block)
         if m_date:
             item["date"] = m_date.group(1).strip()
-        
+
         if item.get("id") or item.get("subject"):
             items.append(item)
-    
+
     return items
 
 
@@ -159,13 +156,13 @@ async def check_outlook_account(session, label, email):
         "select": "id,subject,from,receivedDateTime,bodyPreview,isRead",
         "top": 25,
     })
-    
+
     try:
         data = json.loads(raw)
         messages = data.get("value", []) if isinstance(data, dict) else (data if isinstance(data, list) else [])
     except json.JSONDecodeError:
         messages = []
-    
+
     info = {
         "label": label,
         "email": email,
@@ -174,14 +171,14 @@ async def check_outlook_account(session, label, email):
         "status": "ok",
         "recent": messages,
     }
-    
+
     for msg in messages:
         sender = ""
         if isinstance(msg.get("from"), dict):
             sender = msg["from"].get("emailAddress", {}).get("address", "")
         elif isinstance(msg.get("from"), str):
             sender = msg["from"]
-        
+
         results["all_items"].append({
             "subject": msg.get("subject", ""),
             "from": sender,
@@ -191,7 +188,7 @@ async def check_outlook_account(session, label, email):
             "account_label": label,
             "id": msg.get("id", ""),
         })
-    
+
     return info
 
 
@@ -201,8 +198,8 @@ def categorize_item(subject, sender, body=""):
     sender_lower = (sender or "").lower()
     body_lower = (body or "").lower()
     combined = f"{subj_lower} {sender_lower} {body_lower}"
-    
-    # ACTION REQUIRED — invoices, payments due, legal, job responses, gov deadlines
+
+    # ACTION REQUIRED
     action_kw = [
         "invoice", "overdue invoice", "credit control",
         "job offer", "interview", "re-confirm", "reconfirm",
@@ -213,13 +210,11 @@ def categorize_item(subject, sender, body=""):
     for kw in action_kw:
         if kw in combined:
             return "action"
-    
-    # BUT "confirmation of payment" = receipt (already paid), not action
+
     if "confirmation" in combined and "payment" in combined and "overdue" not in combined:
-        # This is a receipt — personal/finance
         return "personal"
-    
-    # FYI / MONITORING — security, system alerts, CI failures, infra
+
+    # FYI / MONITORING
     fyi_kw = [
         "security alert", "new sign-in", "sign-in notification",
         "unusual sign-in", "password changed", "recovery code",
@@ -233,12 +228,10 @@ def categorize_item(subject, sender, body=""):
     for kw in fyi_kw:
         if kw in combined:
             return "fyi"
-    
-    # GitHub notifications about failed runs
+
     if "notifications@github.com" in sender_lower:
         return "fyi"
-    
-    # Google/Microsoft security senders
+
     fyi_senders = [
         "no-reply@accounts.google.com", "account-security-noreply@google.com",
         "accountprotection.microsoft.com",
@@ -248,12 +241,11 @@ def categorize_item(subject, sender, body=""):
     for fs in fyi_senders:
         if fs in sender_lower:
             return "fyi"
-    
-    # Healthchecks heartbeat
+
     if "healthchecks.io" in sender_lower:
         return "fyi"
-    
-    # PERSONAL — bills, family, property
+
+    # PERSONAL
     personal_kw = [
         "british gas", "o2", "vodafone", "ee", "bt", "broadband",
         "energy", "family", "property", "bill", "statement",
@@ -261,8 +253,8 @@ def categorize_item(subject, sender, body=""):
     for kw in personal_kw:
         if kw in combined:
             return "personal"
-    
-    # NOISE — newsletters, marketing, job alerts, noreply platforms, promos
+
+    # NOISE
     noise_senders = [
         "jobs@", "alerts@", "donotreply@match.indeed.com",
         "my.theladders.com", "newsletter", "marketing",
@@ -287,7 +279,7 @@ def categorize_item(subject, sender, body=""):
     for ns in noise_senders:
         if ns in sender_lower:
             return "noise"
-    
+
     noise_subj = [
         "job alert", "new jobs", "you have matches", "recommended for you",
         "weekly digest", "newsletter", "promotion", "special offer",
@@ -300,13 +292,12 @@ def categorize_item(subject, sender, body=""):
     for ns in noise_subj:
         if ns in subj_lower:
             return "noise"
-    
-    # Substacks/newsletters not caught above
+
     if "substack.com" in sender_lower:
         return "noise"
     if "thecoachingmanual.com" in sender_lower:
         return "noise"
-    
+
     return "unknown"
 
 
@@ -340,9 +331,9 @@ def esc(text):
 
 
 async def main():
-    print(f"=== MAILBOX DIGEST — Monday 08/06/2026 ===", flush=True)
+    print(f"=== MAILBOX DIGEST — {TODAY_DISPLAY} ===", flush=True)
     start_time = str_now()
-    
+
     # --- Gmail ---
     print("\n--- Gmail ---", flush=True)
     try:
@@ -366,7 +357,7 @@ async def main():
     except Exception as e:
         print(f"  ❌ Gmail MCP connection failed: {e}", flush=True)
         results["degraded"].append("Gmail MCP connection error")
-    
+
     # --- Outlook ---
     print("\n--- Outlook ---", flush=True)
     try:
@@ -397,20 +388,20 @@ async def main():
     except Exception as e:
         print(f"  ❌ Outlook MCP connection failed: {e}", flush=True)
         results["degraded"].append("Outlook MCP connection error")
-    
+
     # --- Categorize ---
     print("\n--- Categorisation ---", flush=True)
     for item in results["all_items"]:
         cat = categorize_item(item.get("subject"), item.get("from"), item.get("body", ""))
         item["category"] = cat
         results[f"{cat}_items"].append(item)
-    
+
     print(f"  Action: {len(results['action_items'])}", flush=True)
     print(f"  FYI: {len(results['fyi_items'])}", flush=True)
     print(f"  Noise: {len(results['noise_items'])}", flush=True)
     print(f"  Personal: {len(results['personal_items'])}", flush=True)
     print(f"  Unknown: {len(results['unknown_items'])}", flush=True)
-    
+
     # --- Build summary ---
     s = {
         "timestamp": str_now(),
@@ -428,76 +419,71 @@ async def main():
         "unknown": results["unknown_items"],
         "degraded": results["degraded"],
     }
-    
-    # Categorise gmail status counts
-    gmail_ok = sum(1 for a in s["gmail_accounts"].values() if a["status"] == "ok")
-    outlook_ok = sum(1 for a in s["outlook_accounts"].values() if a["status"] == "ok")
-    
+
     total_fetched = len(results["all_items"])
-    
+
     # --- PRINT DISCORD SUMMARY ---
     print("\n" + "="*60, flush=True)
     print("DISCORD_SUMMARY_START", flush=True)
-    
-    print(f"☀️ Good morning, Monday 08/06/2026")
+
+    print(f"📬 Mailbox Digest — {TODAY_DISPLAY}")
     print()
-    print(f"📬 Inbox brief")
-    print(f"Gmail: 3 accounts, ~{s['total_unread_gmail']}+ unread total (capped by fetch limit)")
+    print(f"Gmail: 3 accounts, ~{s['total_unread_gmail']}+ unread (capped by fetch limit)")
     print(f"Outlook: 4 accounts, 0 unread")
-    print(f"Sampled {total_fetched} recent messages for categorisation")
-    
+    print(f"Sampled {total_fetched} recent messages")
+
     if s["action"]:
         print()
-        print("🚨 Action required")
+        print("🚨 Action Required")
         for i, item in enumerate(s["action"][:5], 1):
             subj = item.get("subject", "(no subject)")[:85]
             domain = extract_domain(item.get("from", ""))
             acct = short_account(item.get("account_label", ""))
             print(f"{i}. {subj} — {acct} ({domain})")
-    
+
     if s["fyi"]:
         print()
-        print("📌 Worth knowing")
+        print("📌 Worth Knowing")
         for i, item in enumerate(s["fyi"][:4], 1):
             subj = item.get("subject", "(no subject)")[:75]
             acct = short_account(item.get("account_label", ""))
             date = item.get("date", "")[:20]
             print(f"{i}. {subj} — {acct} ({date})")
-    
-    noise_total = len(s["noise"]) + len(s["personal"]) + len(s["unknown"])
-    keep_total = len(s["action"]) + len(s["fyi"])
-    if noise_total > 0:
+
+    if s["noise"]:
         print()
-        # Show top noise sources
         noise_domains = {}
         for item in s["noise"]:
             dom = extract_domain(item.get("from", ""))
             if dom not in ("unknown",):
                 noise_domains[dom] = noise_domains.get(dom, 0) + 1
         noise_src = ", ".join(f"{d} ({c})" for d, c in sorted(noise_domains.items(), key=lambda x: -x[1])[:5])
-        print(f"🔕 Noise: {len(s['noise'])} items — top sources: {noise_src}")
-    
+        print(f"🔕 Noise: {len(s['noise'])} items — top: {noise_src}")
+
+    if s["personal"]:
+        print(f"🏠 Personal: {len(s['personal'])} items")
+
     if s["degraded"]:
         print()
         print("⚠️  Degraded accounts")
         for d in s["degraded"]:
             print(f"• {d}")
-    
+
     print()
     print("✅ Next move")
     if s["action"]:
         print(f"→ Review {len(s['action'])} action items")
     else:
         print("→ All clear — no action items pending")
-    
-    html_path = RUNBOOK_DIR / "mailbox-digest-2026-06-08.html"
+
+    html_path = RUNBOOK_DIR / f"mailbox-digest-{TODAY_STR}.html"
     print()
     print(f"MEDIA:{html_path}")
     print("DISCORD_SUMMARY_END", flush=True)
-    
-    # --- SAVE RUNBOOK ---
+
+    # --- SAVE RUNBOOK (Markdown) ---
     lines = [
-        "# Mailbox Digest — Monday 08/06/2026",
+        f"# Mailbox Digest — {TODAY_DISPLAY}",
         "",
         f"**Run:** {s['timestamp']}",
         f"**Duration:** Live scan, 7 accounts (sampled ~{total_fetched} messages)",
@@ -512,7 +498,7 @@ async def main():
     for email, acct in s["outlook_accounts"].items():
         lines.append(f"| {acct['label']} ({email}) | {acct['unread']} | {'✅' if acct['status']=='ok' else '🔴'} {acct['status']} |")
     lines.append(f"\n**Total sampled:** ~{s['total_unread_gmail']}+ Gmail, 0 Outlook\n")
-    
+
     for bucket_name, bucket_key, emoji in [
         ("Action Required", "action", "🚨"),
         ("FYI / Monitoring", "fyi", "📌"),
@@ -535,13 +521,13 @@ async def main():
                 if body:
                     lines.append(f"  - Preview: {body}")
                 lines.append("")
-    
+
     if s["degraded"]:
         lines.append("\n## ⚠️ Degraded Accounts\n")
         for d in s["degraded"]:
             lines.append(f"- {d}")
             lines.append("")
-    
+
     noise_domains = set()
     for item in s["noise"]:
         domain = extract_domain(item.get("from", ""))
@@ -551,11 +537,11 @@ async def main():
         lines.append("\n## Filter Suggestions\n")
         for domain in sorted(noise_domains):
             lines.append(f"- Filter `kensei/noise/{domain}`: block newsletters/marketing from {domain}")
-    
-    runbook_path = RUNBOOK_DIR / "mailbox-digest-2026-06-08.md"
+
+    runbook_path = RUNBOOK_DIR / f"mailbox-digest-{TODAY_STR}.md"
     runbook_path.write_text("\n".join(lines))
     print(f"  ✓ Runbook saved: {runbook_path}", flush=True)
-    
+
     # --- SAVE HTML ---
     def item_html(item, tag_cls):
         subj = esc(item.get("subject", "(no subject)"))
@@ -568,13 +554,13 @@ async def main():
             <div class="detail">{body}</div>
             <div class="meta">{acct} · {sender} · {date} <span class="tag {tag_cls}">{tag_cls.upper()}</span></div>
         </div>'''
-    
+
     action_html = "".join(item_html(x, "action") for x in s["action"][:10])
     fyi_html = "".join(item_html(x, "fyi") for x in s["fyi"][:8])
     noise_count = len(s["noise"])
     personal_count = len(s["personal"])
     unknown_count = len(s["unknown"])
-    
+
     health_lines = ""
     for email, acct in s["gmail_accounts"].items():
         cls = ' class="warn"' if acct["status"] != "ok" else ""
@@ -584,15 +570,15 @@ async def main():
         health_lines += f'<div class="health-line{cls}">{acct["label"]} ({email}): {acct["unread"]} unread — {acct["status"]}</div>'
     for d in s["degraded"]:
         health_lines += f'<div class="health-line fail">{esc(d)}</div>'
-    
+
     next_move = f"Review {len(s['action'])} action items" if s["action"] else "All clear — no action items pending"
-    
+
     html = f'''<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Mailbox Digest — Monday 08/06/2026</title>
+<title>Mailbox Digest — {TODAY_DISPLAY}</title>
 <style>
   :root {{ color-scheme: dark; --bg: #11100f; --card: #1c1a18; --muted: #a8a29e; --text: #f5f5f4; --accent: #fbbf24; --line: #34302c; }}
   * {{ box-sizing: border-box; }}
@@ -629,7 +615,7 @@ async def main():
 <main>
   <header>
     <div class="eyebrow">KENSEI Inbox Brief</div>
-    <h1>Monday 08/06/2026</h1>
+    <h1>{TODAY_DISPLAY}</h1>
   </header>
 
   <section class="action">
@@ -670,8 +656,7 @@ async def main():
 </main>
 </body>
 </html>'''
-    
-    html_path = RUNBOOK_DIR / "mailbox-digest-2026-06-08.html"
+
     html_path.write_text(html)
     print(f"  ✓ HTML saved: {html_path}", flush=True)
 

@@ -2,6 +2,7 @@
 Multi-provider image generation with automatic fallback.
 Tries providers in priority order until one succeeds.
 """
+import _no_proxy  # noqa: F401  (strips dead Privoxy from env on import)
 
 import os
 import time

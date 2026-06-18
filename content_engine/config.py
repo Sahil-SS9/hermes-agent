@@ -107,15 +107,14 @@ BRANDS = {
         "description": "Senior PM / TPM, indie developer, build-in-public",
         "voice_skill": "sahil-twitter-voice",
         "content_pillars": [
-            "Build-in-Public",
-            "AI Tools & Stack",
-            "Sly Product Mentions",
-            "Football (MUFC)",
-            "Wry Observations",
+            "Agent Build Notes", "Harness Tuning", "Paper Takes", "Radar Finds", "AI Patterns",
+            "Build-in-Public", "Wry Observations", "Football (MUFC)",
         ],
+        "educational_pillars": ["Agent Build Notes","Harness Tuning","Paper Takes","Radar Finds","AI Patterns"],
+        "educational_mix": 0.65,
         "visual_strategy": "screenshot_repurposing",
         "post_mix": {"text_only": 0.6, "text_image": 0.3, "video": 0.1},
-        "posts_per_week": 10,
+        "posts_per_week": 28,
         "org_id": "2645662d-a479-4a6a-91ca-a50a7d29f607",
     },
     "sahil_linkedin": {
@@ -131,15 +130,14 @@ BRANDS = {
         "description": "Senior PM / TPM, indie developer, build-in-public",
         "voice_skill": "sahil-linkedin-voice",
         "content_pillars": [
-            "PM Thought Leadership",
-            "Indie Builder Journey",
-            "Enterprise AI Adoption",
-            "Leadership Insights",
-            "RAG Chatbot Case Studies",
+            "Agentic Systems in Practice", "AI Engineering Notes", "Research to Practice", "Tooling Signals",
+            "PM Thought Leadership", "Leadership Insights",
         ],
+        "educational_pillars": ["Agentic Systems in Practice","AI Engineering Notes","Research to Practice","Tooling Signals"],
+        "educational_mix": 0.65,
         "visual_strategy": "screenshot_repurposing",
         "post_mix": {"text_only": 0.7, "text_image": 0.3, "video": 0.0},
-        "posts_per_week": 5,
+        "posts_per_week": 17,
         "org_id": "2645662d-a479-4a6a-91ca-a50a7d29f607",
     },
     "coachos": {
@@ -262,3 +260,104 @@ BUDGET_ALLOCATION = {
     "text_generation": 0.0,
     "buffer": 8.0,
 }
+
+# ── X Articles long-form track (sub-project B, sahil_twitter only) ─────
+# Daily long-form X Article. Quality-gated, illustrated, paste-ready.
+# Defaults are starting points to tune in the live step; all keys env-overridable
+# so a V1 tuning run never needs a code change.
+ARTICLE_ENABLED = os.getenv("ARTICLE_ENABLED", "1").strip() not in ("0", "false", "")
+ARTICLE_DEEP_DIVE_THRESHOLD = int(os.getenv("ARTICLE_DEEP_DIVE_THRESHOLD", "7"))
+ARTICLE_DIGEST_MIN_SIGNALS = int(os.getenv("ARTICLE_DIGEST_MIN_SIGNALS", "4"))
+ARTICLE_MIN_WORDS = int(os.getenv("ARTICLE_MIN_WORDS", "900"))
+ARTICLE_IMG_DENSITY = os.getenv("ARTICLE_IMG_DENSITY", "per-section").strip()
+ARTICLE_DIGEST_WINDOW_DAYS = int(os.getenv("ARTICLE_DIGEST_WINDOW_DAYS", "14"))
+ARTICLE_MAX_IMAGES = int(os.getenv("ARTICLE_MAX_IMAGES", "6"))
+# Cross-run dedup: a signal that became an article is off-limits for this many
+# days so consecutive daily cron runs cannot re-pick the same top signal.
+ARTICLE_TOPIC_RECENCY_DAYS = int(os.getenv("ARTICLE_TOPIC_RECENCY_DAYS", "30"))
+
+# ── Reference-anchored imagery (personal brands) ───────────────────────
+# Validated 2026-06-16: nano-banana-pro/edit dual-anchor transplant (baoyu
+# layout + style/palette exemplar) beats text-to-image decisively. DNA is the
+# CRAFT thread (texture/type/density), not a fixed palette; the selector rotates
+# a palette system for variety. See brand_imagery_standard.md.
+IMAGERY_ANCHORS_DIR = os.path.expanduser(
+    os.getenv("CONTENT_IMAGERY_ANCHORS", "~/content-references"))
+# Brands routed through the transplant path (others keep the legacy path).
+IMAGERY_TRANSPLANT_BRANDS = tuple(
+    b.strip() for b in os.getenv(
+        "CONTENT_TRANSPLANT_BRANDS", "sahil_twitter,sahil_linkedin").split(",")
+    if b.strip())
+IMAGERY_EDIT_MODEL = os.getenv("CONTENT_EDIT_MODEL", "fal-ai/nano-banana-pro/edit").strip()
+IMAGERY_EDIT_COST_GBP = float(os.getenv("CONTENT_EDIT_COST_GBP", "0.12"))
+# Tiered scene models (validated 2026-06-16): infographics + HERO scenes need
+# nano-banana-pro (text/quality); default (non-hero) scenes use the ~3x cheaper
+# nano-banana non-pro at near-identical quality. qwen was too anchor-literal
+# (reproduced refs) and pollinations is textless-only — both rejected for scenes.
+IMAGERY_SCENE_MODEL = os.getenv("CONTENT_SCENE_MODEL", "fal-ai/nano-banana/edit").strip()
+IMAGERY_SCENE_COST_GBP = float(os.getenv("CONTENT_SCENE_COST_GBP", "0.039"))
+IMAGERY_HERO_MODEL = os.getenv("CONTENT_HERO_EDIT_MODEL", "fal-ai/nano-banana-pro/edit").strip()
+# How many recent (palette|layout) picks to avoid re-using, per brand.
+IMAGERY_ROTATION_MEMORY = int(os.getenv("CONTENT_IMAGERY_ROTATION_MEMORY", "6"))
+
+# Temporarily paused brands — skipped by the social generator. Paused 2026-06-16
+# while the personal brands (sahil_twitter/sahil_linkedin) are validated on the
+# new imagery system; product brands stay on the legacy path until re-enabled.
+# Clear CONTENT_PAUSED_BRANDS (or set to "") to resume them.
+CONTENT_PAUSED_BRANDS = frozenset(
+    b.strip() for b in os.getenv(
+        "CONTENT_PAUSED_BRANDS", "plenishd,coachos,matchdaymaestro").split(",")
+    if b.strip())
+
+# ── Free Gemini vision (Google AI Studio key) ─────────────────────────
+# Vision INPUT (image -> text) is FREE on the AI Studio tier; image OUTPUT is
+# paid-only (validated 2026-06-17 against a live key: every image model returns
+# 429 with a zero per-day free quota, and the pricing page lists image output as
+# "Not available" on free tier). So generation stays on FAL; we only use the key
+# for the two free image-understanding features below. Key is read at call time
+# from GEMINI_API_KEY (or GOOGLE_AI_API_KEY); never hardcoded.
+GEMINI_VISION_MODEL = os.getenv("GEMINI_VISION_MODEL", "gemini-2.5-flash").strip()
+GEMINI_VISION_ENABLED = os.getenv("GEMINI_VISION_ENABLED", "1").strip() not in ("0", "false", "")
+
+# Feature 1: screenshot -> topic ingestion. Drop app screenshots / inspiration
+# here and the personal-brand topic mix picks them up, captions them via Gemini
+# vision, and turns each into a high-priority topic. Consumed files move to a
+# processed/ subdir so they are ingested once.
+CONTENT_SCREENSHOT_INBOX = os.path.expanduser(
+    os.getenv("CONTENT_SCREENSHOT_INBOX", "~/content-inbox/screenshots"))
+SCREENSHOT_MAX_PER_RUN = int(os.getenv("CONTENT_SCREENSHOT_MAX", "3"))
+
+# Feature 2: visual-QA of generated heroes. After a transplant render, re-read
+# the finished image with Gemini vision and flag garbled text / off-brief /
+# wrong palette. Below the min score (0-10) we regenerate once with the QA
+# issues appended, then accept best-effort (free check, bounded one retry).
+IMAGERY_QA_ENABLED = os.getenv("CONTENT_IMAGERY_QA", "1").strip() not in ("0", "false", "")
+IMAGERY_QA_MIN_SCORE = int(os.getenv("CONTENT_IMAGERY_QA_MIN_SCORE", "6"))
+
+# ── SahilBlog content pipeline (blog/ subpackage) ─────────────────────
+# Daily long-form blog articles for SahilBlog across 3 streams (AI, PM,
+# Builders Log). Published as draft MDX into the Astro repo, gated behind
+# human approval. Mirrors the article track shape with per-stream dedup
+# via database.topic_usage_log (brand=f"blog_{stream}").
+SAHILBLOG_REPO = os.path.expanduser(os.getenv("SAHILBLOG_REPO", "~/repos/SahilBlog"))
+BLOG_ENABLED = os.getenv("BLOG_ENABLED", "1").strip() not in ("0", "false", "")
+BLOG_STREAMS = tuple(s.strip() for s in os.getenv("BLOG_STREAMS", "ai,pm,builder").split(",") if s.strip())
+# Per-section images cap. Default hero-only (BLOG_MAX_SECTION_IMAGES=0) keeps
+# daily spend at £0.039 x 3 streams = ~£3.5/mo, well under the £10 cap when
+# combined with social (~£7/mo). Set to 1 for hero + 1 section (~£14/mo, over
+# cap unless the social budget is reduced or a separate blog image budget is
+# allocated). See Task 4 budget note.
+BLOG_MAX_SECTION_IMAGES = int(os.getenv("BLOG_MAX_SECTION_IMAGES", "0"))
+BLOG_TOPIC_RECENCY_DAYS = int(os.getenv("BLOG_TOPIC_RECENCY_DAYS", "45"))
+
+# ── Blog back-population image model ──────────────────────────────────────
+# Model = fal-ai/nano-banana-2/edit (confirmed Task 0: $0.08/img ≈ £0.064).
+# Cost confirmed by probing the FAL endpoint on 2026-06-17.
+BLOG_IMAGE_MODEL = os.getenv("BLOG_IMAGE_MODEL", "fal-ai/nano-banana-2/edit").strip()
+BLOG_IMAGE_COST_GBP = float(os.getenv("BLOG_IMAGE_COST_GBP", "0.064"))
+# One-off back-population envelope, separate from MONTHLY_BUDGET_GBP.
+BACKFILL_SPEND_CAP_GBP = float(os.getenv("BACKFILL_SPEND_CAP_GBP", "9.0"))
+# Separate ledger for the one-off back-population envelope so it does not
+# count against the recurring monthly cap.
+BACKFILL_LEDGER_PATH = str(Path(os.getenv(
+    "BACKFILL_LEDGER_PATH", str(Path(__file__).parent / "output" / "backfill_ledger.json"))))

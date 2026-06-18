@@ -32,6 +32,11 @@ SKILL_DIR = os.path.expanduser("~/.hermes/skills/social-media")
 VOICE_SKILL_PATHS = {
     "sahil_twitter": os.path.join(SKILL_DIR, "sahil-twitter-voice", "SKILL.md"),
     "sahil_linkedin": os.path.join(SKILL_DIR, "sahil-linkedin-voice", "SKILL.md"),
+    # These three brands have full voice docs on disk that were never wired in,
+    # so they were silently running on the 2-sentence BRAND_VOICE_FALLBACK.
+    "plenishd": os.path.join(SKILL_DIR, "plenishd-voice", "SKILL.md"),
+    "coachos": os.path.join(SKILL_DIR, "coachos-voice", "SKILL.md"),
+    "matchdaymaestro": os.path.join(SKILL_DIR, "matchdaymaestro-voice", "SKILL.md"),
 }
 
 
@@ -80,6 +85,9 @@ def _load_live_variables(brand: str, topic: dict) -> dict:
 
 PLATFORM_LENGTH = {
     "twitter": {"max": 280, "min": 180},
+    # X Articles are long-form: a wide window so the shared gate's length check
+    # never penalises a full article. The word floor is enforced separately.
+    "article": {"max": 60000, "min": 1500},
     "linkedin": {"max": 3000, "min": 600, "story_floor": 400},
     # First ~125 chars show before "more" on IG; the hook must land there.
     "instagram": {"max": 1500, "min": 120},
@@ -196,6 +204,9 @@ def build_generation_prompt(
         "## Content Requirements",
         length_rule,
         "- Storytelling: specific, concrete details. Real numbers, real tools, real moments.",
+        "- Do NOT invent statistics, user counts, growth numbers, dates, or metrics. "
+        "Use ONLY numbers supplied in the topic/context; if none are given, write "
+        "without invented figures.",
         "- British English spelling (organise, colour, behaviour, centre).",
         "- No em-dashes (use commas or line breaks instead).",
         "- No AI-isms: no 'Let's dive in', 'In today's world', 'Great question'.",
@@ -227,6 +238,57 @@ def build_generation_prompt(
     return {"system": system_prompt, "user": user_prompt}
 
 
+# ── Educational prompt builder ─────────────────────────────────────────────
+
+_EDU_FRAME = (
+    "You are writing EDUCATIONAL content for the AI builder community. Teach one "
+    "concrete idea from the author's real work: explain the mechanism, cite the "
+    "specific detail (a real number, tool, or technique), and end by inspiring "
+    "the reader to try or rethink something. Builders-leaning but accessible to "
+    "technical peers. Never generic hype. Never invent facts beyond the context."
+)
+
+def build_educational_prompt(brand, pillar, platform, signal, context, kb_snippets, retry_feedback=None):
+    """System+user prompt for a fully-automated educational post grounded in real
+    context + Sahil's prior takes."""
+    voice = _load_voice_skill(brand) or BRAND_VOICE_FALLBACK.get(brand, "")
+    plat = PLATFORM_LENGTH.get(platform, {})
+    length = f"{plat.get('min',100)}-{plat.get('max',280)} characters"
+    takes = "\n".join(f"- {s}" for s in (kb_snippets or [])) or "(none on file)"
+    rules = [
+        f"- Length: {length}.", "- British English. No em-dashes.",
+        "- No AI-isms. Must include a concrete specific from the context.",
+    ]
+    if retry_feedback:
+        rules.append("- Previous attempt rejected: " + retry_feedback)
+    system = "\n".join([
+        f"You are writing a {platform} post for '{brand}', pillar '{pillar}'.",
+        "## Brand voice (use exactly)", voice,
+        "## Educational frame", _EDU_FRAME,
+        "## Rules",
+    ] + rules)
+    user = "\n".join([
+        f"Pillar: {pillar}", f"Signal: {signal.get('summary','')}",
+        "## Real context (ground the post in this)", context or "(none)",
+        "## Author's prior takes (reflect this thinking)", takes,
+        "Write the post now.",
+    ])
+    return {"system": system, "user": user}
+
+
+def _specificity_ok(body: str, context: str) -> bool:
+    """Reject generic auto-content: the draft must share a concrete token
+    (number, tool name, or notable word) with the real context."""
+    import re as _re
+    if _re.search(r"\d", body) and _re.search(r"\d", context):
+        return True
+    ctx_tokens = {w.lower() for w in _re.findall(r"[A-Za-z0-9][A-Za-z0-9_-]{3,}", context)}
+    body_tokens = {w.lower() for w in _re.findall(r"[A-Za-z0-9][A-Za-z0-9_-]{3,}", body)}
+    generic = {"this","that","with","from","your","about","into","more","just","they","here"}
+    overlap = (ctx_tokens & body_tokens) - generic
+    return len(overlap) >= 2
+
+
 # ── Quality gate ───────────────────────────────────────────────────────
 
 def _check_em_dashes(body: str) -> tuple[bool, str]:
@@ -255,7 +317,7 @@ def _check_length(body: str, platform: str) -> tuple[bool, str]:
     return True, ""
 
 
-def gate_post(body_text: str, platform: str) -> dict:
+def gate_post(body_text: str, platform: str, context: str = "") -> dict:
     """Quality gate: slop audit + stale tech + unfilled placeholders + em-dashes + length.
 
     Returns the same contract as llm_drafts._audit_slop for compatibility.
@@ -293,6 +355,24 @@ def gate_post(body_text: str, platform: str) -> dict:
         issues.append(len_msg)
         slop_score += 1
 
+    # 6. Specificity check (educational posts only)
+    if context and not _specificity_ok(body_text, context):
+        issues.append("Too generic, no concrete from source")
+        slop_score += 3
+
+    # 7. Fabricated metrics: audience/growth numbers (users, %, large figures)
+    #    that are not grounded in the provided context. Lazy import avoids the
+    #    article_gates <-> llm_generate import cycle.
+    if context:
+        try:
+            from article_gates import _fabricated_numbers
+            bad = _fabricated_numbers(body_text, context)
+            if bad:
+                issues.append(f"Fabricated numbers not in context: {', '.join(bad)}")
+                slop_score += 3
+        except Exception:
+            pass
+
     return {
         "slop_score": min(slop_score, 10),
         "issues": issues,
@@ -307,25 +387,104 @@ _SELF_CALL = False
 When False (cron mode), the cron agent handles generation via its own prompt."""
 
 
-def _llm_config() -> Optional[dict]:
-    """Direct HTTP generation config (OpenAI-compatible chat completions).
+# Canonical generation chain (verified live 2026-06-17, both return 200):
+#   1. OpenCode Zen Go — deepseek-v4-flash: cheap/mid tier, fast, strong prose.
+#   2. Ollama-Cloud — gpt-oss:120b: different model family for true redundancy.
+# These run after any CONTENT_LLM_* env override so the pipeline NEVER collapses
+# to frozen canned templates while a healthy provider exists. Each entry names its
+# provider so the right API key is attached (opencode vs ollama).
+_FREE_FALLBACK_CHAIN = [
+    {"base": "https://opencode.ai/zen/go/v1", "model": "deepseek-v4-flash", "provider": "opencode"},
+    {"base": "https://ollama.com/v1", "model": "gpt-oss:120b", "provider": "ollama"},
+]
 
-    Configured via env so the model can be repointed without a code change:
-      CONTENT_LLM_BASE_URL  e.g. https://opencode.ai/zen/v1
-      CONTENT_LLM_MODEL     e.g. mimo-v2.5-free
-      CONTENT_LLM_API_KEY   bearer key (optional for keyless endpoints)
-    Returns None when not configured, in which case the old cron-agent
-    mechanism (build_generation_prompt read by the cron agent) still applies.
+# Long-form / factual tier (articles + blog): stronger, lower-hallucination models
+# where prose quality matters more than per-call cost. Low volume, so the modest
+# extra cost is fine. minimax-m3 (OpenGo) primary, glm-5.2 (Ollama-Cloud) fallback.
+_LONGFORM_CHAIN = [
+    {"base": "https://opencode.ai/zen/go/v1", "model": "minimax-m3", "provider": "opencode"},
+    {"base": "https://ollama.com/v1", "model": "glm-5.2", "provider": "ollama"},
+]
+
+
+def _opencode_key() -> str:
+    """Bearer key shared across opencode zen/go endpoints."""
+    return (os.getenv("OPENCODE_GO_API_KEY", "")
+            or os.getenv("CONTENT_LLM_API_KEY", "")
+            or os.getenv("OPENCODE_API_KEY", "")
+            or os.getenv("OPENCODE_ZEN_API_KEY", "")).strip()
+
+
+def _key_for(provider: str) -> str:
+    """Resolve the bearer key for a chain entry's provider."""
+    if provider == "ollama":
+        return os.getenv("OLLAMA_API_KEY", "").strip()
+    return _opencode_key()
+
+
+def _llm_configs(longform: bool = False) -> list[dict]:
+    """Ordered list of generation endpoints to try, best/most-specific first.
+
+    The env-configured endpoint (CONTENT_LLM_BASE_URL/MODEL) is tried first when
+    set, then the built-in chain (short-post by default; the long-form/factual
+    chain when ``longform=True``). Deduped by (base, model). Each endpoint is
+    attempted in turn until one returns usable text, so a single quota-exhausted
+    provider degrades to the next provider instead of to canned templates.
     """
+    configs: list[dict] = []
+    seen: set = set()
+
+    # Optional operator override (tried first when set). Uses the opencode key.
     base = os.getenv("CONTENT_LLM_BASE_URL", "").strip().rstrip("/")
     model = os.getenv("CONTENT_LLM_MODEL", "").strip()
-    if not base or not model:
-        return None
-    return {"base": base, "model": model, "key": os.getenv("CONTENT_LLM_API_KEY", "").strip()}
+    if base and model:
+        configs.append({"base": base, "model": model, "key": _opencode_key()})
+        seen.add((base, model))
+
+    chain = _LONGFORM_CHAIN if longform else _FREE_FALLBACK_CHAIN
+    for fb in chain:
+        sig = (fb["base"], fb["model"])
+        if sig not in seen:
+            configs.append({"base": fb["base"], "model": fb["model"],
+                            "key": _key_for(fb.get("provider", "opencode"))})
+            seen.add(sig)
+
+    return configs
 
 
-def _call_llm(system: str, user: str, cfg: dict, timeout: int = 90) -> Optional[str]:
-    """One chat-completions call. Returns the text or None on any failure."""
+def _llm_config() -> Optional[dict]:
+    """First endpoint in the chain (kept for callers gating on LLM availability)."""
+    configs = _llm_configs()
+    return configs[0] if configs else None
+
+
+_FALLBACK_ALERTED = False
+
+
+def _alert_static_fallback(brand: str, platform: str) -> None:
+    """Loudly flag that every LLM endpoint failed and we are serving a frozen
+    canned template. Silent fallback here is exactly what made all output read
+    stale and off-voice, so make it impossible to miss in the run logs."""
+    global _FALLBACK_ALERTED
+    msg = (f"[llm_generate] ⚠️  ALL LLM endpoints failed for {brand}/{platform} — "
+           f"serving a STATIC CANNED TEMPLATE (not generated copy). "
+           f"Check endpoint quota/config: {[c['base'] + ' ' + c['model'] for c in _llm_configs()]}")
+    print(msg, file=sys.stderr)
+    if not _FALLBACK_ALERTED:
+        print("=" * 78, file=sys.stderr)
+        print("CONTENT ENGINE DEGRADED: text falling back to frozen templates. "
+              "Generated copy is OFF until an LLM endpoint is reachable.", file=sys.stderr)
+        print("=" * 78, file=sys.stderr)
+        _FALLBACK_ALERTED = True
+
+
+def _call_llm(system: str, user: str, cfg: dict, timeout: int = 90,
+              max_tokens: int = 3000) -> Optional[str]:
+    """One chat-completions call. Returns the text or None on any failure.
+
+    ``max_tokens`` is overridable so long-form callers (X Articles) can ask for
+    a full article without the default short-post cap truncating it mid-section.
+    """
     try:
         import requests
     except ImportError:
@@ -333,8 +492,15 @@ def _call_llm(system: str, user: str, cfg: dict, timeout: int = 90) -> Optional[
     headers = {"Content-Type": "application/json"}
     if cfg.get("key"):
         headers["Authorization"] = f"Bearer {cfg['key']}"
+    # run_daily.sh sources ~/.hermes/.env with `set -a`, which exports a Privoxy
+    # HTTP(S)_PROXY (127.0.0.1:8118). That proxy is not always up, and these are
+    # public generation APIs that must not route through it — a refused proxy was
+    # silently collapsing all copy to canned templates. trust_env=False makes the
+    # session ignore inherited proxy/netrc env entirely.
+    session = requests.Session()
+    session.trust_env = False
     try:
-        r = requests.post(
+        r = session.post(
             f"{cfg['base']}/chat/completions",
             json={
                 "model": cfg["model"],
@@ -345,7 +511,7 @@ def _call_llm(system: str, user: str, cfg: dict, timeout: int = 90) -> Optional[
                 "temperature": 0.8,
                 # Reasoning models burn tokens on hidden thinking before the
                 # answer; a tight cap returns empty content.
-                "max_tokens": 3000,
+                "max_tokens": max_tokens,
             },
             headers=headers, timeout=timeout,
         )
@@ -378,20 +544,39 @@ def generate_one(
     Returns a draft dict (same shape as llm_drafts.generate_drafts items)
     or None.
     """
-    cfg = _llm_config()
-    if cfg:
-        feedback = None
-        for _ in range(max_retries + 1):
-            prompts = build_generation_prompt(brand, topic, platform, retry_feedback=feedback)
-            body = _call_llm(prompts["system"], prompts["user"], cfg)
-            if not body:
-                return None
-            draft = generate_with_text(brand, topic, platform, body)
-            if draft:
-                return draft
-            gate = gate_post(body, platform)
-            feedback = "; ".join(gate.get("issues", [])) or "rejected by quality gate"
-        print(f"[llm_generate] {brand}/{platform}: all retries failed the gate", file=sys.stderr)
+    configs = _llm_configs()
+    if configs:
+        for cfg in configs:
+            feedback = None
+            endpoint_reachable = False
+            for _ in range(max_retries + 1):
+                if topic.get("educational"):
+                    context = topic.get("context", "")
+                    kb = topic.get("kb_snippets", [])
+                    prompts = build_educational_prompt(
+                        brand, pillar=topic.get("pillar","general"), platform=platform,
+                        signal=topic, context=context, kb_snippets=kb,
+                        retry_feedback=feedback)
+                else:
+                    prompts = build_generation_prompt(brand, topic, platform, retry_feedback=feedback)
+                body = _call_llm(prompts["system"], prompts["user"], cfg)
+                if not body:
+                    # Endpoint dead/quota'd — stop retrying it, try the next one.
+                    break
+                endpoint_reachable = True
+                if topic.get("educational"):
+                    edu_ctx = topic.get("context", "")
+                    draft = generate_with_text(brand, topic, platform, body, context=edu_ctx)
+                else:
+                    draft = generate_with_text(brand, topic, platform, body)
+                if draft:
+                    return draft
+                gate = gate_post(body, platform, context=topic.get("context", "") if topic.get("educational") else "")
+                feedback = "; ".join(gate.get("issues", [])) or "rejected by quality gate"
+            if endpoint_reachable:
+                print(f"[llm_generate] {brand}/{platform}: {cfg['model']} reachable but all "
+                      f"retries failed the gate; trying next endpoint", file=sys.stderr)
+        # Every endpoint exhausted.
         return None
 
     if not _SELF_CALL:
@@ -410,6 +595,7 @@ def generate_with_text(
     topic: dict,
     platform: str,
     body_text: str,
+    context: str = "",
 ) -> Optional[dict]:
     """Validate and wrap externally-generated text into a draft dict.
 
@@ -420,7 +606,7 @@ def generate_with_text(
     topic_text = topic.get("topic", "")
 
     # Gate check
-    gate_result = gate_post(body_text, platform)
+    gate_result = gate_post(body_text, platform, context=context)
     if not gate_result["passed"]:
         return None
 
@@ -435,7 +621,7 @@ def generate_with_text(
 
     draft_id = f"{brand[:4]}_{str(uuid.uuid4())[:8]}"
 
-    return {
+    drafted = {
         "id": draft_id,
         "brand": brand,
         "platform": platform,
@@ -447,6 +633,65 @@ def generate_with_text(
         "visual_description": visual_descs.get(brand, ""),
         "slop_audit": gate_result,
     }
+
+    # For educational topics, derive an art-directed visual scene so the image
+    # generator doesn't default to literalism (e.g. "clipboard upgrade" -> a
+    # clipboard photo). Falls back to the brand default on any failure.
+    if context:
+        scene = derive_visual_subject(brand, drafted)
+        if scene:
+            drafted["visual_description"] = scene
+
+    return drafted
+
+
+# ── Visual subject derivation (art direction) ──────────────────────────
+
+# What a compelling, non-literal visual scene looks like per brand. Steers the
+# deriver away from photographing the literal nouns in a headline (the cause of
+# "clipboard upgrade" -> a clipboard).
+_VISUAL_BRAND_HINT = {
+    "plenishd": "a warm, real UK kitchen moment — food, hands, worktops, fridge light; never app screenshots or text",
+    "coachos": "a quiet, premium grassroots-football scene — pitch, boots, nets, dawn light, a lone figure; near-monochrome with a hint of green",
+    "matchdaymaestro": "a dramatic matchday-night football scene — floodlights, crowd energy, motion; bold and cinematic",
+    "sahil_twitter": "a moody build-in-public developer scene or a striking tech metaphor; dark, cinematic, high craft",
+    "sahil_linkedin": "a restrained, professional editorial metaphor; uncluttered, premium, one clear idea",
+}
+
+
+def derive_visual_subject(brand: str, draft: dict) -> Optional[str]:
+    """Translate a post into a single vivid, photographable VISUAL scene.
+
+    Returns a concrete scene phrase (no rendered words, no literal headline props)
+    to feed prompt_engine as the subject hook, or None if every endpoint is down
+    (callers then keep their existing literal subject). Low volume: only runs for
+    approved drafts at enrich time.
+    """
+    configs = _llm_configs()
+    if not configs:
+        return None
+    brand_l = (brand or "").lower()
+    hint = _VISUAL_BRAND_HINT.get(brand_l, "a striking, on-brand editorial scene; one clear focal idea")
+    topic = (draft.get("title") or draft.get("topic") or "").strip()
+    body = (draft.get("body_text") or "").strip()[:400]
+
+    system = (
+        "You are an art director. Turn a social post into ONE vivid, photographable "
+        "scene for an image generator. Rules: describe a real visual scene (subject, "
+        "setting, action, mood) in 12-25 words. Do NOT restate the post's words. Do NOT "
+        "depict any text, letters, logos, UI, charts or app screenshots. Avoid literally "
+        "drawing abstract nouns (e.g. for 'clipboard upgrade story' do not draw a clipboard). "
+        f"For this brand, aim for: {hint}. Output the scene only, no preamble."
+    )
+    user = f"Brand: {brand}\nPost headline: {topic}\nPost body: {body}\n\nVisual scene:"
+    for cfg in configs:
+        out = _call_llm(system, user, cfg, timeout=45)
+        if out:
+            scene = out.strip().strip('"').splitlines()[0].strip()
+            # Guard against the model echoing instructions or going long.
+            if 4 <= len(scene) <= 240:
+                return scene
+    return None
 
 
 # ── Batch generation ───────────────────────────────────────────────────
@@ -497,7 +742,9 @@ def generate_drafts_llm(
                 draft["topic"] = topic.get("topic", "")
                 drafts.append(draft)
             else:
-                # Fall back to static template if LLM path fails
+                # Fall back to static template if LLM path fails — but make the
+                # degradation loud, never silent.
+                _alert_static_fallback(brand, plat)
                 from llm_drafts import generate_drafts as fallback_gen
                 fallbacks = fallback_gen(brand, [topic], platform=plat)
                 if fallbacks:

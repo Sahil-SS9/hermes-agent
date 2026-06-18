@@ -4012,6 +4012,23 @@ class DiscordAdapter(BasePlatformAdapter):
         async def slash_background(interaction: discord.Interaction, prompt: str):
             await self._run_simple_slash(interaction, f"/background {prompt}", "Background task started~")
 
+        @tree.command(name="blog-topic", description="Capture a topic for the blog pipeline (next scheduled post or ad hoc)")
+        @discord.app_commands.describe(
+            topic="Free text topic, or leave empty to pull recent chat history",
+            stream="Target stream: ai, pm, or builder (default: ai)",
+        )
+        @discord.app_commands.choices(stream=[
+            discord.app_commands.Choice(name="ai", value="ai"),
+            discord.app_commands.Choice(name="pm", value="pm"),
+            discord.app_commands.Choice(name="builder", value="builder"),
+        ])
+        async def slash_blog_topic(
+            interaction: discord.Interaction,
+            topic: str = "",
+            stream: str = "ai",
+        ):
+            await self._handle_blog_topic_slash(interaction, topic, stream)
+
         # ── Auto-register any gateway-available commands not yet on the tree ──
         # This ensures new commands added to COMMAND_REGISTRY in
         # hermes_cli/commands.py automatically appear as Discord slash
@@ -4407,6 +4424,118 @@ class DiscordAdapter(BasePlatformAdapter):
             raw_message=interaction,
             channel_prompt=self._resolve_channel_prompt(channel_id, parent_id or None),
         )
+
+    # ------------------------------------------------------------------
+    # Blog topic capture helper
+    # ------------------------------------------------------------------
+
+    async def _handle_blog_topic_slash(
+        self,
+        interaction: discord.Interaction,
+        topic: str,
+        stream: str,
+    ) -> None:
+        """Handle /blog-topic: capture a topic for the blog pipeline.
+
+        Accepts free text or, when text is empty, pulls the last few messages
+        from the current channel as the topic content. Writes the topic to the
+        content engine's manual topic queue (blog_topics/<stream>.jsonl) so the
+        next scheduled blog pipeline run picks it up automatically.
+        """
+        if not await self._check_slash_authorization(interaction, "/blog-topic"):
+            return
+        await interaction.response.defer(ephemeral=True)
+
+        try:
+            # When no topic text is provided, pull recent channel history.
+            if not topic.strip():
+                topic = await self._collect_channel_topic_text(interaction)
+                if not topic:
+                    await interaction.edit_original_response(
+                        content="No topic text provided and no recent channel history found."
+                    )
+                    return
+
+            # Write to the content engine's topic queue file.
+            written = self._write_blog_topic(stream, topic, interaction)
+            if written:
+                await interaction.edit_original_response(
+                    content=f"Blog topic captured for stream '{stream}'. "
+                    f"The next scheduled blog run will pick it up.\n"
+                    f"```\n{topic[:200]}{'...' if len(topic) > 200 else ''}\n```"
+                )
+            else:
+                await interaction.edit_original_response(
+                    content=f"Failed to write topic to the {stream} queue. Check logs."
+                )
+        except Exception as e:
+            logger.warning("[Discord] /blog-topic handler error: %s", e, exc_info=True)
+            try:
+                await interaction.edit_original_response(
+                    content=f"Blog topic capture failed: {e}"
+                )
+            except Exception:
+                pass
+
+    async def _collect_channel_topic_text(self, interaction: discord.Interaction) -> str:
+        """Pull recent non-bot messages from the current channel as topic text."""
+        channel = interaction.channel
+        if channel is None:
+            return ""
+        try:
+            lines = []
+            async for msg in channel.history(limit=20, oldest_first=False):
+                if msg.author == self._client.user:
+                    continue
+                if msg.content and not msg.content.startswith("/"):
+                    lines.append(f"[{msg.author.display_name}] {msg.content}")
+                if len(lines) >= 10:
+                    break
+            lines.reverse()  # chronological order
+            return "\n".join(lines)
+        except Exception as e:
+            logger.debug("[Discord] channel history pull for blog-topic failed: %s", e)
+            return ""
+
+    def _write_blog_topic(self, stream: str, topic: str, interaction: discord.Interaction) -> bool:
+        """Append a topic to the content engine's manual queue file.
+
+        Returns True on success, False on failure. The topic is written as a
+        JSONL line to content_engine/blog_topics/<stream>.jsonl, which the
+        blog_router reads on the next scheduled run.
+        """
+        import json
+        import time
+        from pathlib import Path
+
+        # Resolve the content engine path relative to the repo root.
+        # The adapter lives in plugins/platforms/discord/; content_engine is
+        # at the repo root (three levels up from the plugin dir, then
+        # content_engine/).
+        adapter_dir = Path(__file__).resolve().parent
+        repo_root = adapter_dir.parents[3]  # discord/ -> platforms/ -> plugins/ -> root
+        topics_dir = repo_root / "content_engine" / "blog_topics"
+        queue_path = topics_dir / f"{stream}.jsonl"
+
+        try:
+            topics_dir.mkdir(parents=True, exist_ok=True)
+            topic_id = f"discord-{interaction.user.id}-{int(time.time())}"
+            obj = {
+                "topic_id": topic_id,
+                "title_hint": topic.strip()[:200],
+                "tags": [],
+                "priority": 8,
+            }
+            with open(queue_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(obj) + "\n")
+            logger.info(
+                "[Discord] blog topic queued: stream=%s id=%s by=%s",
+                stream, topic_id, interaction.user.display_name,
+            )
+            return True
+        except Exception as e:
+            logger.warning("[Discord] failed to write blog topic: %s", e)
+            return False
 
     # ------------------------------------------------------------------
     # Thread creation helpers
