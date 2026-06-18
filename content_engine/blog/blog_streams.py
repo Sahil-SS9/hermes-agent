@@ -21,8 +21,8 @@ from __future__ import annotations
 
 STREAMS: dict[str, dict] = {
     "ai": {
-        # Surfaced on /ai (filters tier=pm + AI tag).
-        "tier": "pm",
+        # Surfaced on /ai (tier=ai, its own page).
+        "tier": "ai",
         "base_tags": ["ai"],
         "source": "research-paper",
         "format": "essay",

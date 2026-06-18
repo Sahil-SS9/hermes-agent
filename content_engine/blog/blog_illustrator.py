@@ -51,7 +51,9 @@ def _section_draft(title: str, heading: str, body_md: str) -> dict:
 
 
 def illustrate(draft: dict, out_dir: Optional[Path] = None,
-              max_sections: Optional[int] = None) -> dict:
+              max_sections: Optional[int] = None,
+              budget_label_prefix: Optional[str] = None,
+              budget_ledger_path: Optional[str] = None) -> dict:
     """Generate hero + per-section images via the transplant path.
 
     Locks ONE palette per post: the hero recipe is selected first, then every
@@ -60,6 +62,10 @@ def illustrate(draft: dict, out_dir: Optional[Path] = None,
 
     Returns {hero_path: str|None, section_paths: {h2_heading: path}}.
     When the budget cap blocks, all generation is skipped.
+
+    When ``budget_label_prefix`` and ``budget_ledger_path`` are set, spend
+    is routed to the separate envelope (back-population) instead of the
+    monthly ledger.
     """
     stream = draft.get("stream", "ai")
     brand = STREAMS.get(stream, {}).get("image_palette_brand", "sahil_twitter")
@@ -73,7 +79,7 @@ def illustrate(draft: dict, out_dir: Optional[Path] = None,
 
     # Budget check upfront: if we can't even afford the hero, skip everything.
     cost = config.BLOG_IMAGE_COST_GBP
-    if not budget.can_spend(cost):
+    if not budget.can_spend(cost, ledger_path=budget_ledger_path):
         print("[blog_illustrator] budget cap; skipping all images")
         return result
 
@@ -95,7 +101,9 @@ def illustrate(draft: dict, out_dir: Optional[Path] = None,
     hero = generate(hero_draft, brand=brand, out_dir=out_dir, ctype="infographic",
                     recipe=hero_recipe,
                     model_override=config.BLOG_IMAGE_MODEL,
-                    cost_override=config.BLOG_IMAGE_COST_GBP)
+                    cost_override=config.BLOG_IMAGE_COST_GBP,
+                    budget_label_prefix=budget_label_prefix,
+                    budget_ledger_path=budget_ledger_path)
     if hero:
         result["hero_path"] = hero
 
@@ -105,7 +113,7 @@ def illustrate(draft: dict, out_dir: Optional[Path] = None,
 
     headings = _extract_h2_headings(draft.get("body_md", ""))
     for heading in headings[:max_sections]:
-        if not budget.can_spend(cost):
+        if not budget.can_spend(cost, ledger_path=budget_ledger_path):
             print(f"[blog_illustrator] budget cap after {len(result['section_paths'])} sections")
             break
         sec_draft = _section_draft(draft.get("title", ""), heading, draft.get("body_md", ""))
@@ -115,7 +123,9 @@ def illustrate(draft: dict, out_dir: Optional[Path] = None,
         img = generate(sec_draft, brand=brand, out_dir=out_dir, ctype="infographic",
                        recipe=sec_recipe,
                        model_override=config.BLOG_IMAGE_MODEL,
-                       cost_override=config.BLOG_IMAGE_COST_GBP)
+                       cost_override=config.BLOG_IMAGE_COST_GBP,
+                       budget_label_prefix=budget_label_prefix,
+                       budget_ledger_path=budget_ledger_path)
         if img:
             result["section_paths"][heading] = img
 

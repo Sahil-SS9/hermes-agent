@@ -103,13 +103,21 @@ def build_scene_prompt(title: str, concept: str, desc: str, palette_hex: str,
 def generate(draft: dict, brand: str, out_dir: Optional[Path] = None,
              ctype: Optional[str] = None, recipe: Optional[dict] = None,
              model_override: Optional[str] = None,
-             cost_override: Optional[float] = None) -> Optional[str]:
+             cost_override: Optional[float] = None,
+             budget_label_prefix: Optional[str] = None,
+             budget_ledger_path: Optional[str] = None) -> Optional[str]:
     """Generate one finished hero via the transplant path. None on skip/failure.
 
     When ``recipe`` is given, it is used directly instead of calling
     ``lib.select_recipe``. When ``model_override`` is set, the model and its
     cost replace the recipe-derived model (``cost_override`` is required when
     ``model_override`` is not the recipe's default).
+
+    When ``budget_label_prefix`` is set, spend is recorded with that prefix
+    instead of the default ``transplant:`` label. When ``budget_ledger_path``
+    is set, spend is recorded to that separate ledger file instead of the
+    monthly ledger. Both are used by the back-population envelope to isolate
+    one-off spend from the recurring monthly cap.
     """
     recipe = recipe or lib.select_recipe(draft, brand, ctype=ctype)
     if not recipe:
@@ -118,7 +126,7 @@ def generate(draft: dict, brand: str, out_dir: Optional[Path] = None,
     if model_override:
         model = model_override
         cost = cost_override if cost_override is not None else cost
-    if not budget.can_spend(cost):
+    if not budget.can_spend(cost, ledger_path=budget_ledger_path):
         print("[imagery_transplant] budget cap; skipping")
         return None
 
@@ -148,13 +156,17 @@ def generate(draft: dict, brand: str, out_dir: Optional[Path] = None,
              "kind": recipe.get("kind", "infographic")}
     qa_on = cfg.IMAGERY_QA_ENABLED and gemini_vision.available()
 
+    # Budget label: use prefix override when provided (backfill envelope).
+    _label_prefix = budget_label_prefix or "transplant"
+    _ledger = budget_ledger_path
+
     # Render, finish, then visual-QA. On a failing QA verdict we regenerate once
     # (budget permitting) with the issues appended, then accept the best result.
     best_fin: Optional[str] = None
     best_score = -1
     feedback = ""
     for attempt in range(2):
-        if attempt and not budget.can_spend(cost):
+        if attempt and not budget.can_spend(cost, ledger_path=_ledger):
             break  # no budget for a retry; keep what we have
         prompt = base_prompt if not feedback else (
             f"{base_prompt}\n\nFIX THESE ISSUES from the previous attempt: {feedback}")
@@ -165,7 +177,8 @@ def generate(draft: dict, brand: str, out_dir: Optional[Path] = None,
         )
         if not raw or not os.path.exists(raw):
             break
-        budget.record(cost, label=f"transplant:{brand}:{recipe['palette']}:{_pick}")
+        budget.record(cost, label=f"{_label_prefix}:{brand}:{recipe['palette']}:{_pick}",
+                      ledger_path=_ledger)
 
         # Per-attempt filename so a lower-scoring retry never overwrites a better
         # earlier attempt that best_fin may still point to.

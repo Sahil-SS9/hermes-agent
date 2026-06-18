@@ -35,8 +35,8 @@ def test_generate_accepts_recipe_override(monkeypatch, tmp_path):
         return recipe
 
     monkeypatch.setattr(it.lib, "select_recipe", fake_select)
-    monkeypatch.setattr(it.budget, "can_spend", lambda c, cap=10.0: True)
-    monkeypatch.setattr(it.budget, "record", lambda c, label="": None)
+    monkeypatch.setattr(it.budget, "can_spend", lambda c, cap=10.0, **k: True)
+    monkeypatch.setattr(it.budget, "record", lambda c, label="", **k: None)
     monkeypatch.setattr(it.fal_client, "upload_file", lambda p, **k: "http://u")
     raw = tmp_path / "r.png"
     raw.write_bytes(b"x")
@@ -61,7 +61,7 @@ def test_illustrate_locks_palette(monkeypatch, tmp_path):
         return str(p)
 
     monkeypatch.setattr(bi, "generate", fake_generate)
-    monkeypatch.setattr(bi.budget, "can_spend", lambda c: True)
+    monkeypatch.setattr(bi.budget, "can_spend", lambda c, **k: True)
     monkeypatch.setattr(bi.config, "BLOG_MAX_SECTION_IMAGES", 2)
     monkeypatch.setattr(bi.config, "BLOG_IMAGE_MODEL", "fal-ai/nano-banana-2/edit")
     monkeypatch.setattr(bi.config, "BLOG_IMAGE_COST_GBP", 0.06)

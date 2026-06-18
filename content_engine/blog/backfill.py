@@ -64,11 +64,11 @@ def _stagger_dates(num_posts: int, span_days: int = 21) -> list[str]:
 def _budget_check(cost_gbp: float) -> bool:
     """Check if a backfill spend stays within the one-off envelope.
 
-    Uses the standard budget module but caps against BACKFILL_SPEND_CAP_GBP
-    instead of the monthly cap. The per-image spend is recorded by
-    imagery_transplant.generate (same ledger), so we only check here.
+    Uses the separate backfill ledger so one-off spend does not count against
+    the recurring monthly cap.
     """
-    return budget.can_spend(cost_gbp, cap_gbp=config.BACKFILL_SPEND_CAP_GBP)
+    return budget.can_spend(cost_gbp, cap_gbp=config.BACKFILL_SPEND_CAP_GBP,
+                            ledger_path=config.BACKFILL_LEDGER_PATH)
 
 
 def _verify_if_needed(topic: dict) -> Optional[dict]:
@@ -229,7 +229,9 @@ def run(stream: Optional[str] = None, limit: Optional[int] = None,
                 images = {"hero_path": None, "section_paths": {}}
             else:
                 print(f"[backfill] illustrating [{s}] {title}...")
-                images = illustrate(draft, max_sections=draft["_max_sections"])
+                images = illustrate(draft, max_sections=draft["_max_sections"],
+                                    budget_label_prefix="backfill",
+                                    budget_ledger_path=config.BACKFILL_LEDGER_PATH)
                 if images.get("hero_path"):
                     result["total_images"] += 1
                     result["total_spend_gbp"] += config.BLOG_IMAGE_COST_GBP

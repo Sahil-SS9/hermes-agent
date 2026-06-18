@@ -1,9 +1,9 @@
 """Tests for blog.blog_streams — the single source of per-stream truth.
 
 Verifies the STREAMS dict matches the VERIFIED ingestion contract:
-  - ai:  tier=pm + an AI-tag (surfaced on /ai), source=research-paper
-  - pm:  tier=pm (non-AI tags), source=manual
-  - builder: tier=builder, source=gitradar or manual
+  - ai:  tier=ai (own page on SahilBlog), source=research-paper
+  - pm:  tier=pm (non-AI tags), source=research-paper
+  - builder: tier=builder, source=manual
 """
 import blog.blog_streams as bs
 
@@ -12,7 +12,7 @@ def test_streams_shape():
     """Each stream has the required keys and valid field values."""
     for name in ("ai", "pm", "builder"):
         s = bs.STREAMS[name]
-        assert s["tier"] in ("pm", "builder"), f"{name}: tier must be pm|builder"
+        assert s["tier"] in ("ai", "pm", "builder"), f"{name}: tier must be ai|pm|builder"
         assert s["voice"] and len(s["voice"]) > 20, f"{name}: voice must be non-trivial"
         assert s["format"] in ("essay", "note", "review", "brief"), f"{name}: format invalid"
         assert isinstance(s["base_tags"], list) and s["base_tags"], f"{name}: base_tags non-empty list"
@@ -24,9 +24,9 @@ def test_streams_shape():
         assert s.get("structure") and len(s["structure"]) > 20, f"{name}: structure required"
 
 
-def test_ai_is_pm_tier_with_ai_tag():
-    """AI stream surfaces on /ai which filters tier=pm + AI tag."""
-    assert bs.STREAMS["ai"]["tier"] == "pm"
+def test_ai_is_ai_tier_with_ai_tag():
+    """AI stream is tier=ai (its own page on SahilBlog)."""
+    assert bs.STREAMS["ai"]["tier"] == "ai"
     tags = bs.STREAMS["ai"]["base_tags"]
     assert any(t in ("ai", "agentic", "llm", "agents", "ai-adoption", "ai-strategy", "machine-learning")
                for t in tags), "ai stream must carry an AI-recognised tag"

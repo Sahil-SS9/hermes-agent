@@ -22,9 +22,9 @@ def test_generate_scene_happy_path(monkeypatch, tmp_path):
               "anchor_path": anchor, "hex": "navy", "light": False, "aspect": "4:5",
               "desc": "an abstract illustration", "text_rule": "none"}
     monkeypatch.setattr(it.lib, "select_recipe", lambda *a, **k: recipe)
-    monkeypatch.setattr(it.budget, "can_spend", lambda c: True)
+    monkeypatch.setattr(it.budget, "can_spend", lambda c, **k: True)
     rec = []
-    monkeypatch.setattr(it.budget, "record", lambda c, label="": rec.append(label))
+    monkeypatch.setattr(it.budget, "record", lambda c, label="", **k: rec.append(label))
     monkeypatch.setattr(it.fal_client, "upload_file", lambda p, **k: f"http://u/{p}")
     raw = tmp_path / "raw.png"; raw.write_bytes(b"x")
     captured = {}
@@ -53,8 +53,8 @@ def test_generate_scene_uses_cheaper_model(monkeypatch, tmp_path):
               "anchor_path": anchor, "hex": "navy", "light": False, "aspect": "4:5",
               "desc": "abstract", "text_rule": "none", "ctype": "scene"}
     monkeypatch.setattr(it.lib, "select_recipe", lambda *a, **k: recipe)
-    monkeypatch.setattr(it.budget, "can_spend", lambda c: True)
-    monkeypatch.setattr(it.budget, "record", lambda c, label="": None)
+    monkeypatch.setattr(it.budget, "can_spend", lambda c, **k: True)
+    monkeypatch.setattr(it.budget, "record", lambda c, label="", **k: None)
     monkeypatch.setattr(it.fal_client, "upload_file", lambda p, **k: "http://u")
     raw = tmp_path / "raw.png"; raw.write_bytes(b"x")
     seen = {}
@@ -75,7 +75,7 @@ def test_generate_skips_when_over_budget(monkeypatch):
     monkeypatch.setattr(it.lib, "select_recipe", lambda *a, **k: {
         "hex": "x", "light": False, "aspect": "4:5", "layout_path": "L",
         "style_path": "S", "palette": "p", "layout": "l"})
-    monkeypatch.setattr(it.budget, "can_spend", lambda c: False)
+    monkeypatch.setattr(it.budget, "can_spend", lambda c, **k: False)
     assert it.generate({"brand": "sahil_twitter", "title": "t"}, "sahil_twitter") is None
 
 
@@ -83,7 +83,7 @@ def test_generate_none_when_upload_fails(monkeypatch):
     monkeypatch.setattr(it.lib, "select_recipe", lambda *a, **k: {
         "hex": "x", "light": False, "aspect": "4:5", "layout_path": "L",
         "style_path": "S", "palette": "p", "layout": "l"})
-    monkeypatch.setattr(it.budget, "can_spend", lambda c: True)
+    monkeypatch.setattr(it.budget, "can_spend", lambda c, **k: True)
     monkeypatch.setattr(it.fal_client, "upload_file", lambda p, **k: None)
     assert it.generate({"brand": "sahil_twitter", "title": "t"}, "sahil_twitter") is None
 
@@ -93,9 +93,9 @@ def test_generate_happy_path(monkeypatch, tmp_path):
               "layout_path": tmp_path / "L.webp", "style_path": tmp_path / "S.webp",
               "palette": "cyber_neon", "layout": "iceberg"}
     monkeypatch.setattr(it.lib, "select_recipe", lambda *a, **k: recipe)
-    monkeypatch.setattr(it.budget, "can_spend", lambda c: True)
+    monkeypatch.setattr(it.budget, "can_spend", lambda c, **k: True)
     rec = []
-    monkeypatch.setattr(it.budget, "record", lambda c, label="": rec.append((c, label)))
+    monkeypatch.setattr(it.budget, "record", lambda c, label="", **k: rec.append((c, label)))
     monkeypatch.setattr(it.fal_client, "upload_file", lambda p, **k: f"http://u/{p}")
     raw = tmp_path / "raw.png"; raw.write_bytes(b"x")
     monkeypatch.setattr(it.fal_client, "generate_image_edit", lambda *a, **k: str(raw))
@@ -117,8 +117,8 @@ def _infographic_setup(monkeypatch, tmp_path, scores):
               "layout_path": tmp_path / "L.webp", "style_path": tmp_path / "S.webp",
               "palette": "cyber_neon", "layout": "iceberg"}
     monkeypatch.setattr(it.lib, "select_recipe", lambda *a, **k: recipe)
-    monkeypatch.setattr(it.budget, "can_spend", lambda c: True)
-    monkeypatch.setattr(it.budget, "record", lambda c, label="": None)
+    monkeypatch.setattr(it.budget, "can_spend", lambda c, **k: True)
+    monkeypatch.setattr(it.budget, "record", lambda c, label="", **k: None)
     monkeypatch.setattr(it.fal_client, "upload_file", lambda p, **k: "http://u")
     calls = {"n": 0}
 
@@ -170,8 +170,8 @@ def test_generate_returns_raw_when_finish_fails(monkeypatch, tmp_path):
               "layout_path": tmp_path / "L.webp", "style_path": tmp_path / "S.webp",
               "palette": "cyber_neon", "layout": "iceberg"}
     monkeypatch.setattr(it.lib, "select_recipe", lambda *a, **k: recipe)
-    monkeypatch.setattr(it.budget, "can_spend", lambda c: True)
-    monkeypatch.setattr(it.budget, "record", lambda c, label="": None)
+    monkeypatch.setattr(it.budget, "can_spend", lambda c, **k: True)
+    monkeypatch.setattr(it.budget, "record", lambda c, label="", **k: None)
     monkeypatch.setattr(it.fal_client, "upload_file", lambda p, **k: "http://u")
     raw = tmp_path / "raw.png"; raw.write_bytes(b"x")
     monkeypatch.setattr(it.fal_client, "generate_image_edit", lambda *a, **k: str(raw))

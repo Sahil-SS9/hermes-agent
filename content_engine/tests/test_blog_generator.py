@@ -71,7 +71,7 @@ def test_write_returns_draft_with_stream_fields(monkeypatch):
     draft = bg.write(plan, stream="ai")
     assert draft is not None
     assert draft["title"] == "Token-Maxing at the Edge"
-    assert draft["tier"] == "pm"  # from STREAMS["ai"]
+    assert draft["tier"] == "ai"  # from STREAMS["ai"], 3-tier system
     assert "ai" in draft["tags"]  # base tag
     assert "ai-adoption" in draft["tags"]  # topic tag
     assert draft["source"] == "research-paper"
@@ -157,7 +157,7 @@ def test_write_threads_retry_feedback_into_prompt(monkeypatch):
 
 def test_write_with_gate_retry_uses_feedback_not_double_spend(monkeypatch):
     """On gate failure, write_with_gate retries once with feedback in a single
-    LLM call - not two calls with the feedback discarded."""
+    LLM call, not two calls with the feedback discarded."""
     plan = {"topic_id": "t1", "title_hint": "t", "tags": [], "source": "manual",
             "signals": [{"signal_id": "t1", "summary": "s"}]}
     call_count = {"n": 0}
@@ -170,6 +170,11 @@ def test_write_with_gate_retry_uses_feedback_not_double_spend(monkeypatch):
     monkeypatch.setattr(bg, "_load_voice_skill", lambda brand: "VOICE")
     monkeypatch.setattr(bg, "enrich_signal", lambda s: "CTX")
     monkeypatch.setattr(bg, "retrieve_kb", lambda t, limit=3: [])
+
+    # Mock the reviewer to always pass so it does not interfere with the
+    # deterministic-gate retry test.
+    import blog.blog_reviewer as br
+    monkeypatch.setattr(br, "_call_review_llm", lambda *a, **k: None)
 
     # Force gate to fail first time, pass second time.
     fail_first = {"fail": True}
@@ -193,3 +198,51 @@ def test_write_with_gate_retry_uses_feedback_not_double_spend(monkeypatch):
     # The second call's prompt must contain the feedback.
     assert "too short" in prompts_seen[1], \
         "retry prompt must contain the gate feedback"
+
+
+def test_write_with_gate_runs_reviewer_and_retries(monkeypatch):
+    """write_with_gate runs the editorial reviewer and retries on its issues."""
+    plan = {"topic_id": "t1", "title_hint": "t", "tags": [], "source": "manual",
+            "signals": [{"signal_id": "t1", "summary": "s"}]}
+    call_count = {"n": 0}
+    def fake_llm(sys_prompt, usr_prompt):
+        call_count["n"] += 1
+        return _FAKE_BODY
+    monkeypatch.setattr(bg, "_call_llm_first", fake_llm)
+    monkeypatch.setattr(bg, "_load_voice_skill", lambda brand: "VOICE")
+    monkeypatch.setattr(bg, "enrich_signal", lambda s: "CTX")
+    monkeypatch.setattr(bg, "retrieve_kb", lambda t, limit=3: [])
+
+    # Mock the deterministic gate to always pass so we isolate the reviewer.
+    monkeypatch.setattr(bg, "gate_check", lambda d: ("ok", []))
+
+    # Mock _redact_draft to avoid article_gates re-checking the short body.
+    monkeypatch.setattr(bg, "_redact_draft", lambda d: None)
+
+    # Reviewer: fail first attempt, pass on retry.
+    import blog.blog_reviewer as br
+    import json as _json
+    review_calls = {"n": 0}
+    def fake_review_llm(*a, **k):
+        review_calls["n"] += 1
+        if review_calls["n"] == 1:
+            return _json.dumps({
+                "score": 3, "passed": False,
+                "issues": ["Contains an em-dash on line 4"],
+                "claims_to_verify": [],
+                "rubric": {"accuracy_risk": 5, "voice_fidelity": 4,
+                           "secret_sauce_leakage": 8, "hype_honesty": 5,
+                           "structure": 3},
+            })
+        return _json.dumps({
+            "score": 8, "passed": True, "issues": [], "claims_to_verify": [],
+            "rubric": {"accuracy_risk": 8, "voice_fidelity": 8,
+                       "secret_sauce_leakage": 10, "hype_honesty": 8,
+                       "structure": 8},
+        })
+    monkeypatch.setattr(br, "_call_review_llm", fake_review_llm)
+
+    result = bg.write_with_gate(plan, stream="ai")
+    assert result is not None, "should pass on retry"
+    assert call_count["n"] == 2, "should make 2 LLM writer calls"
+    assert review_calls["n"] == 2, "should make 2 reviewer calls"

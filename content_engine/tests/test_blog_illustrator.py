@@ -63,7 +63,7 @@ def test_illustrate_returns_hero_and_section_paths(monkeypatch, tmp_path):
     def fake_generate(draft, brand, out_dir=None, ctype=None, **kw):
         return _make_fake_png(Path(out_dir) / f"fake_{ctype or 'hero'}.png")
     monkeypatch.setattr(bi, "generate", fake_generate)
-    monkeypatch.setattr(bi.budget, "can_spend", lambda cost: True)
+    monkeypatch.setattr(bi.budget, "can_spend", lambda cost, **k: True)
 
     images = bi.illustrate(_DRAFT, out_dir=tmp_path, max_sections=2)
     assert "hero_path" in images
@@ -83,7 +83,7 @@ def test_illustrate_caps_at_max_sections(monkeypatch, tmp_path):
         calls.append(ctype)
         return _make_fake_png(Path(out_dir) / f"fake_{len(calls)}.png")
     monkeypatch.setattr(bi, "generate", fake_generate)
-    monkeypatch.setattr(bi.budget, "can_spend", lambda cost: True)
+    monkeypatch.setattr(bi.budget, "can_spend", lambda cost, **k: True)
 
     images = bi.illustrate(draft, out_dir=tmp_path, max_sections=1)
     assert len(images["section_paths"]) <= 1
@@ -92,7 +92,7 @@ def test_illustrate_caps_at_max_sections(monkeypatch, tmp_path):
 def test_illustrate_skips_when_budget_blocked(monkeypatch, tmp_path):
     """When budget.can_spend returns False, no images are generated."""
     monkeypatch.setattr(bi, "generate", lambda *a, **kw: (_ for _ in ()).throw(AssertionError("should not call")))
-    monkeypatch.setattr(bi.budget, "can_spend", lambda cost: False)
+    monkeypatch.setattr(bi.budget, "can_spend", lambda cost, **k: False)
     images = bi.illustrate(_DRAFT, out_dir=tmp_path, max_sections=2)
     assert images["hero_path"] is None
     assert images["section_paths"] == {}
@@ -105,7 +105,7 @@ def test_illustrate_uses_sahil_twitter_brand(monkeypatch, tmp_path):
         received_brands.append(brand)
         return _make_fake_png(Path(out_dir) / f"fake_{len(received_brands)}.png")
     monkeypatch.setattr(bi, "generate", fake_generate)
-    monkeypatch.setattr(bi.budget, "can_spend", lambda cost: True)
+    monkeypatch.setattr(bi.budget, "can_spend", lambda cost, **k: True)
     bi.illustrate(_DRAFT, out_dir=tmp_path, max_sections=1)
     assert all(b == "sahil_twitter" for b in received_brands)
 
@@ -115,7 +115,7 @@ def test_illustrate_section_paths_keyed_by_h2_heading(monkeypatch, tmp_path):
     def fake_generate(draft, brand, out_dir=None, ctype=None, **kw):
         return _make_fake_png(Path(out_dir) / f"fake_{ctype or 'hero'}.png")
     monkeypatch.setattr(bi, "generate", fake_generate)
-    monkeypatch.setattr(bi.budget, "can_spend", lambda cost: True)
+    monkeypatch.setattr(bi.budget, "can_spend", lambda cost, **k: True)
     images = bi.illustrate(_DRAFT, out_dir=tmp_path, max_sections=3)
     # The draft has H2s: "The mechanism", "Worked example", "What I'd try next"
     for key in images["section_paths"]:
@@ -130,7 +130,7 @@ def test_illustrate_hero_only_when_max_sections_zero(monkeypatch, tmp_path):
         calls.append(ctype)
         return _make_fake_png(Path(out_dir) / f"fake_{len(calls)}.png")
     monkeypatch.setattr(bi, "generate", fake_generate)
-    monkeypatch.setattr(bi.budget, "can_spend", lambda cost: True)
+    monkeypatch.setattr(bi.budget, "can_spend", lambda cost, **k: True)
     images = bi.illustrate(_DRAFT, out_dir=tmp_path, max_sections=0)
     assert images["hero_path"] is not None
     assert images["section_paths"] == {}
@@ -141,7 +141,7 @@ def test_default_max_sections_from_config(monkeypatch, tmp_path):
     def fake_generate(draft, brand, out_dir=None, ctype=None, **kw):
         return _make_fake_png(Path(out_dir) / f"fake_{ctype or 'hero'}.png")
     monkeypatch.setattr(bi, "generate", fake_generate)
-    monkeypatch.setattr(bi.budget, "can_spend", lambda cost: True)
+    monkeypatch.setattr(bi.budget, "can_spend", lambda cost, **k: True)
     monkeypatch.setattr(config, "BLOG_MAX_SECTION_IMAGES", 2)
     images = bi.illustrate(_DRAFT, out_dir=tmp_path)
     assert len(images["section_paths"]) <= 2

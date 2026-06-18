@@ -12,6 +12,7 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock
+from typing import Optional
 
 _LEDGER = Path(__file__).resolve().parent / "output" / "spend_ledger.json"
 
@@ -55,15 +56,53 @@ def _save(data: dict) -> None:
     _LEDGER.write_text(json.dumps(data, indent=2))
 
 
-def can_spend(cost_gbp: float, cap_gbp: float = _CAP_GBP) -> bool:
-    """True if a paid call of ``cost_gbp`` keeps the month within the cap."""
+def can_spend(cost_gbp: float, cap_gbp: float = _CAP_GBP,
+              ledger_path: Optional[str] = None) -> bool:
+    """True if a paid call of ``cost_gbp`` keeps the ledger within the cap.
+
+    When ``ledger_path`` is set, checks against that separate ledger file
+    instead of the monthly ledger. Used by the back-population envelope to
+    isolate one-off spend from the recurring monthly cap.
+    """
     with _lock:
-        return _load().get("spent_gbp", 0.0) + cost_gbp <= cap_gbp
+        if ledger_path:
+            data = _load_path(Path(ledger_path))
+            spent = data.get("spent_gbp", 0.0)
+        else:
+            data = _load()
+            spent = data.get("spent_gbp", 0.0)
+        return spent + cost_gbp <= cap_gbp
 
 
-def record(cost_gbp: float, label: str = "") -> dict:
-    """Record a paid spend. Returns the updated ledger."""
+def _load_path(path: Path) -> dict:
+    """Load a ledger from a specific path (no month rollover for envelopes)."""
+    try:
+        return json.loads(path.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {"spent_gbp": 0.0, "calls": 0}
+
+
+def record(cost_gbp: float, label: str = "",
+           ledger_path: Optional[str] = None) -> dict:
+    """Record a paid spend. Returns the updated ledger.
+
+    When ``ledger_path`` is set, records to a separate envelope ledger
+    instead of the monthly ledger.
+    """
     with _lock:
+        if ledger_path:
+            path = Path(ledger_path)
+            data = _load_path(path)
+            data["spent_gbp"] = round(data.get("spent_gbp", 0.0) + cost_gbp, 4)
+            data["calls"] = data.get("calls", 0) + 1
+            data.setdefault("log", []).append(
+                {"ts": datetime.now(timezone.utc).isoformat(),
+                 "gbp": cost_gbp, "label": label}
+            )
+            data["log"] = data["log"][-200:]
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(data, indent=2))
+            return data
         data = _load()
         data["spent_gbp"] = round(data.get("spent_gbp", 0.0) + cost_gbp, 4)
         data["calls"] = data.get("calls", 0) + 1

@@ -71,27 +71,38 @@ def test_backfill_skips_existing_and_respects_cap(monkeypatch, tmp_path):
         }
     monkeypatch.setattr(bf, "write_with_gate", fake_write)
 
-    # Mock illustrate to return fake paths AND record spend (like the real one).
+    # Mock illustrate to return fake paths AND record spend to the backfill
+    # ledger (like the real one does via budget_ledger_path).
     def fake_illustrate(draft, max_sections=0, **kw):
         out = {"hero_path": None, "section_paths": {}}
+        ledger_path = kw.get("budget_ledger_path")
         if max_sections > 0:
             hero = tmp_path / "hero.png"
             hero.write_text("x")
             out["hero_path"] = str(hero)
-            bgt.record(cfg.BLOG_IMAGE_COST_GBP, label="test:hero")
+            bgt.record(cfg.BLOG_IMAGE_COST_GBP, label="test:hero",
+                       ledger_path=ledger_path)
         for i in range(max_sections):
             sec = tmp_path / f"sec{i}.png"
             sec.write_text("x")
             out["section_paths"][f"Section {i}"] = str(sec)
-            bgt.record(cfg.BLOG_IMAGE_COST_GBP, label="test:sec")
+            bgt.record(cfg.BLOG_IMAGE_COST_GBP, label="test:sec",
+                       ledger_path=ledger_path)
         return out
     monkeypatch.setattr(bf, "illustrate", fake_illustrate)
 
-    # Reset budget for the test.
+    # Reset budget ledgers for the test.
     from pathlib import Path
     ledger = Path(bgt._LEDGER)
     if ledger.exists():
         ledger.unlink()
+    # Reset the backfill envelope ledger too.
+    bf_ledger = Path(cfg.BACKFILL_LEDGER_PATH)
+    if bf_ledger.exists():
+        bf_ledger.unlink()
+    # Point the backfill ledger to a temp path so we don't clobber a real one.
+    bf_tmp_ledger = tmp_path / "backfill_ledger.json"
+    monkeypatch.setattr(cfg, "BACKFILL_LEDGER_PATH", str(bf_tmp_ledger))
 
     # Run with a limit of 3 (should generate ~3 but cap stops earlier).
     result = bf.run(stream="ai", limit=5)

@@ -357,3 +357,7 @@ BLOG_IMAGE_MODEL = os.getenv("BLOG_IMAGE_MODEL", "fal-ai/nano-banana-2/edit").st
 BLOG_IMAGE_COST_GBP = float(os.getenv("BLOG_IMAGE_COST_GBP", "0.064"))
 # One-off back-population envelope, separate from MONTHLY_BUDGET_GBP.
 BACKFILL_SPEND_CAP_GBP = float(os.getenv("BACKFILL_SPEND_CAP_GBP", "9.0"))
+# Separate ledger for the one-off back-population envelope so it does not
+# count against the recurring monthly cap.
+BACKFILL_LEDGER_PATH = str(Path(os.getenv(
+    "BACKFILL_LEDGER_PATH", str(Path(__file__).parent / "output" / "backfill_ledger.json"))))
