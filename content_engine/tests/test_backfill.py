@@ -111,3 +111,41 @@ def test_backfill_skips_existing_and_respects_cap(monkeypatch, tmp_path):
     # Total images generated should be limited by the cap.
     assert result["total_spend_gbp"] <= cfg.BACKFILL_SPEND_CAP_GBP + 0.01, \
         f"spend {result['total_spend_gbp']} exceeded cap {cfg.BACKFILL_SPEND_CAP_GBP}"
+
+
+def test_backfill_halts_on_review_unavailable(monkeypatch, tmp_path):
+    """When write_with_gate raises ReviewUnavailable, backfill halts the stream
+    and no further stage_draft calls are made."""
+    import blog.backfill as bf
+    import config as cfg
+    from blog.blog_generator import ReviewUnavailable
+
+    repo = tmp_path / "SahilBlog"
+    posts_dir = repo / "src/content/blog"
+    posts_dir.mkdir(parents=True)
+
+    monkeypatch.setattr(cfg, "SAHILBLOG_REPO", str(repo))
+    monkeypatch.setattr(cfg, "BACKFILL_LEDGER_PATH",
+                        str(tmp_path / "bf_ledger.json"))
+
+    # write_with_gate raises ReviewUnavailable on the first call.
+    call_count = {"n": 0}
+    def failing_write(plan, stream="ai", **kw):
+        call_count["n"] += 1
+        raise ReviewUnavailable("reviewer degraded")
+    monkeypatch.setattr(bf, "write_with_gate", failing_write)
+
+    # stage_draft should never be called. Track it.
+    stage_calls = {"n": 0}
+    def tracking_stage(*a, **kw):
+        stage_calls["n"] += 1
+        return "slug"
+    monkeypatch.setattr(bf, "stage_draft", tracking_stage)
+
+    result = bf.run(stream="ai", limit=3)
+    assert call_count["n"] == 1, "should call write_with_gate once then halt"
+    assert stage_calls["n"] == 0, "should never stage when reviewer unavailable"
+    assert result["errors"] == 1
+    assert result["status"] == "partial"
+    assert any(r["status"] == "review_unavailable"
+               for r in result["results"])

@@ -22,6 +22,7 @@ def test_review_degrades_to_pass_when_model_unavailable(monkeypatch):
     assert r["passed"] is True
     assert r["score"] == 5  # neutral midpoint
     assert r["issues"] == []
+    assert r["degraded"] is True
 
 
 def test_review_parses_valid_json(monkeypatch):
@@ -49,6 +50,7 @@ def test_review_parses_valid_json(monkeypatch):
     assert r["passed"] is True
     assert r["score"] == 8
     assert r["issues"] == []
+    assert r["degraded"] is False
 
 
 def test_review_flags_issues_and_claims(monkeypatch):
@@ -90,6 +92,7 @@ def test_review_malformed_json_degrades_to_pass(monkeypatch):
     r = br.review(draft, "pm")
     assert r["passed"] is True
     assert r["score"] == 5
+    assert r["degraded"] is True
 
 
 def test_review_builder_stream_checks_secret_sauce(monkeypatch):

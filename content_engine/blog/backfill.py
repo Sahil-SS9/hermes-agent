@@ -32,7 +32,7 @@ import budget
 import config
 from blog.backfill_topics import TOPICS, needs_verification, topics_for
 from blog.blog_assembler import assemble
-from blog.blog_generator import write_with_gate
+from blog.blog_generator import ReviewUnavailable, write_with_gate
 from blog.blog_illustrator import illustrate
 from blog.blog_publisher import stage_draft
 
@@ -205,9 +205,23 @@ def run(stream: Optional[str] = None, limit: Optional[int] = None,
             plan = _build_plan(topic, s)
             verification = _verify_if_needed(topic) if s == "ai" else None
 
-            # Generate the draft (text only).
+            # Generate the draft (text only). Strict mode: if the editorial
+            # reviewer degrades (LLM unavailable), halt the stream rather than
+            # staging an unreviewed draft.
             print(f"[backfill] generating [{s}] {title}...")
-            draft = write_with_gate(plan, stream=s, verification=verification)
+            try:
+                draft = write_with_gate(plan, stream=s,
+                                        verification=verification,
+                                        strict_review=True)
+            except ReviewUnavailable as exc:
+                print(f"[backfill] HALT [{s}] {title}: {exc}")
+                print(f"[backfill] stopping stream '{s}' (strict review unavailable)")
+                result["errors"] += 1
+                result["results"].append(
+                    {"stream": s, "title": title, "status": "review_unavailable"}
+                )
+                result["status"] = "partial"
+                break
             if not draft:
                 print(f"[backfill] FAIL (generator) [{s}] {title}")
                 result["errors"] += 1

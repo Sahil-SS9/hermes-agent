@@ -125,19 +125,23 @@ def review(draft: dict, stream: str) -> dict[str, Any]:
     """Review a blog draft and return a verdict dict.
 
     Returns: {"passed": bool, "score": int, "issues": list[str],
-              "claims_to_verify": list[str]}
+              "claims_to_verify": list[str], "degraded": bool}
 
-    Degrades to neutral pass (score=5, passed=True, no issues) when the LLM
-    is unavailable or returns malformed output. Never blocks on infra failure.
+    Degrades to neutral pass (score=5, passed=True, no issues, degraded=True)
+    when the LLM is unavailable or returns malformed output. Never blocks on
+    infra failure. ``degraded`` lets callers in strict mode halt rather than
+    stage an unreviewed draft.
     """
     prompts = _build_rubric_prompt(draft, stream)
     raw = _call_review_llm(prompts["system"], prompts["user"])
     if not raw:
-        return {"passed": True, "score": 5, "issues": [], "claims_to_verify": []}
+        return {"passed": True, "score": 5, "issues": [],
+                "claims_to_verify": [], "degraded": True}
 
     parsed = _extract_json(raw)
     if not parsed:
-        return {"passed": True, "score": 5, "issues": [], "claims_to_verify": []}
+        return {"passed": True, "score": 5, "issues": [],
+                "claims_to_verify": [], "degraded": True}
 
     score = int(parsed.get("score", 5))
     issues = list(parsed.get("issues", []) or [])
@@ -149,4 +153,5 @@ def review(draft: dict, stream: str) -> dict[str, Any]:
         "score": score,
         "issues": issues,
         "claims_to_verify": claims,
+        "degraded": False,
     }

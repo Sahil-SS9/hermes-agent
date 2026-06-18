@@ -246,3 +246,64 @@ def test_write_with_gate_runs_reviewer_and_retries(monkeypatch):
     assert result is not None, "should pass on retry"
     assert call_count["n"] == 2, "should make 2 LLM writer calls"
     assert review_calls["n"] == 2, "should make 2 reviewer calls"
+
+
+def test_write_with_gate_strict_raises_on_degraded(monkeypatch):
+    """strict_review=True + degraded reviewer -> raises ReviewUnavailable."""
+    plan = {"topic_id": "t1", "title_hint": "t", "tags": [], "source": "manual",
+            "signals": [{"signal_id": "t1", "summary": "s"}]}
+    monkeypatch.setattr(bg, "_call_llm_first", lambda sys, usr: _FAKE_BODY)
+    monkeypatch.setattr(bg, "_load_voice_skill", lambda brand: "VOICE")
+    monkeypatch.setattr(bg, "enrich_signal", lambda s: "CTX")
+    monkeypatch.setattr(bg, "retrieve_kb", lambda t, limit=3: [])
+    monkeypatch.setattr(bg, "gate_check", lambda d: ("ok", []))
+    monkeypatch.setattr(bg, "_redact_draft", lambda d: None)
+
+    import blog.blog_reviewer as br
+    monkeypatch.setattr(br, "_call_review_llm", lambda *a, **k: None)
+
+    import pytest
+    with pytest.raises(bg.ReviewUnavailable, match="degraded"):
+        bg.write_with_gate(plan, stream="ai", strict_review=True)
+
+
+def test_write_with_gate_non_strict_returns_draft_on_degraded(monkeypatch):
+    """strict_review=False + degraded reviewer -> returns draft (graceful)."""
+    plan = {"topic_id": "t1", "title_hint": "t", "tags": [], "source": "manual",
+            "signals": [{"signal_id": "t1", "summary": "s"}]}
+    monkeypatch.setattr(bg, "_call_llm_first", lambda sys, usr: _FAKE_BODY)
+    monkeypatch.setattr(bg, "_load_voice_skill", lambda brand: "VOICE")
+    monkeypatch.setattr(bg, "enrich_signal", lambda s: "CTX")
+    monkeypatch.setattr(bg, "retrieve_kb", lambda t, limit=3: [])
+    monkeypatch.setattr(bg, "gate_check", lambda d: ("ok", []))
+    monkeypatch.setattr(bg, "_redact_draft", lambda d: None)
+
+    import blog.blog_reviewer as br
+    monkeypatch.setattr(br, "_call_review_llm", lambda *a, **k: None)
+
+    result = bg.write_with_gate(plan, stream="ai", strict_review=False)
+    assert result is not None, "graceful mode should return the draft"
+
+
+def test_write_with_gate_strict_returns_draft_on_genuine_pass(monkeypatch):
+    """strict_review=True + genuine reviewer pass -> returns draft."""
+    plan = {"topic_id": "t1", "title_hint": "t", "tags": [], "source": "manual",
+            "signals": [{"signal_id": "t1", "summary": "s"}]}
+    monkeypatch.setattr(bg, "_call_llm_first", lambda sys, usr: _FAKE_BODY)
+    monkeypatch.setattr(bg, "_load_voice_skill", lambda brand: "VOICE")
+    monkeypatch.setattr(bg, "enrich_signal", lambda s: "CTX")
+    monkeypatch.setattr(bg, "retrieve_kb", lambda t, limit=3: [])
+    monkeypatch.setattr(bg, "gate_check", lambda d: ("ok", []))
+    monkeypatch.setattr(bg, "_redact_draft", lambda d: None)
+
+    import blog.blog_reviewer as br
+    import json as _json
+    monkeypatch.setattr(br, "_call_review_llm", lambda *a, **k: _json.dumps({
+        "score": 8, "passed": True, "issues": [], "claims_to_verify": [],
+        "rubric": {"accuracy_risk": 8, "voice_fidelity": 8,
+                   "secret_sauce_leakage": 10, "hype_honesty": 8,
+                   "structure": 8},
+    }))
+
+    result = bg.write_with_gate(plan, stream="ai", strict_review=True)
+    assert result is not None, "strict mode + genuine pass should return draft"

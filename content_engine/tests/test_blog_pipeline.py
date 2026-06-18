@@ -144,3 +144,32 @@ def test_run_stream_skipped_when_disabled(monkeypatch, tmp_path):
     monkeypatch.setattr(bpl, "BLOG_ENABLED", False)
     result = bpl.run_stream("ai", repo=str(repo))
     assert result["status"] == "skipped_disabled"
+
+
+def test_run_stream_graceful_when_reviewer_degraded(monkeypatch, tmp_path):
+    """Daily pipeline (strict_review=False default) still produces a draft
+    when the editorial reviewer degrades. The reviewer LLM returning None
+    must not block the daily path."""
+    repo = _setup_tmp_repo(tmp_path)
+    plan = {"topic_id": "t1", "title_hint": "t", "tags": [], "source": "manual",
+            "signals": [{"signal_id": "t1", "summary": "s"}]}
+    monkeypatch.setattr(bpl, "choose", lambda stream: plan)
+
+    # write_with_gate in non-strict mode returns a draft even when the
+    # reviewer degrades. Mock it to simulate that path.
+    monkeypatch.setattr(bpl, "write_with_gate", lambda p, stream: _DRAFT)
+    monkeypatch.setattr(bpl, "illustrate",
+                        lambda d, out_dir=None, max_sections=None:
+                        {"hero_path": None, "section_paths": {}})
+    def fake_assemble(d, imgs, repo=None):
+        p = Path(repo) / "src/content/blog" / f"{d['slug']}.mdx"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("---\ntitle: \"t\"\n---\nbody")
+        return p
+    monkeypatch.setattr(bpl, "assemble", fake_assemble)
+    monkeypatch.setattr(bpl, "stage_draft", lambda mdx, repo=None: "slug")
+    monkeypatch.setattr(bpl, "record", lambda s, tid, t: None)
+
+    result = bpl.run_stream("ai", repo=str(repo))
+    assert result["status"] == "ok", \
+        "daily pipeline must stage draft even when reviewer degrades"

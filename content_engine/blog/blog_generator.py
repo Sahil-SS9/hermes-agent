@@ -13,6 +13,16 @@ from typing import Optional
 import context_enrich
 import kb_retrieve
 from llm_generate import _call_llm, _llm_configs, _load_voice_skill, gate_post
+
+
+class ReviewUnavailable(RuntimeError):
+    """Raised when strict_review is True and the editorial reviewer degrades.
+
+    In strict mode (bulk backfill), a degraded verdict means the draft was
+    never actually reviewed. Halt instead of staging an unreviewed post.
+    The daily pipeline uses strict_review=False (default) and never raises.
+    """
+
 from blog.blog_streams import STREAMS, tags_for
 from blog.blog_slug import slugify
 
@@ -277,7 +287,8 @@ def _verify_claims(claims: list[str]) -> list[str]:
 
 def write_with_gate(plan: dict, stream: str = "ai",
                     max_retries: int = 1,
-                    verification: Optional[dict] = None) -> Optional[dict]:
+                    verification: Optional[dict] = None,
+                    strict_review: bool = False) -> Optional[dict]:
     """Generate a draft, run deterministic gate + editorial reviewer, retry once.
 
     Pipeline:
@@ -290,19 +301,35 @@ def write_with_gate(plan: dict, stream: str = "ai",
     5. Stage only if both gates clear on the first or retry attempt.
 
     Returns the draft (with redacted body) on pass, or None.
-    Degrades gracefully: if the reviewer LLM is unavailable, it returns a
-    neutral pass and the pipeline continues on the deterministic gate alone.
+
+    When ``strict_review`` is False (default, daily pipeline), a degraded
+    reviewer verdict (LLM unavailable, malformed JSON) is treated as a neutral
+    pass and the pipeline continues on the deterministic gate alone.
+
+    When ``strict_review`` is True (bulk backfill), a degraded verdict raises
+    ``ReviewUnavailable`` so the caller can halt the run instead of staging an
+    unreviewed draft. The exception message names the post title.
     """
     from blog.blog_reviewer import review as _review
+
+    def _check_strict(verdict: dict, title: str) -> None:
+        if strict_review and verdict.get("degraded"):
+            raise ReviewUnavailable(
+                f"Editorial reviewer degraded for '{title}'; "
+                "strict mode refuses to stage an unreviewed draft"
+            )
 
     draft = write(plan, stream=stream, max_retries=max_retries,
                   verification=verification)
     if not draft:
         return None
 
+    post_title = draft.get("title", "(untitled)")
+
     # --- First attempt: deterministic gate + editorial reviewer ---
     status, gate_issues = gate_check(draft)
     review_result = _review(draft, stream)
+    _check_strict(review_result, post_title)
     review_issues = review_result["issues"] if not review_result["passed"] else []
     claims = review_result.get("claims_to_verify", [])
 
@@ -325,6 +352,7 @@ def write_with_gate(plan: dict, stream: str = "ai",
 
     status2, gate_issues2 = gate_check(draft2)
     review_result2 = _review(draft2, stream)
+    _check_strict(review_result2, post_title)
     review_passed2 = review_result2["passed"]
     # On retry, we do NOT re-verify claims (avoid infinite loops). If the
     # reviewer still flags claims, they become issues but we accept the draft
