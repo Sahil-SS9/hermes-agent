@@ -905,6 +905,216 @@ def _handle_unblock(args: dict, **kw) -> str:
         return tool_error(f"kanban_unblock: {e}")
 
 
+def _handle_request_review(args: dict, **kw) -> str:
+    """Worker tool: flip the current task to the review column."""
+    tid = _default_task_id(args.get("task_id"))
+    if not tid:
+        return tool_error("task_id is required (or set HERMES_KANBAN_TASK)")
+    ownership_err = _enforce_worker_task_ownership(str(tid))
+    if ownership_err:
+        return ownership_err
+    summary = args.get("summary")
+    if not summary or not str(summary).strip():
+        return tool_error("summary is required")
+    artefacts = args.get("artefacts") or args.get("artifacts") or []
+    if isinstance(artefacts, str):
+        artefacts = [artefacts]
+    if not isinstance(artefacts, (list, tuple)):
+        return tool_error("artefacts must be a list of strings")
+    next_steps = args.get("next_steps")
+    board = args.get("board")
+    expected_run_id = _worker_run_id(str(tid))
+    try:
+        kb, conn = _connect(board=board)
+        try:
+            ok = kb.request_review(
+                conn, str(tid),
+                summary=str(summary),
+                artefacts=artefacts,
+                next_steps=next_steps,
+                expected_run_id=expected_run_id,
+            )
+            if not ok:
+                return tool_error(
+                    f"could not request review for {tid} (not running or "
+                    "run id mismatch)"
+                )
+            return _ok(task_id=str(tid), status="review")
+        finally:
+            conn.close()
+    except ValueError as e:
+        return tool_error(f"kanban_request_review: {e}")
+    except Exception as e:
+        logger.exception("kanban_request_review failed")
+        return tool_error(f"kanban_request_review: {e}")
+
+
+def _approver_profile_from_env() -> Optional[str]:
+    raw = os.environ.get("HERMES_PROFILE")
+    if not raw:
+        return None
+    text = str(raw).strip()
+    return text or None
+
+
+def _handle_approve(args: dict, **kw) -> str:
+    """Reviewer tool: three-outcome approval."""
+    guard = _require_orchestrator_tool("kanban_approve")
+    if guard:
+        return guard
+    tid = args.get("task_id")
+    if not tid:
+        return tool_error("task_id is required")
+    outcome = args.get("outcome")
+    if outcome not in {"terminal", "chained", "conditional"}:
+        return tool_error(
+            "outcome must be one of terminal | chained | conditional"
+        )
+    approver = _approver_profile_from_env()
+    if not approver:
+        return tool_error(
+            "kanban_approve requires HERMES_PROFILE in env to record the "
+            "approver"
+        )
+    follow_up_spec = args.get("follow_up_spec")
+    if follow_up_spec is not None and not isinstance(follow_up_spec, dict):
+        return tool_error("follow_up_spec must be an object")
+    board = args.get("board")
+    try:
+        kb, conn = _connect(board=board)
+        try:
+            res = kb.approve_review_task(
+                conn, str(tid),
+                outcome=outcome,
+                approver_profile=approver,
+                summary=args.get("summary"),
+                follow_up_spec=follow_up_spec,
+                next_reviewer=args.get("next_reviewer"),
+                comment=args.get("comment"),
+            )
+            return json.dumps({"ok": True, "task_id": str(tid), **{k: v for k, v in res.items() if k != "ok"}})
+        finally:
+            conn.close()
+    except ValueError as e:
+        return tool_error(f"kanban_approve: {e}")
+    except Exception as e:
+        logger.exception("kanban_approve failed")
+        return tool_error(f"kanban_approve: {e}")
+
+
+def _handle_reject(args: dict, **kw) -> str:
+    """Reviewer tool: send task to blocked with structured findings."""
+    guard = _require_orchestrator_tool("kanban_reject")
+    if guard:
+        return guard
+    tid = args.get("task_id")
+    if not tid:
+        return tool_error("task_id is required")
+    findings = args.get("findings")
+    if not findings or not isinstance(findings, dict):
+        return tool_error("findings is required and must be an object")
+    board = args.get("board")
+    try:
+        kb, conn = _connect(board=board)
+        try:
+            ok = kb.reject_review_task(
+                conn, str(tid),
+                findings=findings,
+                reviewer_profile=_approver_profile_from_env() or "orchestrator",
+            )
+            if not ok:
+                return tool_error(
+                    f"could not reject review for {tid} (not in review or "
+                    "reviewer profile mismatch)"
+                )
+            return _ok(task_id=str(tid), status="blocked")
+        finally:
+            conn.close()
+    except ValueError as e:
+        return tool_error(f"kanban_reject: {e}")
+    except Exception as e:
+        logger.exception("kanban_reject failed")
+        return tool_error(f"kanban_reject: {e}")
+
+
+def _handle_reassign(args: dict, **kw) -> str:
+    """Orchestrator tool: change assignee with handoff note."""
+    guard = _require_orchestrator_tool("kanban_reassign")
+    if guard:
+        return guard
+    tid = args.get("task_id")
+    if not tid:
+        return tool_error("task_id is required")
+    new_assignee = args.get("new_assignee")
+    if not new_assignee or not str(new_assignee).strip():
+        return tool_error("new_assignee is required")
+    handoff_note = args.get("handoff_note")
+    board = args.get("board")
+    try:
+        kb, conn = _connect(board=board)
+        try:
+            current = kb.reassign_count(conn, str(tid))
+            ok = kb.reassign_task_with_note(
+                conn, str(tid), str(new_assignee).strip(),
+                handoff_note=handoff_note,
+                author=_approver_profile_from_env() or "orchestrator",
+            )
+            if not ok:
+                return tool_error(
+                    f"could not reassign {tid} (unknown or refused)"
+                )
+            return _ok(
+                task_id=str(tid),
+                new_assignee=str(new_assignee).strip(),
+                reassign_count=current + 1,
+            )
+        finally:
+            conn.close()
+    except ValueError as e:
+        return tool_error(f"kanban_reassign: {e}")
+    except Exception as e:
+        logger.exception("kanban_reassign failed")
+        return tool_error(f"kanban_reassign: {e}")
+
+
+def _handle_edit(args: dict, **kw) -> str:
+    """Orchestrator tool: replace the skills list. Scope-locked."""
+    guard = _require_orchestrator_tool("kanban_edit")
+    if guard:
+        return guard
+    tid = args.get("task_id")
+    if not tid:
+        return tool_error("task_id is required")
+    skills = args.get("skills")
+    if skills is None or not isinstance(skills, (list, tuple)):
+        return tool_error("skills must be a list of skill names (use [] to clear)")
+    # Refuse any other mutation field even though the schema doesn't list
+    # them; defends against a caller that hand-rolls extra args.
+    forbidden = {"assignee", "priority", "max_runtime_seconds", "tenant", "theme"}
+    leaked = forbidden & set(args.keys())
+    if leaked:
+        return tool_error(
+            f"kanban_edit is scope-locked to `skills`; refused fields: "
+            f"{sorted(leaked)}. Use CLI for these mutations."
+        )
+    author = _approver_profile_from_env() or "orchestrator"
+    board = args.get("board")
+    try:
+        kb, conn = _connect(board=board)
+        try:
+            res = kb.edit_task_skills(
+                conn, str(tid), skills=skills, author=author,
+            )
+            return json.dumps({"ok": True, "task_id": str(tid), **{k: v for k, v in res.items() if k != "ok"}})
+        finally:
+            conn.close()
+    except ValueError as e:
+        return tool_error(f"kanban_edit: {e}")
+    except Exception as e:
+        logger.exception("kanban_edit failed")
+        return tool_error(f"kanban_edit: {e}")
+
+
 def _handle_link(args: dict, **kw) -> str:
     """Add a parent→child dependency edge after the fact."""
     parent_id = args.get("parent_id")
@@ -1395,6 +1605,219 @@ KANBAN_UNBLOCK_SCHEMA = {
     },
 }
 
+KANBAN_REQUEST_REVIEW_SCHEMA = {
+    "name": "kanban_request_review",
+    "description": (
+        "Worker tool: hand off your current running task to a reviewer "
+        "by flipping its column to 'review'. The dispatcher claims the "
+        "next tick under a reviewer profile (sdlc-review or, if the task "
+        "has a prior rejection, the same reviewer who logged it). The "
+        "reviewer reads `summary`, `artefacts`, and `next_steps` via "
+        "their first kanban_show; no separate JSON-in-comment is needed."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "task_id": {
+                "type": "string",
+                "description": _DESC_TASK_ID_DEFAULT,
+            },
+            "summary": {
+                "type": "string",
+                "description": (
+                    "Human-readable handoff, 1-3 sentences. The reviewer "
+                    "sees this on their first kanban_show."
+                ),
+            },
+            "artefacts": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Optional list of file paths or PR URLs the reviewer "
+                    "should examine. Same shape as kanban_complete's "
+                    "`artifacts`."
+                ),
+            },
+            "next_steps": {
+                "type": "string",
+                "description": (
+                    "Optional follow-up guidance for the reviewer (e.g. "
+                    "'confirm the fallback choice; if approved, chain to "
+                    "security review')."
+                ),
+            },
+            "board": _board_schema_prop(),
+        },
+        "required": ["summary"],
+    },
+}
+
+KANBAN_APPROVE_SCHEMA = {
+    "name": "kanban_approve",
+    "description": (
+        "Reviewer tool: terminate a review with one of three outcomes. "
+        "`terminal` (-> done; optional follow_up_spec lands a child in "
+        "backlog). `chained` (stays in review, reassigned to "
+        "next_reviewer). `conditional` (-> todo, assignee pinned to the "
+        "original worker for a small fix). Approver guard rejects "
+        "self-approval: first-pass approver cannot equal the most "
+        "recent worker; chained approver cannot equal the previous "
+        "reviewer. Chain capped at kanban.max_review_passes."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "task_id": {
+                "type": "string",
+                "description": "Task id in the review column.",
+            },
+            "outcome": {
+                "type": "string",
+                "enum": ["terminal", "chained", "conditional"],
+                "description": (
+                    "Approval mode. `terminal` completes the task. "
+                    "`chained` hands off to next_reviewer. "
+                    "`conditional` returns to todo with the original "
+                    "worker pinned."
+                ),
+            },
+            "summary": {
+                "type": "string",
+                "description": "Signoff note recorded on the run + event.",
+            },
+            "follow_up_spec": {
+                "type": "object",
+                "description": (
+                    "Only valid with outcome='terminal'. Creates a new "
+                    "task in the `backlog` column linked under the "
+                    "approved task. Required fields: title, assignee. "
+                    "Optional: body, theme, sub_goals (list)."
+                ),
+                "properties": {
+                    "title": {"type": "string"},
+                    "assignee": {"type": "string"},
+                    "body": {"type": "string"},
+                    "theme": {"type": "string"},
+                    "sub_goals": {"type": "array", "items": {"type": "string"}},
+                },
+            },
+            "next_reviewer": {
+                "type": "string",
+                "description": (
+                    "Required for outcome='chained'. Profile name of "
+                    "the next reviewer; must not equal the current "
+                    "approver."
+                ),
+            },
+            "comment": {
+                "type": "string",
+                "description": (
+                    "Optional for outcome='conditional'. Appended to "
+                    "the task as a comment so the pinned worker reads "
+                    "the requested change on their next claim."
+                ),
+            },
+            "board": _board_schema_prop(),
+        },
+        "required": ["task_id", "outcome"],
+    },
+}
+
+KANBAN_REJECT_SCHEMA = {
+    "name": "kanban_reject",
+    "description": (
+        "Reviewer tool: send the current review task to `blocked` with "
+        "structured `findings`. The rejecting reviewer's profile is "
+        "recorded so the sticky-reviewer logic routes the next review "
+        "pass back to the same reviewer who has context on the "
+        "original findings."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "task_id": {
+                "type": "string",
+                "description": "Task id in the review column (claimed).",
+            },
+            "findings": {
+                "type": "object",
+                "description": (
+                    "Structured rejection payload. Recommended keys: "
+                    "`reasons` (list[str]) and `requested_changes` "
+                    "(list[str])."
+                ),
+                "properties": {
+                    "reasons": {"type": "array", "items": {"type": "string"}},
+                    "requested_changes": {
+                        "type": "array", "items": {"type": "string"}
+                    },
+                },
+            },
+            "board": _board_schema_prop(),
+        },
+        "required": ["task_id", "findings"],
+    },
+}
+
+KANBAN_REASSIGN_SCHEMA = {
+    "name": "kanban_reassign",
+    "description": (
+        "Orchestrator tool: change a task's assignee with an optional "
+        "handoff note. Capped at kanban.max_reassigns per task; the "
+        "Nth+1 attempt errors so chains stop thrashing. Useful for "
+        "access escalation (worker hands off to a lead, lead grants "
+        "skills via kanban_edit, then reassigns back)."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "task_id": {"type": "string", "description": "Task id."},
+            "new_assignee": {
+                "type": "string",
+                "description": "New profile name.",
+            },
+            "handoff_note": {
+                "type": "string",
+                "description": (
+                    "Optional rationale; appended as a comment so the "
+                    "new assignee reads it via build_worker_context."
+                ),
+            },
+            "board": _board_schema_prop(),
+        },
+        "required": ["task_id", "new_assignee"],
+    },
+}
+
+KANBAN_EDIT_SCHEMA = {
+    "name": "kanban_edit",
+    "description": (
+        "Orchestrator tool: replace a task's `skills` list (full list, "
+        "not a delta). Scope-locked to `skills` only; other fields "
+        "(assignee, priority, max_runtime_seconds) stay CLI-only. "
+        "Rejected on terminal status. On a running task the row "
+        "updates but the live worker keeps its already-loaded skill "
+        "set; the response carries applies_on_next_spawn=true so the "
+        "caller knows whether to reassign or wait for natural respawn."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "task_id": {"type": "string", "description": "Task id."},
+            "skills": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Full desired skills list. Pass the complete list, "
+                    "not a delta; an empty list explicitly clears skills."
+                ),
+            },
+            "board": _board_schema_prop(),
+        },
+        "required": ["task_id", "skills"],
+    },
+}
+
 KANBAN_LINK_SCHEMA = {
     "name": "kanban_link",
     "description": (
@@ -1750,6 +2173,51 @@ registry.register(
     handler=_handle_unblock,
     check_fn=_check_kanban_orchestrator_mode,
     emoji="▶",
+)
+
+registry.register(
+    name="kanban_request_review",
+    toolset="kanban",
+    schema=KANBAN_REQUEST_REVIEW_SCHEMA,
+    handler=_handle_request_review,
+    check_fn=_check_kanban_mode,
+    emoji="🔍",
+)
+
+registry.register(
+    name="kanban_approve",
+    toolset="kanban",
+    schema=KANBAN_APPROVE_SCHEMA,
+    handler=_handle_approve,
+    check_fn=_check_kanban_orchestrator_mode,
+    emoji="✅",
+)
+
+registry.register(
+    name="kanban_reject",
+    toolset="kanban",
+    schema=KANBAN_REJECT_SCHEMA,
+    handler=_handle_reject,
+    check_fn=_check_kanban_orchestrator_mode,
+    emoji="🚫",
+)
+
+registry.register(
+    name="kanban_reassign",
+    toolset="kanban",
+    schema=KANBAN_REASSIGN_SCHEMA,
+    handler=_handle_reassign,
+    check_fn=_check_kanban_orchestrator_mode,
+    emoji="↔️",
+)
+
+registry.register(
+    name="kanban_edit",
+    toolset="kanban",
+    schema=KANBAN_EDIT_SCHEMA,
+    handler=_handle_edit,
+    check_fn=_check_kanban_orchestrator_mode,
+    emoji="✏️",
 )
 
 registry.register(
