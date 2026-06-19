@@ -20,15 +20,18 @@ P0/P1 patterns observed:
 - Stale lock eviction
 """
 
+import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 from datetime import datetime, timezone
 
-REPORT_FILE = os.path.expanduser("~/.hermes/data/moss-repo-scan.json")
+STATE_FILE = os.path.expanduser("~/.hermes/data/moss-repo-scan.json")
+CLONE_CACHE_DIR = os.path.expanduser("~/.hermes/data/moss-clones")
 TARGET_REPOS = [
-    "Sahil-SS9/hermes-agent",       # Public fork
+    "Sahil-SS9/hermes-agent",
     "Sahil-SS9/GitRadar-Self-Improvement",
     "Sahil-SS9/hermes-memlock",
     "Sahil-SS9/hermaguard",
@@ -40,174 +43,186 @@ TARGET_REPOS = [
     "Sahil-SS9/hermes-Custom-CLI-Themes",
 ]
 
-def run_gh(repo, cmd):
-    """Run a gh command against a repo."""
-    result = subprocess.run(
-        ["gh", cmd, "--repo", repo, "--state", "open",
-         "--json", "number,title,labels,createdAt,url",
-         "--limit", "20"],
-        capture_output=True, text=True, timeout=30
-    )
-    if result.returncode != 0:
-        return []
-    return json.loads(result.stdout)
+def load_state():
+    if os.path.exists(STATE_FILE):
+        with open(STATE_FILE) as f:
+            return json.load(f)
+    return {"last_scan": None, "reported_findings": {}}
 
-def check_repo_health(repo):
-    """Basic health check on a repo."""
-    findings = []
+def save_state(state):
+    os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
+    with open(STATE_FILE, "w") as f:
+        json.dump(state, f, indent=2)
 
-    # Check for open issues without labels
-    issues = run_gh(repo, "issue")
-    unlabelled = [i for i in issues if not i.get("labels")]
-    if unlabelled:
-        findings.append({
-            "type": "unlabelled_issues",
-            "count": len(unlabelled),
-            "items": [f"#{i['number']}: {i['title']}" for i in unlabelled[:5]],
-        })
+def make_fingerprint(repo, filepath, pattern_type, context_lines):
+    """Create a stable fingerprint that survives line shifts."""
+    context = "".join(context_lines).strip()
+    raw = f"{repo}:{filepath}:{pattern_type}:{context}"
+    return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
-    # Check for stale issues (no activity, needs-triage)
-    needs_triage = [i for i in issues if any(l["name"] == "needs-triage" for l in i.get("labels", []))]
-    if needs_triage:
-        findings.append({
-            "type": "needs_triage",
-            "count": len(needs_triage),
-            "items": [f"#{i['number']}: {i['title']}" for i in needs_triage[:5]],
-        })
+def ensure_clone(repo):
+    """Clone or fetch a repo into persistent cache. Returns path or None."""
+    clone_dir = os.path.join(CLONE_CACHE_DIR, repo.replace("/", "-"))
+    os.makedirs(CLONE_CACHE_DIR, exist_ok=True)
 
-    return findings
-
-def scan_for_common_issues(repo):
-    """Scan repo for common fix patterns."""
-    findings = []
-
-    # Clone or fetch the repo
-    clone_dir = f"/tmp/moss-scan-{repo.replace('/', '-')}"
     if not os.path.exists(clone_dir):
         result = subprocess.run(
             ["git", "clone", f"https://github.com/{repo}.git", clone_dir],
             capture_output=True, text=True, timeout=60
         )
         if result.returncode != 0:
-            return [{"type": "clone_failed", "detail": result.stderr[:200]}]
+            return None
+    else:
+        subprocess.run(
+            ["git", "-C", clone_dir, "fetch", "origin"],
+            capture_output=True, text=True, timeout=30
+        )
 
-    # Fetch latest
-    subprocess.run(["git", "-C", clone_dir, "fetch", "origin"], capture_output=True, timeout=30)
-    subprocess.run(["git", "-C", clone_dir, "checkout", "main"], capture_output=True, timeout=10)
+    subprocess.run(
+        ["git", "-C", clone_dir, "checkout", "main"],
+        capture_output=True, text=True, timeout=10
+    )
+    return clone_dir
 
-    # Pattern 1: Check for hardcoded values that should be configurable
+def grep_pattern(pattern, clone_dir, file_types=None):
+    """Run grep and return matching lines with context."""
+    includes = []
+    for ext in (file_types or [".py", ".ts", ".tsx"]):
+        includes.extend(["--include", f"*{ext}"])
+
     result = subprocess.run(
-        ["grep", "-rn", "--include=*.py", "--include=*.ts", "--include=*.tsx",
-         "max_models=50\\|timeout=120\\|max_iterations=25", clone_dir],
+        ["grep", "-rn", "-B1", "-A1"] + includes + [pattern, clone_dir],
         capture_output=True, text=True, timeout=30
     )
-    if result.stdout.strip():
-        lines = result.stdout.strip().split("\n")[:5]
-        findings.append({
-            "type": "hardcoded_constants",
-            "count": len(result.stdout.strip().split("\n")),
-            "items": [l.replace(clone_dir + "/", "") for l in lines],
-        })
+    if not result.stdout.strip():
+        return []
 
-    # Pattern 2: Check for bare except: pass
-    result = subprocess.run(
-        ["grep", "-rn", "--include=*.py", "except:.*pass\\|except: *\\n.*pass", clone_dir],
-        capture_output=True, text=True, timeout=30
-    )
-    if result.stdout.strip():
-        lines = result.stdout.strip().split("\n")[:5]
-        findings.append({
-            "type": "bare_except_pass",
-            "count": len(result.stdout.strip().split("\n")),
-            "items": [l.replace(clone_dir + "/", "") for l in lines],
-        })
+    matches = []
+    for block in result.stdout.strip().split("\n--\n"):
+        lines = block.strip().split("\n")
+        if not lines:
+            continue
+        # First line is the match, surrounding lines are context
+        match_line = lines[0] if lines else ""
+        context = lines[1:4] if len(lines) > 1 else []
+        matches.append({"match_line": match_line, "context": context})
 
-    # Pattern 3: Check for TODO/FIXME comments
-    result = subprocess.run(
-        ["grep", "-rn", "--include=*.py", "--include=*.ts", "--include=*.tsx",
-         "TODO\\|FIXME\\|HACK\\|XXX", clone_dir],
-        capture_output=True, text=True, timeout=30
-    )
-    if result.stdout.strip():
-        lines = result.stdout.strip().split("\n")[:5]
-        findings.append({
-            "type": "todo_fixme",
-            "count": len(result.stdout.strip().split("\n")),
-            "items": [l.replace(clone_dir + "/", "") for l in lines],
-        })
+    return matches
 
-    # Pattern 4: Check for missing type hints in function signatures
-    result = subprocess.run(
-        ["grep", "-rn", "--include=*.py", "^def [^(]*([^)]*):$", clone_dir],
-        capture_output=True, text=True, timeout=30
-    )
-    if result.stdout.strip():
-        lines = result.stdout.strip().split("\n")[:5]
-        findings.append({
-            "type": "missing_type_hints",
-            "count": len(result.stdout.strip().split("\n")),
-            "items": [l.replace(clone_dir + "/", "") for l in lines],
-        })
+def scan_repo(repo, state):
+    """Scan a single repo for fix opportunities. Returns new findings only."""
+    clone_dir = ensure_clone(repo)
+    if clone_dir is None:
+        return [{"type": "clone_failed", "repo": repo, "items": ["Could not clone repo"]}]
 
-    # Pattern 5: Check for print() statements in production code
-    result = subprocess.run(
-        ["grep", "-rn", "--include=*.py", "^[^#]*print(", clone_dir],
-        capture_output=True, text=True, timeout=30
-    )
-    if result.stdout.strip():
-        lines = result.stdout.strip().split("\n")[:5]
-        findings.append({
-            "type": "print_statements",
-            "count": len(result.stdout.strip().split("\n")),
-            "items": [l.replace(clone_dir + "/", "") for l in lines],
-        })
+    findings = []
+    reported = state["reported_findings"].get(repo, {})
 
-    # Cleanup
-    subprocess.run(["rm", "-rf", clone_dir], capture_output=True, timeout=10)
+    try:
+        # Pattern 1: Hardcoded constants that should be configurable
+        matches = grep_pattern(
+            r"max_models=50\|timeout=120\|max_iterations=25",
+            clone_dir, [".py", ".ts", ".tsx"]
+        )
+        for m in matches[:10]:
+            filepath = m["match_line"].split(":")[0].replace(clone_dir + "/", "")
+            fp = make_fingerprint(repo, filepath, "hardcoded_constants", m["context"])
+            if fp not in reported:
+                reported[fp] = {"type": "hardcoded_constants", "seen_at": datetime.now(timezone.utc).isoformat()}
+                findings.append({
+                    "type": "hardcoded_constants",
+                    "file": filepath,
+                    "detail": m["match_line"].replace(clone_dir + "/", ""),
+                })
 
+        # Pattern 2: Bare except: pass (multi-line aware)
+        matches = grep_pattern(
+            r"except.*:\s*$",
+            clone_dir, [".py"]
+        )
+        for m in matches[:10]:
+            filepath = m["match_line"].split(":")[0].replace(clone_dir + "/", "")
+            # Check if next line is pass
+            if any("pass" in c for c in m["context"]):
+                fp = make_fingerprint(repo, filepath, "bare_except_pass", m["context"])
+                if fp not in reported:
+                    reported[fp] = {"type": "bare_except_pass", "seen_at": datetime.now(timezone.utc).isoformat()}
+                    findings.append({
+                        "type": "bare_except_pass",
+                        "file": filepath,
+                        "detail": m["match_line"].replace(clone_dir + "/", ""),
+                    })
+
+        # Pattern 3: TODO/FIXME with security keywords (signal-to-noise filter)
+        matches = grep_pattern(
+            r"TODO\|FIXME\|HACK\|XXX",
+            clone_dir, [".py", ".ts", ".tsx"]
+        )
+        security_keywords = ["security", "crash", "data loss", "regression", "auth", "leak", "race"]
+        for m in matches[:20]:
+            filepath = m["match_line"].split(":")[0].replace(clone_dir + "/", "")
+            content_lower = m["match_line"].lower()
+            # Only report TODOs with security-relevant keywords
+            if any(kw in content_lower for kw in security_keywords):
+                fp = make_fingerprint(repo, filepath, "todo_security", m["context"])
+                if fp not in reported:
+                    reported[fp] = {"type": "todo_security", "file": filepath, "seen_at": datetime.now(timezone.utc).isoformat()}
+                    findings.append({
+                        "type": "todo_security",
+                        "file": filepath,
+                        "detail": m["match_line"].replace(clone_dir + "/", ""),
+                    })
+
+        # Pattern 4: print() in production code (not in comments or test files)
+        matches = grep_pattern(
+            r"^[^#]*print\(",
+            clone_dir, [".py"]
+        )
+        for m in matches[:10]:
+            filepath = m["match_line"].split(":")[0].replace(clone_dir + "/", "")
+            # Skip test files — print is fine there
+            if "test" in filepath or "conftest" in filepath:
+                continue
+            fp = make_fingerprint(repo, filepath, "print_statements", m["context"])
+            if fp not in reported:
+                reported[fp] = {"type": "print_statements", "file": filepath, "seen_at": datetime.now(timezone.utc).isoformat()}
+                findings.append({
+                    "type": "print_statements",
+                    "file": filepath,
+                    "detail": m["match_line"].replace(clone_dir + "/", ""),
+                })
+
+    finally:
+        # No cleanup — clones are persistent in CLONE_CACHE_DIR
+        pass
+
+    state["reported_findings"][repo] = reported
     return findings
 
 def main():
+    state = load_state()
     now = datetime.now(timezone.utc).isoformat()
     all_findings = {}
 
     for repo in TARGET_REPOS:
-        repo_findings = []
+        findings = scan_repo(repo, state)
+        if findings:
+            all_findings[repo] = findings
 
-        # Check repo health
-        health = check_repo_health(repo)
-        if health:
-            repo_findings.extend(health)
+    state["last_scan"] = now
+    save_state(state)
 
-        # Scan for common issues
-        scan = scan_for_common_issues(repo)
-        if scan:
-            repo_findings.extend(scan)
-
-        if repo_findings:
-            all_findings[repo] = repo_findings
-
-    # Save report
-    report = {
-        "last_scan": now,
-        "findings": all_findings,
-    }
-    os.makedirs(os.path.dirname(REPORT_FILE), exist_ok=True)
-    with open(REPORT_FILE, "w") as f:
-        json.dump(report, f, indent=2)
-
-    # Output for delivery
     if all_findings:
         total = sum(len(v) for v in all_findings.values())
-        print(f"Moss repo scan: {total} findings across {len(all_findings)} repos")
+        print(f"Moss repo scan: {total} new findings across {len(all_findings)} repos")
         for repo, findings in all_findings.items():
             print(f"\n{repo}:")
             for f in findings:
-                print(f"  [{f['type']}] {f['count']} occurrences")
-                for item in f.get('items', [])[:3]:
-                    print(f"    {item}")
+                print(f"  [{f['type']}] {f.get('file', '?')}")
+                if f.get("detail"):
+                    print(f"    {f['detail']}")
     else:
-        # Silent — nothing to report
+        # Silent — nothing new to report
         pass
 
 if __name__ == "__main__":

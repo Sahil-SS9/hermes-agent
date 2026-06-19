@@ -16,6 +16,9 @@ STATE_FILE = os.path.expanduser("~/.hermes/data/moss-issue-watch.json")
 TARGET_REPOS = [
     "NousResearch/hermes-agent",
 ]
+TRACKED_AUTHORS = [
+    "Sahil-SS9",
+]
 
 def load_state():
     if os.path.exists(STATE_FILE):
@@ -60,29 +63,20 @@ def classify_issue(issue):
     return None
 
 def get_recent_prs(repo):
-    """Fetch recent PRs — open, merged, and closed in last 24h."""
+    """Fetch recent PRs by tracked authors only."""
     result = subprocess.run(
         ["gh", "pr", "list", "--repo", repo, "--state", "all",
-         "--json", "number,title,state,author,createdAt,updatedAt,mergedAt,closedAt,url,labels,headRepository,comments,reviews",
-         "--limit", "30"],
+         "--json", "number,title,state,author,createdAt,updatedAt,mergedAt,closedAt,url,labels,comments,reviews",
+         "--limit", "50"],
         capture_output=True, text=True, timeout=30
     )
     if result.returncode != 0:
         print(f"ERROR: gh pr list failed for {repo}: {result.stderr}", file=sys.stderr)
         return []
-    return json.loads(result.stdout)
-
-def get_pr_comments(repo, pr_number):
-    """Fetch comments on a specific PR."""
-    result = subprocess.run(
-        ["gh", "pr", "view", str(pr_number), "--repo", repo,
-         "--json", "comments,reviews",
-         "--jq", "{comments: [.comments[] | {author: .author.login, body: .body[:200], createdAt}], reviews: [.reviews[] | {author: .author.login, state, body: (.body[:200] // \"\"), submittedAt}]}"],
-        capture_output=True, text=True, timeout=15
-    )
-    if result.returncode != 0:
-        return {"comments": [], "reviews": []}
-    return json.loads(result.stdout)
+    all_prs = json.loads(result.stdout)
+    # Only track PRs by Sahil-SS9 — everyone else's PRs are noise
+    tracked = [pr for pr in all_prs if pr.get("author", {}).get("login") in TRACKED_AUTHORS]
+    return tracked
 
 def check_pr_activity(repo, state):
     """Check for new or updated PRs and return activity report."""
@@ -162,10 +156,9 @@ def check_pr_activity(repo, state):
             seen[key]["state"] = pr["state"]
             seen[key]["seen_at"] = now
         elif pr["state"] == "OPEN" and prev["state"] == "OPEN":
-            # Check for new comments or reviews
-            details = get_pr_comments(repo, num)
-            current_comments = len(details.get("comments", []))
-            current_reviews = len(details.get("reviews", []))
+            # Check for new comments or reviews using list response counts
+            current_comments = len(pr.get("comments", []))
+            current_reviews = len(pr.get("reviews", []))
             prev_comments = prev.get("last_comment_count", 0)
             prev_reviews = prev.get("last_review_count", 0)
 
