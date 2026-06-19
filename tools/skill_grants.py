@@ -43,7 +43,6 @@ NEVER_GRANT = {
     "provider-editor",
     "auth-editor",
     "routing-editor",
-    "kanban-ops",
     "soyl-editor",
 }
 

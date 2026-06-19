@@ -19,7 +19,15 @@ import glob
 import json
 import os
 import re
+import sys
 import time
+
+# Cross-process write lock — prevents WAL checkpoint races
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+try:
+    from kanban_write_lock import write_lock
+except ImportError:
+    write_lock = None
 
 # ─── Config ───────────────────────────────────────────────────────────────
 
@@ -194,37 +202,61 @@ def scan_and_reroute(db_path, board_label, skill_map):
         old_assignee = current_assignee or "(unassigned)"
         reason = f"Auto-rerouted from {old_assignee} to {new_assignee} — missing forced skill(s): {', '.join(missing_skills)}"
 
-        cur.execute(
-            """UPDATE tasks
-               SET assignee = ?,
-                   status = 'ready',
-                   current_run_id = NULL,
-                   claim_lock = NULL,
-                   claim_expires = NULL,
-                   started_at = NULL,
-                   consecutive_failures = 0
-               WHERE id = ?""",
-            (new_assignee, tid),
-        )
-
-        # Event: assigned
-        cur.execute(
-            "INSERT INTO task_events (task_id, kind, payload, created_at) VALUES (?, 'assigned', ?, ?)",
-            (tid, json.dumps({"assignee": new_assignee, "reason": reason}), now),
-        )
-
-        # Event: unblocked
-        cur.execute(
-            "INSERT INTO task_events (task_id, kind, payload, created_at) VALUES (?, 'unblocked', ?, ?)",
-            (tid, json.dumps({"reason": reason}), now),
-        )
+        if write_lock is not None:
+            with write_lock(conn):
+                cur.execute(
+                    """UPDATE tasks
+                       SET assignee = ?,
+                           status = 'ready',
+                           current_run_id = NULL,
+                           claim_lock = NULL,
+                           claim_expires = NULL,
+                           started_at = NULL,
+                           consecutive_failures = 0
+                       WHERE id = ?""",
+                    (new_assignee, tid),
+                )
+                # Event: assigned
+                cur.execute(
+                    "INSERT INTO task_events (task_id, kind, payload, created_at) VALUES (?, 'assigned', ?, ?)",
+                    (tid, json.dumps({"assignee": new_assignee, "reason": reason}), now),
+                )
+                # Event: unblocked
+                cur.execute(
+                    "INSERT INTO task_events (task_id, kind, payload, created_at) VALUES (?, 'unblocked', ?, ?)",
+                    (tid, json.dumps({"reason": reason}), now),
+                )
+                conn.commit()
+        else:
+            cur.execute(
+                """UPDATE tasks
+                   SET assignee = ?,
+                       status = 'ready',
+                       current_run_id = NULL,
+                       claim_lock = NULL,
+                       claim_expires = NULL,
+                       started_at = NULL,
+                       consecutive_failures = 0
+                   WHERE id = ?""",
+                (new_assignee, tid),
+            )
+            # Event: assigned
+            cur.execute(
+                "INSERT INTO task_events (task_id, kind, payload, created_at) VALUES (?, 'assigned', ?, ?)",
+                (tid, json.dumps({"assignee": new_assignee, "reason": reason}), now),
+            )
+            # Event: unblocked
+            cur.execute(
+                "INSERT INTO task_events (task_id, kind, payload, created_at) VALUES (?, 'unblocked', ?, ?)",
+                (tid, json.dumps({"reason": reason}), now),
+            )
+            conn.commit()
 
         rerouted += 1
         print(f"  ⊘ REROUTED: {tid} '{row['title'][:50].strip()}'")
         print(f"    From: {old_assignee} → To: {new_assignee}")
         print(f"    Missing skills: {', '.join(missing_skills)}")
 
-    conn.commit()
     conn.close()
     return rerouted, skipped
 

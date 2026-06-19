@@ -12,13 +12,20 @@ and fixed.
 Schema: kanban_db.py — tasks.status, task_runs.outcome, task_events.kind
 """
 from __future__ import annotations
-
 import glob
 import json
 import os
 import sqlite3
+import sys
 import time
 from pathlib import Path
+
+# Cross-process write lock — prevents WAL checkpoint races
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+try:
+    from kanban_write_lock import write_lock
+except ImportError:
+    write_lock = None
 
 HERMES = Path(os.path.expanduser("~/.hermes"))
 DRIFT_STATE = HERMES / "governance" / "reconcile-drift-state.json"
@@ -327,8 +334,13 @@ def main() -> str:
                         f"Auto-reopened by kanban-reconcile: {f['kind']}. "
                         f"Runs: {f['run_count']}, outcomes: {f['run_outcomes']}"
                     )
-                    if reopen_task(conn, f["task_id"], reason):
-                        fixed.append(f)
+                    if write_lock is not None:
+                        with write_lock(conn):
+                            if reopen_task(conn, f["task_id"], reason):
+                                fixed.append(f)
+                    else:
+                        if reopen_task(conn, f["task_id"], reason):
+                            fixed.append(f)
                 conn.close()
             except Exception:
                 continue

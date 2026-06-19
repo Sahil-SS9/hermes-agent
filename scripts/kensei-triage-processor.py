@@ -15,6 +15,13 @@ import time
 import sqlite3
 from datetime import datetime, timedelta
 
+# Cross-process write lock — prevents WAL checkpoint races
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+try:
+    from kanban_write_lock import write_lock
+except ImportError:
+    write_lock = None
+
 # Configuration
 BOARDS = ['ops', 'research', 'apps', 'content-lead', 'default']
 STATE_FILE = '/home/kensei/.hermes/data/triage-state.json'
@@ -79,8 +86,13 @@ def _set_task_tier(board, task_id, tier):
         return
     try:
         conn = sqlite3.connect(db_path)
-        conn.execute("UPDATE tasks SET tier = ? WHERE id = ?", (tier, task_id))
-        conn.commit()
+        if write_lock is not None:
+            with write_lock(conn):
+                conn.execute("UPDATE tasks SET tier = ? WHERE id = ?", (tier, task_id))
+                conn.commit()
+        else:
+            conn.execute("UPDATE tasks SET tier = ? WHERE id = ?", (tier, task_id))
+            conn.commit()
         conn.close()
     except Exception:
         pass
@@ -139,9 +151,15 @@ def _set_task_assignee(board, task_id, assignee):
         return False
     try:
         conn = sqlite3.connect(db_path)
-        conn.execute("UPDATE tasks SET assignee = ? WHERE id = ? AND (assignee IS NULL OR assignee = '')",
-                     (assignee, task_id))
-        conn.commit()
+        if write_lock is not None:
+            with write_lock(conn):
+                conn.execute("UPDATE tasks SET assignee = ? WHERE id = ? AND (assignee IS NULL OR assignee = '')",
+                             (assignee, task_id))
+                conn.commit()
+        else:
+            conn.execute("UPDATE tasks SET assignee = ? WHERE id = ? AND (assignee IS NULL OR assignee = '')",
+                         (assignee, task_id))
+            conn.commit()
         conn.close()
         return True
     except Exception:
@@ -158,11 +176,19 @@ def _promote_to_pipeline(task_id, board, stage):
         return False
     try:
         conn = sqlite3.connect(db_path)
-        conn.execute(
-            "UPDATE tasks SET status = ?, pipeline_stage = ? WHERE id = ?",
-            (stage, stage, task_id)
-        )
-        conn.commit()
+        if write_lock is not None:
+            with write_lock(conn):
+                conn.execute(
+                    "UPDATE tasks SET status = ?, pipeline_stage = ? WHERE id = ?",
+                    (stage, stage, task_id)
+                )
+                conn.commit()
+        else:
+            conn.execute(
+                "UPDATE tasks SET status = ?, pipeline_stage = ? WHERE id = ?",
+                (stage, stage, task_id)
+            )
+            conn.commit()
         conn.close()
         return True
     except Exception:

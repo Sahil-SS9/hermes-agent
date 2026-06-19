@@ -16,6 +16,13 @@ import os
 import secrets
 from pathlib import Path
 
+# Cross-process write lock — prevents WAL checkpoint races
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+try:
+    from kanban_write_lock import write_lock
+except ImportError:
+    write_lock = None
+
 HERMES_HOME = Path(os.environ.get("HERMES_HOME", "/home/kensei/.hermes"))
 OUT_DIR = HERMES_HOME / "governance" / "logboard"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -146,64 +153,110 @@ def process_tasks(tasks_in_review):
 
             if not gates:
                 # No gates needed — complete directly (wrapped in txn)
-                with conn:
-                    conn.execute(
-                        "UPDATE tasks SET status='done', "
-                        "result='No gates required (content/config/other)', "
-                        "completed_at=? WHERE id=?",
-                        (int(now.timestamp()), tid),
-                    )
+                if write_lock is not None:
+                    with write_lock(conn):
+                        conn.execute(
+                            "UPDATE tasks SET status='done', "
+                            "result='No gates required (content/config/other)', "
+                            "completed_at=? WHERE id=?",
+                            (int(now.timestamp()), tid),
+                        )
+                else:
+                    with conn:
+                        conn.execute(
+                            "UPDATE tasks SET status='done', "
+                            "result='No gates required (content/config/other)', "
+                            "completed_at=? WHERE id=?",
+                            (int(now.timestamp()), tid),
+                        )
                 results.append({"task": tid[:12], "board": board_slug, "gates": [], "outcome": "skip"})
                 continue
 
             # Update task to note gates, then create sub-tasks — single txn
-            with conn:
-                gate_names = ", ".join(g["gate"] for g in gates)
-                conn.execute(
-                    "UPDATE tasks SET status_reason=? WHERE id=?",
-                    (f"QA: {gate_names}", tid),
-                )
-
-                created_gates = []
-                for gate in gates:
-                    worker = gate["worker"]
-                    gate_name = gate["gate"]
-                    advisory = gate["advisory"]
-
-                    gate_title = f"[QA:{gate_name}] {title[:40]}"
-                    gate_body = (
-                        f"## Gate: {gate_name}\n"
-                        f"**Original task:** {tid}\n"
-                        f"**Board:** {board_slug}\n"
-                        f"**Advisory:** {'Yes — human can override' if advisory else 'No — mandatory pass'}\n"
-                        f"**Worker:** {worker}\n\n"
-                        f"Review the output of task {tid}. "
-                        f"Apply the gate criteria from "
-                        f"{HERMES_HOME}/governance/multi-gate-qa.md.\n\n"
-                        f"**Output:**\n"
-                        f"- Verdict: pass / fail / conditional\n"
-                        f"- Findings: exact file + line + issue + severity\n"
-                        f"- If advisory pass, complete without blocking even if minor issues found\n"
-                    )
-
-                    gate_id = _make_gate_id()
-                    now_ts = int(now.timestamp())
-
+            if write_lock is not None:
+                with write_lock(conn):
+                    gate_names = ", ".join(g["gate"] for g in gates)
                     conn.execute(
-                        "INSERT INTO tasks (id, title, body, assignee, status, "
-                        "created_by, created_at, updated_at, status_reason) "
-                        "VALUES (?, ?, ?, ?, 'ready', 'kensei-quality-gate', ?, ?, ?)",
-                        (gate_id, gate_title, gate_body, worker, now_ts, now_ts,
-                         f"Gate: {gate_name} for {tid}"),
+                        "UPDATE tasks SET status_reason=? WHERE id=?",
+                        (f"QA: {gate_names}", tid),
                     )
-
+                    created_gates = []
+                    for gate in gates:
+                        worker = gate["worker"]
+                        gate_name = gate["gate"]
+                        advisory = gate["advisory"]
+                        gate_title = f"[QA:{gate_name}] {title[:40]}"
+                        gate_body = (
+                            f"## Gate: {gate_name}\n"
+                            f"**Original task:** {tid}\n"
+                            f"**Board:** {board_slug}\n"
+                            f"**Advisory:** {'Yes — human can override' if advisory else 'No — mandatory pass'}\n"
+                            f"**Worker:** {worker}\n\n"
+                            f"Review the output of task {tid}. "
+                            f"Apply the gate criteria from "
+                            f"{HERMES_HOME}/governance/multi-gate-qa.md.\n\n"
+                            f"**Output:**\n"
+                            f"- Verdict: pass / fail / conditional\n"
+                            f"- Findings: exact file + line + issue + severity\n"
+                            f"- If advisory pass, complete without blocking even if minor issues found\n"
+                        )
+                        gate_id = _make_gate_id()
+                        now_ts = int(now.timestamp())
+                        conn.execute(
+                            "INSERT INTO tasks (id, title, body, assignee, status, "
+                            "created_by, created_at, updated_at, status_reason) "
+                            "VALUES (?, ?, ?, ?, 'ready', 'kensei-quality-gate', ?, ?, ?)",
+                            (gate_id, gate_title, gate_body, worker, now_ts, now_ts,
+                             f"Gate: {gate_name} for {tid}"),
+                        )
+                        conn.execute(
+                            "INSERT OR IGNORE INTO task_links (parent_id, child_id) "
+                            "VALUES (?, ?)",
+                            (tid, gate_id),
+                        )
+                        created_gates.append({"gate_id": gate_id[:12], "gate": gate_name, "worker": worker})
+            else:
+                with conn:
+                    gate_names = ", ".join(g["gate"] for g in gates)
                     conn.execute(
-                        "INSERT OR IGNORE INTO task_links (parent_id, child_id) "
-                        "VALUES (?, ?)",
-                        (tid, gate_id),
+                        "UPDATE tasks SET status_reason=? WHERE id=?",
+                        (f"QA: {gate_names}", tid),
                     )
-
-                    created_gates.append({"gate_id": gate_id[:12], "gate": gate_name, "worker": worker})
+                    created_gates = []
+                    for gate in gates:
+                        worker = gate["worker"]
+                        gate_name = gate["gate"]
+                        advisory = gate["advisory"]
+                        gate_title = f"[QA:{gate_name}] {title[:40]}"
+                        gate_body = (
+                            f"## Gate: {gate_name}\n"
+                            f"**Original task:** {tid}\n"
+                            f"**Board:** {board_slug}\n"
+                            f"**Advisory:** {'Yes — human can override' if advisory else 'No — mandatory pass'}\n"
+                            f"**Worker:** {worker}\n\n"
+                            f"Review the output of task {tid}. "
+                            f"Apply the gate criteria from "
+                            f"{HERMES_HOME}/governance/multi-gate-qa.md.\n\n"
+                            f"**Output:**\n"
+                            f"- Verdict: pass / fail / conditional\n"
+                            f"- Findings: exact file + line + issue + severity\n"
+                            f"- If advisory pass, complete without blocking even if minor issues found\n"
+                        )
+                        gate_id = _make_gate_id()
+                        now_ts = int(now.timestamp())
+                        conn.execute(
+                            "INSERT INTO tasks (id, title, body, assignee, status, "
+                            "created_by, created_at, updated_at, status_reason) "
+                            "VALUES (?, ?, ?, ?, 'ready', 'kensei-quality-gate', ?, ?, ?)",
+                            (gate_id, gate_title, gate_body, worker, now_ts, now_ts,
+                             f"Gate: {gate_name} for {tid}"),
+                        )
+                        conn.execute(
+                            "INSERT OR IGNORE INTO task_links (parent_id, child_id) "
+                            "VALUES (?, ?)",
+                            (tid, gate_id),
+                        )
+                        created_gates.append({"gate_id": gate_id[:12], "gate": gate_name, "worker": worker})
 
             results.append({"task": tid[:12], "board": board_slug, "gates": created_gates, "outcome": "dispatched"})
     finally:
