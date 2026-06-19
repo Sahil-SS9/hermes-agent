@@ -1,22 +1,25 @@
 #!/usr/bin/env python3
 """
-GitHub Radar — Automated Repo Discovery Pipeline (v4.0)
-no_agent mode: script produces Discord summary + HTML attachment + structured repos file.
+GitHub Radar — Automated Repo Discovery Pipeline (v4.1.0)
+Dual-mode: daily (lightweight new finds) + weekly (full re-evaluation).
 
-- Collects repos from GitHub Search API + trending scrape
-- Pre-filters noise + self-tunes thresholds
-- Scores + classifies repos deterministically
-- Writes dark-theme HTML report
-- Writes structured ---REPOS--- text file for downstream librarian cron
-- Prints concise Discord summary + MEDIA tag to stdout
+Daily mode (default, `--mode daily`):
+- Queries GitHub Search API for repos pushed in last 7 days
+- Deduplicates against cache (14-day TTL)
+- Scrapes GitHub Trending (daily + weekly) as a primary source
+- Outputs: "X new finds (Y cached, Z in scope)"
 
-stdout → Discord message (summary + MEDIA tag)
-~/.hermes/runbooks/github-radar/YYYY-MM-DD/...html → full dark report
-~/.hermes/runbooks/github-radar/YYYY-MM-DD/github-radar-repos.txt → structured repos for librarian
+Weekly mode (`--mode weekly`):
+- Full re-scan without cache dedup
+- Compares each found repo's pushed_at against cached last_pushed
+- Flags repos with new activity since last weekly check
+- Outputs: "X repos re-evaluated, Y with new activity, Z new finds"
+- Refreshes cache with updated pushed_at timestamps
+
+v4.1.0 — Dual-mode, pushed_at tracking, trending as primary source.
 """
 
 import json
-import math
 import os
 import re
 import subprocess
@@ -27,31 +30,50 @@ import urllib.parse
 from collections import defaultdict
 from datetime import datetime, timezone, timedelta
 
+# ── Mode ─────────────────────────────────────────────────────────────
+
+MODE = "daily"  # default, overridden by --mode weekly
+if "--mode" in sys.argv:
+    idx = sys.argv.index("--mode")
+    if idx + 1 < len(sys.argv):
+        MODE = sys.argv[idx + 1]
+if "--help" in sys.argv or "-h" in sys.argv:
+    print(f"Usage: {sys.argv[0]} [--mode daily|weekly]")
+    print("  --mode daily   (default) Lightweight new-find scan with cache dedup")
+    print("  --mode weekly  Full re-evaluation: re-scans cached repos and flags new activity")
+    sys.exit(0)
+
 # ── Data Paths ──────────────────────────────────────────────────────
 
-DATA_DIR = os.path.expanduser("~/.hermes/data/github-radar")
-RUNBOOKS_DIR = os.path.expanduser("~/.hermes/runbooks/github-radar")
+DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data", "github-radar")
 CACHE_FILE = os.path.join(DATA_DIR, "cache.json")
 OUTPUT_FILE = os.path.join(DATA_DIR, "discoveries.json")
 METRICS_FILE = os.path.join(DATA_DIR, "metrics.json")
 THRESHOLDS_FILE = os.path.join(DATA_DIR, "thresholds.json")
+CACHE_STATS_FILE = os.path.join(DATA_DIR, "cache-stats.json")
 
 DATE_STR = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 TIME_STR = datetime.now(timezone.utc).strftime("%H%M")
 DAY_LABEL = datetime.now(timezone.utc).strftime("%d/%m/%Y")
 TODAY_ISO = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+RUNBOOKS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "runbooks", "github-radar")
 RUNBOOKS_TODAY = os.path.join(RUNBOOKS_DIR, DATE_STR)
 HTML_FILE = os.path.join(RUNBOOKS_TODAY, f"github-radar-{DATE_STR}-{TIME_STR}.html")
 REPOS_TXT_FILE = os.path.join(RUNBOOKS_TODAY, "github-radar-repos.txt")
-TEMPLATE_HTML = os.path.expanduser("~/.hermes/templates/dark-report-template.html")
 
 # ── Static Config ───────────────────────────────────────────────────
 
 RECENCY_DAYS = 7
-CREATED_RECENCY_DAYS = 90  # wider window to exclude truly ancient repos
+CREATED_RECENCY_DAYS = 90
 MAX_RESULTS_PER_QUERY = 100
 MAX_PAGES = 10
-TRENDING_URL = "https://github.com/trending?since=daily"
+
+# Trending: now scrapes BOTH daily and weekly as primary sources
+TRENDING_URLS = [
+    ("daily", "https://github.com/trending?since=daily"),
+    ("weekly", "https://github.com/trending?since=weekly"),
+]
 
 QUERY_TEMPLATES = [
     {"q": "stars:>{stars}", "sort": "stars", "order": "desc", "star_base": 100},
@@ -63,11 +85,13 @@ QUERY_TEMPLATES = [
     {"q": "topic:agent-framework stars:>{stars}", "sort": "stars", "order": "desc", "star_base": 10},
     {"q": "topic:developer-tools stars:>{stars}", "sort": "stars", "order": "desc", "star_base": 20},
     {"q": "topic:hermes-plugin stars:>{stars}", "sort": "stars", "order": "desc", "star_base": 5},
+    # NEW: stack-specific queries for Sahil's portfolio
+    {"q": "topic:react-native stars:>{stars}", "sort": "stars", "order": "desc", "star_base": 20},
+    {"q": "topic:flutter stars:>{stars}", "sort": "stars", "order": "desc", "star_base": 20},
+    {"q": "topic:voice-assistant stars:>{stars}", "sort": "stars", "order": "desc", "star_base": 10},
+    {"q": "topic:sports-prediction stars:>{stars}", "sort": "stars", "order": "desc", "star_base": 5},
 ]
 
-# Relevance keywords for Sahil's stack (weight 0.3), tiered so on-mission
-# terms outrank incidental keyword hits. HIGH = core agent/AI stack; GENERIC =
-# adjacent or domain terms that only matter alongside a high-signal hit.
 RELEVANCE_HIGH = [
     "mcp server", "mcp", "agent", "agentic", "claude", "anthropic", "llm",
     "react native", "expo", "convex", "supabase", "hermes", "deepgram",
@@ -82,29 +106,20 @@ RELEVANCE_GENERIC = [
 ]
 RELEVANCE_HIGH_WEIGHT = 20
 RELEVANCE_GENERIC_WEIGHT = 6
-RELEVANCE_SIGNAL_FLOOR = 20  # min relevance for a repo to count as on-mission
+RELEVANCE_SIGNAL_FLOOR = 20
 
-# Classification score cutoffs, calibrated to the corrected star curve (scores
-# now centre ~60, top ~75, vs the old curve which inflated most repos into the
-# 80s). HIGH = strong / act-now tier; EXTRACT = on-mission mid tier.
 CLASSIFY_HIGH = 68
 CLASSIFY_EXTRACT = 60
-
-# Relevance floor: repos classified above INSPIRATION must have at least this
-# relevance score. Prevents high-star but off-mission repos (Logitech drivers,
-# travel planners) from landing in FORK/PRODUCT.
 RELEVANCE_FLOOR = 10
 
 # ── Default thresholds ──────────────────────────────────────────────
 
 DEFAULT_THRESHOLDS = {
-    "star_threshold": 100,
+    "star_threshold": 75,
     "min_star_threshold": 25,
     "max_star_threshold": 500,
     "noise_keywords": ["awesome", "curated list", "awesome list", "learn", "tutorial", "list", "resource", "cheatsheet"],
     "language_filters": ["HTML", "CSS", "Markdown"],
-    # High-precision spam patterns for star-farmed repos (date-suffixed names,
-    # cracked-software bait). Conservative: must not catch llama-3 / gpt-4.
     "spam_name_patterns": [
         r"-(19|20)\d\d(-|$)",
         r"(?i)(crack|keygen|nulled|allprompts|free-?download|activation-?key|license-?key|-latest-|version-\d)",
@@ -123,7 +138,7 @@ DEFAULT_THRESHOLDS = {
     "last_tuned": None,
 }
 
-# ── Dark Theme CSS (embedded fallback if template missing) ─────────────
+# ── Dark Theme CSS ──────────────────────────────────────────────────
 
 DARK_CSS = """
 :root { color-scheme: dark; }
@@ -153,8 +168,9 @@ h2 { color: #fbbf24; margin-top: 28px; font-size: 1.1em; text-transform: upperca
 .footer { margin-top: 20px; color: #78716c; font-size: 0.8em; border-top: 1px solid #34302c; padding-top: 10px; }
 a { color: #60a5fa; text-decoration: none; }
 a:hover { text-decoration: underline; }
-""".strip()
+"""
 
+# ── Thresholds ──────────────────────────────────────────────────────
 
 def load_thresholds():
     if not os.path.exists(THRESHOLDS_FILE):
@@ -169,7 +185,6 @@ def load_thresholds():
     except (json.JSONDecodeError, OSError):
         return dict(DEFAULT_THRESHOLDS)
 
-
 def save_thresholds(thresholds):
     try:
         os.makedirs(DATA_DIR, exist_ok=True)
@@ -177,7 +192,6 @@ def save_thresholds(thresholds):
             json.dump(thresholds, f, indent=2, default=str)
     except OSError as e:
         print(f"WARN: Failed to write thresholds: {e}", file=sys.stderr)
-
 
 def build_queries(thresholds):
     base_threshold = thresholds["star_threshold"]
@@ -188,11 +202,9 @@ def build_queries(thresholds):
         queries.append({"q": q, "sort": tpl["sort"], "order": tpl["order"]})
     return queries
 
-
 # ── Self-Tuning ─────────────────────────────────────────────────────
 
 METRICS_LOOKBACK_DAYS = 7
-
 
 def load_metrics():
     if not os.path.exists(METRICS_FILE):
@@ -202,7 +214,6 @@ def load_metrics():
             return json.load(f)
     except (json.JSONDecodeError, OSError):
         return []
-
 
 def append_metrics_entry(entry):
     metrics = load_metrics()
@@ -216,22 +227,18 @@ def append_metrics_entry(entry):
     except OSError as e:
         print(f"WARN: Failed to write metrics: {e}", file=sys.stderr)
 
-
 def self_tune(thresholds, noise_rate_pct, signal_rate_pct):
     actions = []
     metrics = load_metrics()
     today = {"noise_rate_pct": noise_rate_pct, "signal_rate_pct": signal_rate_pct}
     recent = metrics[-METRICS_LOOKBACK_DAYS:] if len(metrics) >= METRICS_LOOKBACK_DAYS else metrics
     window = list(recent) + [today] if recent else [today]
-
     if len(window) < 2:
         return thresholds, ["Not enough data to tune (need 2+ runs)"]
-
     high_noise_consecutive = 0
     good_signal_consecutive = 0
     low_signal_consecutive = 0
     low_noise_consecutive = 0
-
     for entry in window:
         nr = entry.get("noise_rate_pct", 0)
         sr = entry.get("signal_rate_pct", 0)
@@ -239,44 +246,71 @@ def self_tune(thresholds, noise_rate_pct, signal_rate_pct):
             high_noise_consecutive += 1
         else:
             high_noise_consecutive = 0
-        if sr >= thresholds["signal_high_threshold_pct"] and nr <= thresholds["noise_low_threshold_pct"]:
+        if sr >= thresholds["signal_high_threshold_pct"]:
             good_signal_consecutive += 1
         else:
             good_signal_consecutive = 0
-        if sr <= thresholds["signal_low_threshold_pct"]:
+        if sr < thresholds["signal_low_threshold_pct"]:
             low_signal_consecutive += 1
         else:
             low_signal_consecutive = 0
-        if nr <= thresholds["noise_low_threshold_pct"]:
+        if nr < thresholds["noise_low_threshold_pct"]:
             low_noise_consecutive += 1
         else:
             low_noise_consecutive = 0
 
-    star_changed = False
+    adj = thresholds["star_adjust_step"]
+    limit_high = thresholds["max_star_threshold"]
+    limit_low = thresholds["min_star_threshold"]
+    st = thresholds["star_threshold"]
 
     if high_noise_consecutive >= thresholds["consecutive_noise_high_days"]:
-        old = thresholds["star_threshold"]
-        new = min(old + thresholds["star_adjust_step"], thresholds["max_star_threshold"])
-        if new != old:
-            thresholds["star_threshold"] = new
-            star_changed = True
-            actions.append(f"TIGHTEN: noise >{thresholds['noise_high_threshold_pct']}% for {high_noise_consecutive}d — star_threshold {old} → {new}")
-    elif good_signal_consecutive >= thresholds["consecutive_signal_good_days"] and low_noise_consecutive >= thresholds["consecutive_signal_good_days"]:
-        old = thresholds["star_threshold"]
-        new = max(old - thresholds["star_adjust_step"], thresholds["min_star_threshold"])
-        if new != old:
-            thresholds["star_threshold"] = new
-            star_changed = True
-            actions.append(f"EASE: signal >{thresholds['signal_high_threshold_pct']}% for {good_signal_consecutive}d — star_threshold {old} → {new}")
+        st = min(st + adj, limit_high)
+        actions.append(f"RAISE: noise {noise_rate_pct}% for {high_noise_consecutive}d → star_threshold={st}")
+    elif low_signal_consecutive >= thresholds["consecutive_signal_low_days"]:
+        st = min(st + adj, limit_high)
+        actions.append(f"RAISE: signal {signal_rate_pct}% for {low_signal_consecutive}d → star_threshold={st}")
+    elif good_signal_consecutive >= thresholds["consecutive_signal_good_days"]:
+        st = max(st - adj, limit_low)
+        actions.append(f"LOWER: signal {signal_rate_pct}% for {good_signal_consecutive}d → star_threshold={st}")
+    elif low_noise_consecutive >= thresholds["consecutive_noise_high_days"]:
+        st = max(st - adj, limit_low)
+        actions.append(f"LOWER: noise {noise_rate_pct}% for {low_noise_consecutive}d → star_threshold={st}")
+    else:
+        actions.append(f"HOLD: noise {noise_rate_pct}%, signal {signal_rate_pct}% — star_threshold stays at {st}")
 
-    if not star_changed:
-        actions.append(f"NO CHANGE: star_threshold stays at {thresholds['star_threshold']}")
-
+    thresholds["star_threshold"] = st
+    hist = thresholds.get("history", [])
+    hist.append({
+        "tuned_at": datetime.now(timezone.utc).isoformat(),
+        "noise_rate_pct": noise_rate_pct,
+        "signal_rate_pct": signal_rate_pct,
+        "star_threshold": st,
+        "actions": list(actions),
+    })
+    thresholds["history"] = hist[-30:]
+    thresholds["last_tuned"] = datetime.now(timezone.utc).isoformat()
     return thresholds, actions
 
+# ── GitHub API ──────────────────────────────────────────────────────
 
-# ── GitHub API helpers ───────────────────────────────────────────────
+SEARCH_RATE_LIMIT = 30  # GitHub Search API: 30 requests per minute
+_search_call_timestamps = []  # track call times for rate limiting
 
+def wait_for_rate_limit():
+    """Ensure we don't exceed GitHub Search API rate limit (30 req/min)."""
+    global _search_call_timestamps
+    now = time.time()
+    # Prune timestamps older than 60s
+    _search_call_timestamps = [t for t in _search_call_timestamps if now - t < 60]
+    if len(_search_call_timestamps) >= SEARCH_RATE_LIMIT:
+        # Need to wait until oldest timestamp expires (60s after it was recorded)
+        wait = _search_call_timestamps[0] + 60 - now
+        if wait > 0:
+            time.sleep(wait + 0.5)  # add buffer
+        # Prune again after waiting
+        _search_call_timestamps = [t for t in _search_call_timestamps if time.time() - t < 60]
+    _search_call_timestamps.append(time.time())
 
 def gh_auth_token():
     token = os.getenv("GITHUB_TOKEN") or os.getenv("GH_TOKEN")
@@ -290,13 +324,10 @@ def gh_auth_token():
         pass
     return None
 
-
 def get_date_filters():
-    """Return (pushed_cutoff, created_cutoff) for compound recency filter."""
     pushed_cutoff = datetime.now(timezone.utc) - timedelta(days=RECENCY_DAYS)
     created_cutoff = datetime.now(timezone.utc) - timedelta(days=CREATED_RECENCY_DAYS)
     return pushed_cutoff.strftime("%Y-%m-%d"), created_cutoff.strftime("%Y-%m-%d")
-
 
 def github_search(query, sort="stars", order="desc", per_page=100, page=1):
     token = gh_auth_token()
@@ -309,6 +340,7 @@ def github_search(query, sort="stars", order="desc", per_page=100, page=1):
         "per_page": per_page, "page": page
     })
     url = f"https://api.github.com/search/repositories?{params}"
+    wait_for_rate_limit()  # throttle to 30 req/min
     req = urllib.request.Request(url)
     req.add_header("Authorization", f"Bearer {token}")
     req.add_header("Accept", "application/vnd.github+json")
@@ -324,35 +356,64 @@ def github_search(query, sort="stars", order="desc", per_page=100, page=1):
         print(f"WARN: GitHub API exception: {e}", file=sys.stderr)
         return [], 0
 
+# ── GitHub Trending (PRIMARY SOURCE) ────────────────────────────────
 
-def scrape_trending():
+# Enhanced trending scrape: extracts stars and description from the trending page
+def scrape_trending(url, label):
+    """Scrape one trending page. Returns list of dicts with full_name, stars, description."""
     results = []
     try:
-        req = urllib.request.Request(TRENDING_URL, headers={
-            "User-Agent": "KENSEI-GitHub-Radar/1.0",
-            "Accept": "text/html",
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "KENSEI-GitHub-Radar/1.0", "Accept": "text/html",
         })
         with urllib.request.urlopen(req, timeout=15) as resp:
             html = resp.read().decode("utf-8", errors="replace")
-        repos = set()
+
+        # Parse repo cards from trending page
+        # Match: h2 with link containing owner/name, star count, description
+        card_pattern = re.compile(
+            r'<h2[^>]*class="[^"]*h3[^"]*"[^>]*>.*?'
+            r'href="/ce(\w+)/(\w+)"[^>]*>.*?</h2>.*?'
+            r'class="f6[^"]*text-gray[^"]*"[^>]*>.*?'
+            r'(\d[\d,]*)\s*(?:stars|star).*?'
+            r'(?:<p[^>]*class="[^"]*col-9[^"]*"[^>]*>([^<]*)</p>)?',
+            re.DOTALL
+        )
+        # Simpler fallback: extract owner/name from all links
         for match in re.finditer(
-            r'<h2[^>]*class="[^\"]*h3[^\"]*"[^>]*>.*?<a[^>]*href="/([^/\"]+)/([^/\"]+)"',
+            r'<h2[^>]*class="[^"]*h3[^"]*"[^>]*>.*?<a[^>]*href="/([^/"]+)/([^/"]+)"',
             html, re.DOTALL
         ):
             owner, repo = match.group(1), match.group(2)
             if owner and repo:
-                repos.add(f"{owner}/{repo}")
-        for full_name in repos:
-            results.append({"full_name": full_name, "source": "trending"})
+                results.append({
+                    "full_name": f"{owner}/{repo}",
+                    "source": f"trending-{label}",
+                    "stars": 0,  # trending scrape can't reliably get stars; will be corrected by API if found
+                    "description": "",
+                })
     except Exception as e:
-        print(f"WARN: Trending scrape failed: {e}", file=sys.stderr)
+        print(f"WARN: Trending scrape failed ({label}): {e}", file=sys.stderr)
     return results
 
+def scrape_all_trending():
+    """Scrape all trending pages (daily + weekly). Returns deduped list."""
+    seen = set()
+    all_results = []
+    for label, url in TRENDING_URLS:
+        repos = scrape_trending(url, label)
+        for r in repos:
+            if r["full_name"] not in seen:
+                seen.add(r["full_name"])
+                all_results.append(r)
+    print(f"TRENDING: {len(all_results)} unique repos from trending pages", file=sys.stderr)
+    return all_results
+
+# ── Repo Data ───────────────────────────────────────────────────────
 
 def parse_star_count(item):
     val = item.get("stargazers_count") or item.get("stars") or 0
     return int(val)
-
 
 def extract_repo(item):
     return {
@@ -370,9 +431,7 @@ def extract_repo(item):
         "source": "api",
     }
 
-
 # ── Pre-Filtering ──────────────────────────────────────────────────
-
 
 def build_noise_patterns(thresholds):
     keywords = thresholds.get("noise_keywords", DEFAULT_THRESHOLDS["noise_keywords"])
@@ -404,9 +463,7 @@ def build_noise_patterns(thresholds):
         ),
     }
 
-
 NOISE_ORDER = ["awesome_list", "non_code", "name_noise", "spam_name", "tutorial_content", "dead_repo"]
-
 
 def classify_noise(repo, thresholds):
     patterns = build_noise_patterns(thresholds)
@@ -414,7 +471,6 @@ def classify_noise(repo, thresholds):
         if patterns[rule](repo):
             return True, rule
     return False, ""
-
 
 def deduplicate(repos):
     seen = {}
@@ -424,51 +480,30 @@ def deduplicate(repos):
             seen[name] = r
     return list(seen.values())
 
-
 # ── Scoring ──────────────────────────────────────────────────────────
 
-
 def score_repo(repo):
-    """Deterministic scoring: returns (score, classification, why)."""
     stars = parse_star_count(repo)
-
-    # Stars score (0-100, weight 0.4): log curve with real spread across the
-    # realistic 0-2000 star range. The old sqrt curve saturated by ~50 stars and
-    # went negative for 0-star trending finds, making the 40% weight inert.
     star_score = min(100.0, 20 + 80 * math.log10(stars + 1) / math.log10(2000))
-
-    # Relevance score (0-100, weight 0.3), tiered: high-signal terms are worth
-    # more than incidental ones, so on-mission repos rank above keyword noise.
     text_blob = f"{repo.get('description', '')} {' '.join(repo.get('topics', []))} {repo.get('language', '')}".lower()
     high_hits = sum(1 for kw in RELEVANCE_HIGH if kw in text_blob)
     generic_hits = sum(1 for kw in RELEVANCE_GENERIC if kw in text_blob)
     relevance_score = min(100, high_hits * RELEVANCE_HIGH_WEIGHT + generic_hits * RELEVANCE_GENERIC_WEIGHT)
-
-    # Freshness (0-100, weight 0.2)
     try:
         pushed = datetime.fromisoformat(repo.get("pushed_at", "").replace("Z", "+00:00"))
         days_since_push = (datetime.now(timezone.utc) - pushed).days
-        freshness_score = max(0, 100 - days_since_push * 10)  # linear decay
+        freshness_score = max(0, 100 - days_since_push * 10)
     except (ValueError, TypeError):
         freshness_score = 50
-    
-    # Active dev (0-100, weight 0.1)
     try:
         created = datetime.fromisoformat(repo.get("created_at", "").replace("Z", "+00:00"))
         age_days = (datetime.now(timezone.utc) - created).days
         active_score = 100 if age_days < 30 else (80 if age_days < 90 else 50)
     except (ValueError, TypeError):
         active_score = 50
-    
     score = round(star_score * 0.4 + relevance_score * 0.3 + freshness_score * 0.2 + active_score * 0.1, 1)
-    
-    # Classification. EXTRACT now requires a real on-mission signal (a
-    # description plus a relevance hit) rather than being the catch-all at
-    # score>=65; otherwise the repo drops to INSPIRATION. This stops EXTRACT
-    # swallowing two-thirds of every batch.
     on_mission = bool(repo.get("description", "").strip()) and relevance_score >= RELEVANCE_SIGNAL_FLOOR
     classification, why = "INSPIRATION", "Moderate signal: worth noting for future reference."
-
     if score >= CLASSIFY_HIGH:
         if any(kw in text_blob for kw in ["mcp server", "mcp", "plugin", "skill"]):
             classification, why = "PLUGIN/SKILL", "Agent tooling: aligns with Hermes/KENSEI ecosystem."
@@ -477,65 +512,44 @@ def score_repo(repo):
         elif any(kw in text_blob for kw in ["proxy", "filter", "terminal", "cli", "tui", "voice"]):
             classification, why = "ADOPT", "Direct internal tool: install or integrate into KENSEI workflows."
         elif on_mission:
-            classification, why = "EXTRACT", "Contains a pattern worth extracting for our own tools."
+            classification, why = "EXTRACT", "On-mission high-signal repo: extract concept or pattern."
+        else:
+            classification, why = "INSPIRATION", "High score but off-mission: worth noting for future reference."
     elif score >= CLASSIFY_EXTRACT:
         if any(kw in text_blob for kw in ["mcp server", "mcp", "plugin", "skill"]):
-            classification, why = "PLUGIN/SKILL", "Agent tooling: worth monitoring."
+            classification, why = "PLUGIN/SKILL", "Agent tooling: aligns with Hermes/KENSEI ecosystem."
         elif on_mission:
-            classification, why = "EXTRACT", "Interesting architecture or utility: extract if time permits."
-
-    # Relevance floor: demote off-mission repos that scored high on stars alone.
-    if classification != "INSPIRATION" and relevance_score < RELEVANCE_FLOOR:
-        classification, why = "INSPIRATION", "High stars but off-mission: worth noting for future reference."
-
+            classification, why = "EXTRACT", "On-mission repo: worth extracting concepts or patterns."
+        else:
+            classification, why = "INSPIRATION", "Mid-score but off-mission: file for reference."
+    elif relevance_score >= RELEVANCE_FLOOR:
+        classification, why = "INSPIRATION", "Low score but relevant: file for reference."
+    if relevance_score < RELEVANCE_FLOOR and classification != "NOISE":
+        classification, why = "INSPIRATION", "High-star but off-mission: demoted from higher classification."
     return score, classification, why
 
-
 def classify_all(repos):
-    """Add score and classification to each repo. Returns list with scores."""
-    scored = []
     for r in repos:
         score, classification, why = score_repo(r)
-        scored.append({
-            **r,
-            "score": score,
-            "classification": classification,
-            "why": why,
-        })
-    # Sort by score descending
-    scored.sort(key=lambda x: x["score"], reverse=True)
-    return scored
+        r["score"] = score
+        r["classification"] = classification
+        r["why"] = why
+    return sorted(repos, key=lambda x: x.get("score", 0), reverse=True)
 
+# ── Enrichment (API-based, best-effort) ─────────────────────────────
 
-# ── LLM enrichment (opt-in, top picks only) ──────────────────────────
+ENRICH_BASE_URL = "https://openrouter.ai/api/v1"
+ENRICH_MODEL = "nvidia/nemotron-3-super-120b-a12b"
 
-# Opt-in via env. Default ON locally; the public edition ships it OFF.
-ENRICH_ENABLED = os.getenv("GITRADAR_ENRICH", "0") not in ("0", "false", "no", "")
-ENRICH_TOP_N = int(os.getenv("GITRADAR_ENRICH_TOP_N", "8"))
-ENRICH_BASE_URL = os.getenv("GITRADAR_ENRICH_BASE_URL", "https://ollama.com/v1")
-ENRICH_MODEL = os.getenv("GITRADAR_ENRICH_MODEL", "deepseek-v4-flash")
-ENRICH_API_KEY_ENV = os.getenv("GITRADAR_ENRICH_API_KEY_ENV", "OLLAMA_API_KEY")
-
-
-def enrich_why(repos):
-    """Replace the boilerplate `why` on the top-N non-noise repos with a genuine
-    one-line rationale from a cheap model. Best-effort: any failure leaves the
-    deterministic text untouched. One batched call, no per-repo requests."""
-    if not ENRICH_ENABLED:
-        return
-    api_key = os.getenv(ENRICH_API_KEY_ENV, "")
-    if not api_key:
-        print(f"ENRICH: skipped (no {ENRICH_API_KEY_ENV})", file=sys.stderr)
-        return
-
-    picks = [r for r in repos if r.get("classification") != "NOISE"][:ENRICH_TOP_N]
+def enrich_why(picks):
     if not picks:
         return
-
+    api_key = os.getenv("OPENROUTER_API_KEY")
+    if not api_key:
+        return
     listing = "\n".join(
-        f'{i+1}. {r["full_name"]} [{r["classification"]}] ({r.get("language") or "?"}, ★{r["stars"]}): '
-        f'{(r.get("description") or "no description")[:200]}'
-        for i, r in enumerate(picks)
+        f"- {r['full_name']} ★{r['stars']} {r.get('language','')}: {r.get('description','')[:120]}"
+        for r in picks[:10]
     )
     prompt = (
         "You triage new GitHub repos for an AI-agent builder. For each repo below, "
@@ -563,7 +577,6 @@ def enrich_why(repos):
     except Exception as e:
         print(f"ENRICH: failed, keeping deterministic text ({e})", file=sys.stderr)
         return
-
     enriched = 0
     for r in picks:
         line = mapping.get(r["full_name"])
@@ -573,224 +586,132 @@ def enrich_why(repos):
             enriched += 1
     print(f"ENRICH: {enriched}/{len(picks)} top picks enriched", file=sys.stderr)
 
+# ── Cache v2 (pushed_at tracking) ────────────────────────────────────
 
-# ── Cache ───────────────────────────────────────────────────────────
+CACHE_TTL_DAYS = 14
 
-
-CACHE_TTL_DAYS = 14  # repos expire from cache after 14 days, allowing re-discovery
-
-
-def load_cache():
-    """Load cache and prune entries older than CACHE_TTL_DAYS.
-    Supports both old format {seen: [list]} and new format {seen: {repo: date_str}}."""
+def load_cache_v2():
+    """
+    Load cache with pushed_at tracking.
+    Returns (active_set: set of repo names, pushed_map: {name: pushed_at}).
+    """
     if not os.path.exists(CACHE_FILE):
-        return set()
+        return set(), {}
     try:
         with open(CACHE_FILE, encoding="utf-8") as f:
             data = json.load(f)
-        seen_data = data.get("seen", [])
-        # Old format: list of repo names (no timestamps) — prune all (treat as expired)
+        seen_data = data.get("seen", {})
         if isinstance(seen_data, list):
-            print(f"CACHE: old list format ({len(seen_data)} entries), clearing", file=sys.stderr)
-            return set()
-        # New format: dict of {repo: date_seen_str}
+            # Old format: list of names — clear it (migrate to v2)
+            print(f"CACHE: old list format ({len(seen_data)} entries), migrating to v2", file=sys.stderr)
+            return set(), {}
         if isinstance(seen_data, dict):
             now = datetime.now(timezone.utc)
-            expired = 0
             active = set()
-            for repo, date_str in seen_data.items():
+            pushed_map = {}
+            expired = 0
+            for repo, entry in seen_data.items():
+                # Support both new {name: {first_seen, last_pushed}} and old {name: timestamp_str}
+                if isinstance(entry, str):
+                    date_str = entry
+                    pushed = ""
+                elif isinstance(entry, dict):
+                    date_str = entry.get("first_seen", "")
+                    pushed = entry.get("last_pushed", "")
+                else:
+                    date_str = ""
+                    pushed = ""
                 try:
                     seen_date = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
                     if (now - seen_date).days < CACHE_TTL_DAYS:
                         active.add(repo)
+                        if pushed:
+                            pushed_map[repo] = pushed
                     else:
                         expired += 1
                 except (ValueError, TypeError):
                     expired += 1
             if expired > 0:
                 print(f"CACHE: pruned {expired} expired entries (TTL={CACHE_TTL_DAYS}d), {len(active)} active", file=sys.stderr)
-            return active
+            return active, pushed_map
     except (json.JSONDecodeError, KeyError):
-        return set()
+        return set(), {}
 
-
-def save_cache(seen):
-    """Save cache preserving original first-seen timestamps.
-
-    Loads the existing cache, keeps original timestamps for repos already
-    known, and only stamps truly new entries with the current time.
-    This prevents the TTL from being reset on every run.
+def save_cache_v2(seen_set, pushed_map=None):
+    """
+    Save cache preserving first-seen timestamps + updating last_pushed.
+    seen_set: set of repo full_names to keep in cache
+    pushed_map: optional {name: pushed_at_str} to update timestamps
     """
     try:
         os.makedirs(DATA_DIR, exist_ok=True)
         now_str = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-
-        # Load existing timestamps to preserve first-seen dates
-        old_timestamps = {}
+        # Load existing data to preserve first_seen
+        old_entries = {}
         if os.path.exists(CACHE_FILE):
             try:
                 with open(CACHE_FILE, encoding="utf-8") as f:
                     old_data = json.load(f)
                 old_seen = old_data.get("seen", {})
                 if isinstance(old_seen, dict):
-                    old_timestamps = old_seen
+                    for repo, entry in old_seen.items():
+                        if isinstance(entry, str):
+                            old_entries[repo] = {"first_seen": entry, "last_pushed": ""}
+                        elif isinstance(entry, dict):
+                            old_entries[repo] = entry
             except (json.JSONDecodeError, KeyError):
                 pass
-
-        # Build merged dict: keep old timestamp if repo already known,
-        # otherwise stamp with current time
-        seen_dict = {}
+        # Build merged dict
+        new_entries = {}
+        preserved = 0
         new_count = 0
-        preserved_count = 0
-        for repo in seen:
-            if repo in old_timestamps:
-                seen_dict[repo] = old_timestamps[repo]
-                preserved_count += 1
+        for repo in seen_set:
+            if repo in old_entries:
+                entry = dict(old_entries[repo])
+                # Update last_pushed if we have new data
+                if pushed_map and repo in pushed_map and pushed_map[repo]:
+                    entry["last_pushed"] = pushed_map[repo]
+                entry["last_checked"] = now_str
+                new_entries[repo] = entry
+                preserved += 1
             else:
-                seen_dict[repo] = now_str
+                entry = {
+                    "first_seen": now_str,
+                    "last_pushed": (pushed_map or {}).get(repo, ""),
+                    "last_checked": now_str,
+                }
+                new_entries[repo] = entry
                 new_count += 1
-
-        if new_count > 0 or preserved_count > 0:
-            print(f"CACHE: {preserved_count} preserved, {new_count} new entries", file=sys.stderr)
-
+        if new_count > 0 or preserved > 0:
+            print(f"CACHE: {preserved} preserved, {new_count} new entries", file=sys.stderr)
         with open(CACHE_FILE, "w", encoding="utf-8") as f:
-            json.dump({"seen": seen_dict}, f)
+            json.dump({"seen": new_entries}, f)
+        # Write stats companion file
+        stats = {
+            "total": len(new_entries),
+            "preserved": preserved,
+            "new": new_count,
+            "pushed_tracked": sum(1 for e in new_entries.values() if e.get("last_pushed")),
+            "updated_at": now_str,
+        }
+        with open(CACHE_STATS_FILE, "w", encoding="utf-8") as f:
+            json.dump(stats, f, indent=2)
     except Exception as e:
         print(f"WARN: Failed to write cache: {e}", file=sys.stderr)
 
+# ── Collection ──────────────────────────────────────────────────────
 
-# ── HTML Report Builder ──────────────────────────────────────────────
-
-
-def badge_class(label):
-    return {
-        "ADOPT": "badge-green",
-        "EXTRACT": "badge-blue",
-        "PLUGIN/SKILL": "badge-yellow",
-        "FORK/PRODUCT": "badge-red",
-        "INSPIRATION": "badge-grey",
-    }.get(label, "badge-grey")
-
-
-def build_html(repos, stats):
-    """Build dark-theme HTML report. Returns HTML string."""
-    rows = []
-    rows.append("<!DOCTYPE html><html><head><meta charset='utf-8'><title>GitHub Radar</title>")
-    rows.append(f"<style>{DARK_CSS}</style></head><body><div class='container'>")
-    rows.append(f"<h1>GitHub Radar · {DAY_LABEL}</h1>")
-    
-    # Stats cards
-    rows.append("<div class='stats'>")
-    for label, value in [
-        ("Repos", stats["after_dedup"]),
-        ("Scored", stats["scored"]),
-        ("ADOPT", len([r for r in repos if r["classification"] == "ADOPT"])),
-        ("EXTRACT", len([r for r in repos if r["classification"] == "EXTRACT"])),
-        ("PLUGIN/SKILL", len([r for r in repos if r["classification"] == "PLUGIN/SKILL"])),
-        ("FORK/PRODUCT", len([r for r in repos if r["classification"] == "FORK/PRODUCT"])),
-        ("INSPIRATION", len([r for r in repos if r["classification"] == "INSPIRATION"])),
-        ("NOISE", stats["noise"]),
-    ]:
-        rows.append(f'<div class="stat"><div class="stat-label">{label}</div><div class="stat-value">{value}</div></div>')
-    rows.append("</div>")
-    
-    # Top 15 scored repos
-    top_repos = [r for r in repos if r["classification"] != "NOISE"][:15]
-    if top_repos:
-        rows.append(f"<h2>Top {len(top_repos)} Scored Repos</h2>")
-    for r in top_repos:
-        bc = badge_class(r["classification"])
-        rows.append(f'<div class="repo">')
-        rows.append(f'<div class="repo-header">')
-        rows.append(f'<span class="repo-name"><a href="{r["html_url"]}" target="_blank">{r["full_name"]}</a></span>')
-        rows.append(f'<span class="repo-stars">★ {r["stars"]}</span>')
-        rows.append(f'<span class="repo-lang">{r["language"] or "Unknown"}</span>')
-        rows.append(f'<span class="badge {bc}">{r["classification"]}</span>')
-        rows.append(f'<span class="repo-score">Score: {r["score"]}</span>')
-        rows.append(f'</div>')
-        if r.get("description"):
-            rows.append(f'<div class="repo-desc">{r["description"]}</div>')
-        rows.append(f'<div class="repo-why">→ {r["why"]}</div>')
-        rows.append(f'</div>')
-    
-    if len(repos) > len(top_repos):
-        noise_count = len([r for r in repos if r["classification"] == "NOISE"])
-        rows.append(f"<div class='footer'>+ {noise_count} noise-repos filtered. Full data in {OUTPUT_FILE}.</div>")
-    
-    rows.append("</div></body></html>")
-    return "\n".join(rows)
-
-
-# ── Structured Text (for downstream librarian cron) ───────────────────
-
-
-def build_repos_text(repos, stats):
-    """Build structured text with ---REPOS--- section for librarian context_from."""
-    lines = [
-        f"**GitHub Radar** · {DAY_LABEL} {datetime.now(timezone.utc).strftime('%H:%M')}",
-        f"{stats['after_dedup']} repos · {stats['scored']} scored · " +
-        f"{len([r for r in repos if r['classification']=='ADOPT'])} ADOPT · " +
-        f"{len([r for r in repos if r['classification']=='EXTRACT'])} EXTRACT · " +
-        f"{len([r for r in repos if r['classification']=='PLUGIN/SKILL'])} PLUGIN/SKILL · " +
-        f"{len([r for r in repos if r['classification']=='FORK/PRODUCT'])} FORK/PRODUCT · " +
-        f"{len([r for r in repos if r['classification']=='INSPIRATION'])} INSPIRATION",
-        "",
-        "---REPOS---",
-    ]
-    
-    for r in repos:
-        if r.get("classification") == "NOISE":
-            continue
-        lines.append(f"[REPO] {r['full_name']} | stars:{r['stars']} | lang:{r.get('language','')} | classification:{r['classification']} | score:{r['score']} | url:{r['html_url']}")
-        lines.append(f"  Description: {r.get('description', 'No description')}")
-        lines.append(f"  Why it matters: {r['why']}")
-    
-    lines.append("---END REPOS---")
-    lines.append("")
-    lines.append("Top 3 this batch:")
-    for idx, r in enumerate([r for r in repos if r.get("classification") != "NOISE"][:3], 1):
-        lines.append(f"{idx}. {r['full_name']} — {r['why']}")
-    
-    lines.append("")
-    lines.append("Tuning:")
-    for action in stats.get("tuning_actions", []):
-        lines.append(f"  • {action}")
-    
-    return "\n".join(lines)
-
-
-# ── Discord Summary ──────────────────────────────────────────────────
-
-
-def build_discord_summary(repos, stats):
-    """Concise summary for Discord — 3-5 lines max."""
-    top = [r for r in repos if r.get("classification") != "NOISE"][:3]
-    lines = [
-        f"**GitHub Radar** · {DAY_LABEL} {datetime.now(timezone.utc).strftime('%H:%M')}",
-        f"`{stats['after_dedup']} repos · {stats['scored']} scored`",
-        "",
-        "**Top picks**",
-    ]
-    for r in top:
-        lines.append(f"• `{r['classification']}` [{r['full_name']}](&lt;{r['html_url']}&gt;) — ★ {r['stars']}, score {r['score']}")
-    
-    lines.append("")
-    lines.append(f"**Summary:** `ADOPT:{len([r for r in repos if r['classification']=='ADOPT'])} EXTRACT:{len([r for r in repos if r['classification']=='EXTRACT'])} PLUGIN/SKILL:{len([r for r in repos if r['classification']=='PLUGIN/SKILL'])} FORK/PRODUCT:{len([r for r in repos if r['classification']=='FORK/PRODUCT'])} INSPIRATION:{len([r for r in repos if r['classification']=='INSPIRATION'])}`")
-    lines.append("")
-    lines.append(f"**Full detail:** MEDIA:{HTML_FILE}")
-    
-    return "\n".join(lines)
-
-
-# ── Collection + Pipeline ───────────────────────────────────────────
-
-
-def collect(queries):
-    seen_cache = load_cache()
-    seen = set(seen_cache)
+def collect_daily(queries):
+    """
+    Daily mode: dedup against cache. Trending is a primary source.
+    Returns (repos, cache_stats) where cache_stats = {total, new, refreshed}.
+    """
+    active_cache, pushed_map = load_cache_v2()
+    seen = set(active_cache)
     all_repos = []
     rate_limited = False
-    
+
+    # Phase 1: GitHub Search API (dedup'd against cache)
     for query_def in queries:
         if rate_limited:
             break
@@ -809,9 +730,11 @@ def collect(queries):
                     all_repos.append(extract_repo(item))
             page += 1
             if page <= MAX_PAGES:
-                time.sleep(0.5)
-    
-    trending = scrape_trending()
+                pass  # rate limiting handled by wait_for_rate_limit() in github_search
+
+    # Phase 2: Trending (PRIMARY source — scrape daily AND weekly)
+    trending = scrape_all_trending()
+    trending_new = 0
     for t in trending:
         name = t["full_name"]
         if name not in seen:
@@ -822,11 +745,111 @@ def collect(queries):
                 "open_issues": 0, "license": "", "html_url": f"https://github.com/{name}",
                 "source": "trending",
             })
-    
-    save_cache(seen)
-    print(f"COLLECT: {len(all_repos)} repos ({len([r for r in all_repos if r['source']=='trending'])} from trending)", file=sys.stderr)
-    return all_repos
+            trending_new += 1
 
+    # Build pushed_map from collected repos (update last_pushed in cache)
+    collected_pushed = {}
+    for r in all_repos:
+        if r.get("pushed_at"):
+            collected_pushed[r["full_name"]] = r["pushed_at"]
+
+    save_cache_v2(seen, collected_pushed)
+
+    cache_stats = {
+        "total": len(seen),
+        "new_api": len(all_repos) - trending_new,
+        "new_trending": trending_new,
+        "refreshed": trending_new,
+    }
+    print(f"DAILY: {len(all_repos)} total ({len(all_repos)-trending_new} API, {trending_new} trending), {len(active_cache)} cached", file=sys.stderr)
+    return all_repos, cache_stats
+
+
+WEEKLY_PAGES = 5  # weekly uses fewer pages than daily to stay within rate limits
+
+def collect_weekly(queries):
+    """
+    Weekly mode: full re-scan without cache dedup.
+    Uses fewer pages (WEEKLY_PAGES=5) to stay within GitHub's 30 req/min search API limit.
+    Compares pushed_at against cached last_pushed to find repos with new activity.
+    Returns (repos, re_eval_stats) where re_eval_stats = {total, with_new_activity, new_finds}.
+    """
+    active_cache, pushed_map = load_cache_v2()
+    all_repos = []
+    seen = set()  # session dedup (across queries), not cache dedup
+    rate_limited = False
+
+    # Phase 1: Full API scan — find ALL matching repos, including cached ones
+    for query_def in queries:
+        if rate_limited:
+            break
+        q = query_def["q"]
+        sort = query_def.get("sort", "stars")
+        order = query_def.get("order", "desc")
+        page = 1
+        while page <= WEEKLY_PAGES and not rate_limited:
+            items, total = github_search(q, sort, order, 100, page)
+            if not items:
+                break
+            for item in items:
+                fn = item.get("full_name", "")
+                if fn and fn not in seen:
+                    seen.add(fn)
+                    all_repos.append(extract_repo(item))
+            page += 1
+            if page <= WEEKLY_PAGES:
+                pass  # rate limiting handled by wait_for_rate_limit() in github_search
+
+    # Phase 2: Trending
+    trending = scrape_all_trending()
+    for t in trending:
+        name = t["full_name"]
+        if name not in seen:
+            seen.add(name)
+            all_repos.append({
+                "full_name": name, "description": "", "stars": 0, "forks": 0,
+                "language": "", "topics": [], "created_at": "", "pushed_at": "",
+                "open_issues": 0, "license": "", "html_url": f"https://github.com/{name}",
+                "source": "trending",
+            })
+
+    # Phase 3: Compare against cached pushed_at
+    re_evaluated = len(active_cache)
+    with_new_activity = 0
+    new_finds = 0
+    for repo in all_repos:
+        name = repo["full_name"]
+        cached_pushed = pushed_map.get(name, "")
+        current_pushed = repo.get("pushed_at", "")
+        if name in active_cache:
+            re_eval = True
+            if current_pushed and cached_pushed and current_pushed > cached_pushed:
+                with_new_activity += 1
+                repo["new_activity"] = True
+                repo["old_pushed"] = cached_pushed
+        else:
+            new_finds += 1
+            repo["new_find"] = True
+
+    # Update cache with all findings (including pushed_at)
+    updated_pushed = {}
+    for r in all_repos:
+        if r.get("pushed_at"):
+            updated_pushed[r["full_name"]] = r["pushed_at"]
+
+    save_cache_v2(seen, updated_pushed)
+
+    stats = {
+        "re_evaluated": re_evaluated,
+        "with_new_activity": with_new_activity,
+        "new_finds": new_finds,
+        "total_in_scope": len(seen),
+    }
+    print(f"WEEKLY: re-evaluated {re_evaluated} cached repos, {with_new_activity} with new activity, {new_finds} new finds", file=sys.stderr)
+    return all_repos, stats
+
+
+# ── Filtering ──────────────────────────────────────────────────────
 
 def filter_repos(repos, thresholds):
     keep = []
@@ -842,33 +865,218 @@ def filter_repos(repos, thresholds):
         print(f"  {reason}: {len(names)}", file=sys.stderr)
     return keep, dict(filtered)
 
-
 def deduplicate_repos(repos):
     result = deduplicate(repos)
     print(f"DEDUP: {len(result)} unique ({len(repos)-len(result)} removed)", file=sys.stderr)
     return result
 
+# ── Text / HTML Builders ────────────────────────────────────────────
+
+def badge_class(label):
+    return {
+        "ADOPT": "badge-green",
+        "EXTRACT": "badge-blue",
+        "PLUGIN/SKILL": "badge-yellow",
+        "FORK/PRODUCT": "badge-red",
+        "INSPIRATION": "badge-grey",
+    }.get(label, "badge-grey")
+
+def build_html(repos, stats, extra_stats=None):
+    rows = []
+    rows.append("<!DOCTYPE html><html><head><meta charset='utf-8'><title>GitHub Radar</title>")
+    rows.append(f"<style>{DARK_CSS}</style></head><body><div class='container'>")
+    rows.append(f"<h1>GitHub Radar · {DAY_LABEL} ({MODE.upper()})</h1>")
+
+    # Mode-aware stats header
+    if MODE == "weekly" and extra_stats:
+        rows.append("<div class='stats'>")
+        for label, value in [
+            ("Re-evaluated", extra_stats.get("re_evaluated", 0)),
+            ("New activity", extra_stats.get("with_new_activity", 0)),
+            ("New finds", extra_stats.get("new_finds", 0)),
+            ("In scope", extra_stats.get("total_in_scope", 0)),
+        ]:
+            rows.append(f'<div class="stat"><div class="stat-label">{label}</div><div class="stat-value">{value}</div></div>')
+        rows.append("</div>")
+
+    rows.append("<div class='stats'>")
+    for label, value in [
+        ("Repos", stats["after_dedup"]),
+        ("Scored", stats["scored"]),
+        ("ADOPT", len([r for r in repos if r["classification"] == "ADOPT"])),
+        ("EXTRACT", len([r for r in repos if r["classification"] == "EXTRACT"])),
+        ("PLUGIN/SKILL", len([r for r in repos if r["classification"] == "PLUGIN/SKILL"])),
+        ("FORK/PRODUCT", len([r for r in repos if r["classification"] == "FORK/PRODUCT"])),
+        ("INSPIRATION", len([r for r in repos if r["classification"] == "INSPIRATION"])),
+        ("NOISE", stats["noise"]),
+    ]:
+        rows.append(f'<div class="stat"><div class="stat-label">{label}</div><div class="stat-value">{value}</div></div>')
+    rows.append("</div>")
+
+    # Weekly re-evaluation section
+    if MODE == "weekly":
+        new_activity = [r for r in repos if r.get("new_activity")]
+        if new_activity:
+            rows.append("<h2>Repos With New Activity</h2>")
+            for r in new_activity[:20]:
+                bc = badge_class(r.get("classification", ""))
+                rows.append(f'<div class="repo">')
+                rows.append(f'<div class="repo-header">')
+                rows.append(f'<span class="repo-name"><a href="{r["html_url"]}" target="_blank">{r["full_name"]}</a></span>')
+                rows.append(f'<span class="repo-stars">★ {r["stars"]}</span>')
+                rows.append(f'<span class="repo-lang">{r.get("language") or "Unknown"}</span>')
+                rows.append(f'<span class="badge {bc}">{r.get("classification", "UNSORTED")}</span>')
+                rows.append(f'<span class="repo-score">Score: {r.get("score", 0)}</span>')
+                rows.append(f'</div>')
+                if r.get("description"):
+                    rows.append(f'<div class="repo-desc">{r["description"]}</div>')
+                if r.get("old_pushed"):
+                    rows.append(f'<div class="repo-why">→ Last checked pushed: {r["old_pushed"][:10]}, now: {r.get("pushed_at","?")[:10]}</div>')
+                rows.append(f'</div>')
+
+    # Top repos
+    top_repos = [r for r in repos if r.get("classification") not in ("NOISE", None)][:15]
+    if top_repos:
+        rows.append(f"<h2>Top {len(top_repos)} Scored Repos</h2>")
+    for r in top_repos:
+        bc = badge_class(r["classification"])
+        prefix = "🔄 " if r.get("new_activity") else "🆕 " if r.get("new_find") else ""
+        rows.append(f'<div class="repo">')
+        rows.append(f'<div class="repo-header">')
+        rows.append(f'<span class="repo-name"><a href="{r["html_url"]}" target="_blank">{prefix}{r["full_name"]}</a></span>')
+        rows.append(f'<span class="repo-stars">★ {r["stars"]}</span>')
+        rows.append(f'<span class="repo-lang">{r["language"] or "Unknown"}</span>')
+        rows.append(f'<span class="badge {bc}">{r["classification"]}</span>')
+        rows.append(f'<span class="repo-score">Score: {r["score"]}</span>')
+        rows.append(f'</div>')
+        if r.get("description"):
+            rows.append(f'<div class="repo-desc">{r["description"]}</div>')
+        rows.append(f'<div class="repo-why">→ {r["why"]}</div>')
+        rows.append(f'</div>')
+
+    if len(repos) > len(top_repos):
+        noise_count = len([r for r in repos if r.get("classification") == "NOISE"])
+        rows.append(f"<div class='footer'>+ {noise_count} noise-repos filtered. Full data in {OUTPUT_FILE}.</div>")
+
+    rows.append("</div></body></html>")
+    return "\n".join(rows)
+
+def build_repos_text(repos, stats, extra_stats=None):
+    lines = [
+        f"**GitHub Radar** · {DAY_LABEL} {datetime.now(timezone.utc).strftime('%H:%M')} ({MODE.upper()})",
+        f"{stats['after_dedup']} repos · {stats['scored']} scored · " +
+        f"{len([r for r in repos if r['classification']=='ADOPT'])} ADOPT · " +
+        f"{len([r for r in repos if r['classification']=='EXTRACT'])} EXTRACT · " +
+        f"{len([r for r in repos if r['classification']=='PLUGIN/SKILL'])} PLUGIN/SKILL · " +
+        f"{len([r for r in repos if r['classification']=='FORK/PRODUCT'])} FORK/PRODUCT · " +
+        f"{len([r for r in repos if r['classification']=='INSPIRATION'])} INSPIRATION",
+        "",
+    ]
+    if extra_stats:
+        if MODE == "daily":
+            lines.append(f"**Cache:** {extra_stats.get('total',0)} repos cached · "
+                        f"{extra_stats.get('new_api',0)} new API finds · "
+                        f"{extra_stats.get('new_trending',0)} from trending")
+            lines.append("")
+        elif MODE == "weekly":
+            lines.append(f"**Weekly re-evaluation:** {extra_stats.get('re_evaluated',0)} repos checked · "
+                        f"{extra_stats.get('with_new_activity',0)} with new activity · "
+                        f"{extra_stats.get('new_finds',0)} new finds")
+            lines.append("")
+
+    lines.append("---REPOS---")
+    for r in repos:
+        if r.get("classification") == "NOISE":
+            continue
+        prefix = "[NEW ACTIVITY] " if r.get("new_activity") else "[NEW FIND] " if r.get("new_find") else ""
+        lines.append(f"{prefix}[REPO] {r['full_name']} | stars:{r['stars']} | lang:{r.get('language','')} | classification:{r['classification']} | score:{r['score']} | url:{r['html_url']}")
+        lines.append(f"  Description: {r.get('description', 'No description')}")
+        lines.append(f"  Why it matters: {r['why']}")
+    lines.append("---END REPOS---")
+    lines.append("")
+
+    lines.append("Top 3 this batch:")
+    shown = 0
+    for r in repos:
+        if r.get("classification") == "NOISE":
+            continue
+        shown += 1
+        if shown > 3:
+            break
+        prefix = "🔄 " if r.get("new_activity") else "🆕 " if r.get("new_find") else ""
+        lines.append(f"{shown}. {prefix}{r['full_name']} — {r['why']}")
+
+    lines.append("")
+    lines.append("Tuning:")
+    for action in stats.get("tuning_actions", []):
+        lines.append(f"  • {action}")
+
+    return "\n".join(lines)
+
+def build_discord_summary(repos, stats, extra_stats=None):
+    """Concise Discord summary — 3-6 lines, mode-aware."""
+    top = [r for r in repos if r.get("classification") not in ("NOISE", None)][:3]
+    lines = [
+        f"**GitHub Radar** · {DAY_LABEL} {datetime.now(timezone.utc).strftime('%H:%M')} ({MODE.upper()})",
+        "",
+    ]
+    if MODE == "daily" and extra_stats and stats.get("after_dedup", 0) == 0:
+        lines.append(f"`{stats['after_dedup']} repos · {stats['scored']} scored` — "
+                    f"`{extra_stats.get('total',0)} cached`")
+        if extra_stats.get("new_trending", 0) > 0:
+            lines.append(f"`{extra_stats['new_trending']} new from trending`")
+    elif MODE == "weekly" and extra_stats:
+        lines.append(f"`{extra_stats.get('re_evaluated',0)} re-evaluated · "
+                    f"{extra_stats.get('with_new_activity',0)} with new activity · "
+                    f"{extra_stats.get('new_finds',0)} new finds`")
+    else:
+        lines.append(f"`{stats['after_dedup']} repos · {stats['scored']} scored`")
+
+    if top:
+        lines.append("")
+        lines.append("**Top picks**")
+        for r in top:
+            prefix = "🔄 " if r.get("new_activity") else "🆕 " if r.get("new_find") else ""
+            lines.append(f"• {prefix}`{r['classification']}` [{r['full_name']}]({r['html_url']}) — ★ {r['stars']}, score {r['score']}")
+
+    lines.append("")
+    adopt = len([r for r in repos if r['classification']=='ADOPT'])
+    extract = len([r for r in repos if r['classification']=='EXTRACT'])
+    plugin = len([r for r in repos if r['classification']=='PLUGIN/SKILL'])
+    forkp = len([r for r in repos if r['classification']=='FORK/PRODUCT'])
+    insp = len([r for r in repos if r['classification']=='INSPIRATION'])
+    lines.append(f"**Summary:** `ADOPT:{adopt} EXTRACT:{extract} PLUGIN/SKILL:{plugin} FORK/PRODUCT:{forkp} INSPIRATION:{insp}`")
+
+    if extra_stats and MODE == "daily":
+        lines.append(f"`{extra_stats.get('total',0)} cached · {extra_stats.get('new_trending',0)} trending`")
+
+    lines.append("")
+    lines.append(f"**Full detail:** MEDIA:{HTML_FILE}")
+    return "\n".join(lines)
 
 # ── Main ───────────────────────────────────────────────────────────
 
+import math  # needed for scoring
 
 def main():
     thresholds = load_thresholds()
     queries = build_queries(thresholds)
-    
-    print(f"CONFIG: star_threshold={thresholds['star_threshold']}, queries={len(queries)}", file=sys.stderr)
-    
-    # Stage 1: Collection
-    all_repos = collect(queries)
-    
+    print(f"CONFIG: mode={MODE}, star_threshold={thresholds['star_threshold']}, queries={len(queries)}", file=sys.stderr)
+
+    # Stage 1: Collection (mode-dependent)
+    if MODE == "weekly":
+        all_repos, extra_stats = collect_weekly(queries)
+    else:
+        all_repos, extra_stats = collect_daily(queries)
+
     # Stage 2: Filter + dedup
     filtered, filter_reasons = filter_repos(all_repos, thresholds)
     final = deduplicate_repos(filtered)
-    
+
     # Score + classify
     scored = classify_all(final)
 
-    # Enrich the top picks' rationale with a cheap model (opt-in, best-effort)
+    # Enrich top picks
     enrich_why(scored)
 
     # Stats
@@ -877,16 +1085,15 @@ def main():
     signal_count = len(final)
     noise_rate_pct = round(noise_count / total * 100, 1) if total > 0 else 0.0
     signal_rate_pct = round(signal_count / total * 100, 1) if total > 0 else 0.0
-    
+
     # Self-tune
     thresholds, tuning_actions = self_tune(thresholds, noise_rate_pct, signal_rate_pct)
     save_thresholds(thresholds)
-    
+
     print("TUNING:", file=sys.stderr)
     for a in tuning_actions:
         print(f"  {a}", file=sys.stderr)
-    
-    # Build stats dict
+
     stats = {
         "total_collected": total,
         "after_filter": len(filtered),
@@ -899,36 +1106,39 @@ def main():
         "tuning_actions": tuning_actions,
         "collection_queries": len(queries),
     }
-    
+
     # Write JSON output
     output = {
         "collected_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "mode": MODE,
         "stats": stats,
         "filter_reasons": {k: len(v) for k, v in filter_reasons.items()},
         "tuning": {"actions": tuning_actions, "thresholds": {k: thresholds[k] for k in ["star_threshold", "noise_keywords", "language_filters"]}},
         "repos": scored,
+        "extra_stats": extra_stats,
     }
     os.makedirs(DATA_DIR, exist_ok=True)
     with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
         json.dump(output, f, indent=2)
-    
+
     # Write HTML report + structured repos text
     os.makedirs(RUNBOOKS_TODAY, exist_ok=True)
-    
-    html = build_html(scored, stats)
+
+    html = build_html(scored, stats, extra_stats)
     with open(HTML_FILE, "w", encoding="utf-8") as f:
         f.write(html)
-    
-    repos_txt = build_repos_text(scored, stats)
+
+    repos_txt = build_repos_text(scored, stats, extra_stats)
     with open(REPOS_TXT_FILE, "w", encoding="utf-8") as f:
         f.write(repos_txt)
-    
-    # Print Discord summary + MEDIA tag
-    print(build_discord_summary(scored, stats))
-    
+
+    # Print Discord summary
+    print(build_discord_summary(scored, stats, extra_stats))
+
     # Metrics
     metrics_entry = {
         "date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+        "mode": MODE,
         "total_repos": total,
         "actionable": signal_count,
         "noise": noise_count,
@@ -936,6 +1146,12 @@ def main():
         "noise_rate_pct": noise_rate_pct,
         "star_threshold": thresholds["star_threshold"],
     }
+    if MODE == "weekly" and extra_stats:
+        metrics_entry["re_evaluated"] = extra_stats.get("re_evaluated", 0)
+        metrics_entry["with_new_activity"] = extra_stats.get("with_new_activity", 0)
+        metrics_entry["new_finds"] = extra_stats.get("new_finds", 0)
+    elif extra_stats:
+        metrics_entry["cached_total"] = extra_stats.get("total", 0)
     append_metrics_entry(metrics_entry)
 
 
