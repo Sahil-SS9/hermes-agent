@@ -1579,6 +1579,50 @@ def _build_job_prompt(job: dict, prerun_script: Optional[tuple] = None) -> str:
             continue
         if not loaded.get("success"):
             error = loaded.get("error") or f"Failed to load skill '{skill_name}'"
+            # SKILL REQUEST FALLBACK: Before skipping, attempt to grant the
+            # skill via the skill broker. Cron jobs use their job ID as the
+            # task_id since they don't have a kanban task. The grant is logged
+            # in the profile activity ledger for Denji review.
+            job_id = str(job.get("id") or job.get("name") or "")
+            try:
+                from tools.skill_grants import grant_skill
+                grant_result = grant_skill(
+                    profile="default",
+                    skill=skill_name,
+                    task_id=f"cron:{job_id}",
+                    reason=f"Cron job '{job.get('name', job_id)}' requires skill '{skill_name}'",
+                )
+                if grant_result.get("granted"):
+                    logger.info(
+                        "Cron job '%s': auto-granted skill '%s', retrying skill_view",
+                        job.get("name", job.get("id")), skill_name,
+                    )
+                    # Retry skill_view after grant
+                    try:
+                        loaded = json.loads(skill_view(skill_name))
+                    except (json.JSONDecodeError, TypeError):
+                        loaded = {}
+                    if loaded.get("success"):
+                        try:
+                            bump_use(skill_name)
+                        except Exception:
+                            pass
+                        content = str(loaded.get("content") or "").strip()
+                        if parts:
+                            parts.append("")
+                        parts.extend(
+                            [
+                                f'[IMPORTANT: The user has invoked the "{skill_name}" skill, indicating they want you to follow its instructions. The full skill content is loaded below.]',
+                                "",
+                                content,
+                            ]
+                        )
+                        continue
+            except Exception as exc:
+                logger.warning(
+                    "Cron job '%s': skill grant failed for '%s': %s",
+                    job.get("name", job.get("id")), skill_name, exc,
+                )
             logger.warning("Cron job '%s': skill not found, skipping — %s", job.get("name", job.get("id")), error)
             skipped.append(skill_name)
             continue

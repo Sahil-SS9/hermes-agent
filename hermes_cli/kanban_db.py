@@ -8184,20 +8184,55 @@ def dispatch_once(
         # A task that requires skills the assignee profile cannot see
         # will fail at startup — reject it now rather than wasting a
         # worker spawn cycle and hitting the failure breaker.
+        #
+        # SKILL REQUEST FALLBACK: Before blocking, attempt to grant each
+        # missing skill via the skill broker (task-scoped grant). This
+        # implements the design pattern where profiles have a defined skill
+        # list and borrow skills on-demand from the library. The grant is
+        # logged in the profile activity ledger for Denji review.
         ready_task = get_task(conn, row["id"])
         forced_skills = list(ready_task.skills or []) if ready_task else []
         missing_forced_skills = _missing_worker_forced_skills(
             row["assignee"], forced_skills,
         )
         if missing_forced_skills:
-            result.dispatcher_rejected.append(row["id"])
-            if not dry_run:
-                if _block_missing_forced_skills(
-                    conn, row["id"], row["assignee"], missing_forced_skills,
-                    forced_skills=forced_skills,
-                ):
-                    result.auto_blocked.append(row["id"])
-            continue
+            # Attempt skill grants before blocking
+            still_missing = []
+            for skill_name in missing_forced_skills:
+                try:
+                    from tools.skill_grants import grant_skill
+                    grant_result = grant_skill(
+                        profile=row["assignee"],
+                        skill=skill_name,
+                        task_id=row["id"],
+                        reason=f"Auto-grant for forced skill on task {row['id']}",
+                    )
+                    if grant_result.get("granted"):
+                        _log.info(
+                            "dispatch_once: auto-granted skill '%s' to profile '%s' for task %s",
+                            skill_name, row["assignee"], row["id"],
+                        )
+                    else:
+                        still_missing.append(skill_name)
+                        _log.warning(
+                            "dispatch_once: skill grant denied for '%s' on profile '%s': %s",
+                            skill_name, row["assignee"], grant_result.get("reason", "unknown"),
+                        )
+                except Exception as exc:
+                    still_missing.append(skill_name)
+                    _log.warning(
+                        "dispatch_once: skill grant failed for '%s' on profile '%s': %s",
+                        skill_name, row["assignee"], exc,
+                    )
+            if still_missing:
+                result.dispatcher_rejected.append(row["id"])
+                if not dry_run:
+                    if _block_missing_forced_skills(
+                        conn, row["id"], row["assignee"], still_missing,
+                        forced_skills=forced_skills,
+                    ):
+                        result.auto_blocked.append(row["id"])
+                continue
         # Per-profile concurrency cap (#21582): even if there's global
         # headroom, refuse to spawn for an assignee that's already at
         # its in-flight cap. Prevents one profile's local model / API
