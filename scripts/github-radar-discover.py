@@ -20,6 +20,7 @@ v4.1.0 — Dual-mode, pushed_at tracking, trending as primary source.
 """
 
 import json
+import math
 import os
 import re
 import subprocess
@@ -149,7 +150,8 @@ h2 { color: #fbbf24; margin-top: 28px; font-size: 1.1em; text-transform: upperca
 .stats { display: grid; grid-template-columns: repeat(auto-fit,minmax(140px,1fr)); gap: 8px; margin: 12px 0 20px; }
 .stat { background: #1c1a18; border: 1px solid #34302c; border-radius: 6px; padding: 10px 12px; }
 .stat-label { font-size: 0.75em; color: #a8a29e; text-transform: uppercase; }
-.stat-value { font-size: 1.25em; font-weight: 600; color: #fbbf24; }
+.stat-value { font-size: 1.25em; font-weight: 600;
+color: #fbbf24; }
 .repo { background: #1c1a18; border: 1px solid #34302c; border-radius: 8px; padding: 14px; margin-bottom: 10px; }
 .repo-header { display: flex; align-items: baseline; gap: 8px; margin-bottom: 6px; flex-wrap: wrap; }
 .repo-name { font-weight: 600; color: #fbbf24; font-size: 1.05em; }
@@ -369,17 +371,7 @@ def scrape_trending(url, label):
         with urllib.request.urlopen(req, timeout=15) as resp:
             html = resp.read().decode("utf-8", errors="replace")
 
-        # Parse repo cards from trending page
-        # Match: h2 with link containing owner/name, star count, description
-        card_pattern = re.compile(
-            r'<h2[^>]*class="[^"]*h3[^"]*"[^>]*>.*?'
-            r'href="/ce(\w+)/(\w+)"[^>]*>.*?</h2>.*?'
-            r'class="f6[^"]*text-gray[^"]*"[^>]*>.*?'
-            r'(\d[\d,]*)\s*(?:stars|star).*?'
-            r'(?:<p[^>]*class="[^"]*col-9[^"]*"[^>]*>([^<]*)</p>)?',
-            re.DOTALL
-        )
-        # Simpler fallback: extract owner/name from all links
+        # Extract owner/name from all repo cards
         for match in re.finditer(
             r'<h2[^>]*class="[^"]*h3[^"]*"[^>]*>.*?<a[^>]*href="/([^/"]+)/([^/"]+)"',
             html, re.DOTALL
@@ -822,7 +814,6 @@ def collect_weekly(queries):
         cached_pushed = pushed_map.get(name, "")
         current_pushed = repo.get("pushed_at", "")
         if name in active_cache:
-            re_eval = True
             if current_pushed and cached_pushed and current_pushed > cached_pushed:
                 with_new_activity += 1
                 repo["new_activity"] = True
@@ -964,12 +955,14 @@ def build_html(repos, stats, extra_stats=None):
 def build_repos_text(repos, stats, extra_stats=None):
     lines = [
         f"**GitHub Radar** · {DAY_LABEL} {datetime.now(timezone.utc).strftime('%H:%M')} ({MODE.upper()})",
-        f"{stats['after_dedup']} repos · {stats['scored']} scored · " +
-        f"{len([r for r in repos if r['classification']=='ADOPT'])} ADOPT · " +
-        f"{len([r for r in repos if r['classification']=='EXTRACT'])} EXTRACT · " +
-        f"{len([r for r in repos if r['classification']=='PLUGIN/SKILL'])} PLUGIN/SKILL · " +
-        f"{len([r for r in repos if r['classification']=='FORK/PRODUCT'])} FORK/PRODUCT · " +
-        f"{len([r for r in repos if r['classification']=='INSPIRATION'])} INSPIRATION",
+        (
+            f"{stats['after_dedup']} repos · {stats['scored']} scored · "
+            f"{len([r for r in repos if r['classification']=='ADOPT'])} ADOPT · "
+            f"{len([r for r in repos if r['classification']=='EXTRACT'])} EXTRACT · "
+            f"{len([r for r in repos if r['classification']=='PLUGIN/SKILL'])} PLUGIN/SKILL · "
+            f"{len([r for r in repos if r['classification']=='FORK/PRODUCT'])} FORK/PRODUCT · "
+            f"{len([r for r in repos if r['classification']=='INSPIRATION'])} INSPIRATION"
+        ),
         "",
     ]
     if extra_stats:
@@ -989,7 +982,13 @@ def build_repos_text(repos, stats, extra_stats=None):
         if r.get("classification") == "NOISE":
             continue
         prefix = "[NEW ACTIVITY] " if r.get("new_activity") else "[NEW FIND] " if r.get("new_find") else ""
-        lines.append(f"{prefix}[REPO] {r['full_name']} | stars:{r['stars']} | lang:{r.get('language','')} | classification:{r['classification']} | score:{r['score']} | url:{r['html_url']}")
+        repo_line = (
+            f"{prefix}[REPO] {r['full_name']}"
+            f" | stars:{r['stars']} | lang:{r.get('language','')}"
+            f" | classification:{r['classification']}"
+            f" | score:{r['score']} | url:{r['html_url']}"
+        )
+        lines.append(repo_line)
         lines.append(f"  Description: {r.get('description', 'No description')}")
         lines.append(f"  Why it matters: {r['why']}")
     lines.append("---END REPOS---")
@@ -1055,8 +1054,6 @@ def build_discord_summary(repos, stats, extra_stats=None):
     return "\n".join(lines)
 
 # ── Main ───────────────────────────────────────────────────────────
-
-import math  # needed for scoring
 
 def main():
     thresholds = load_thresholds()
