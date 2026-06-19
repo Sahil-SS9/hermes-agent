@@ -144,7 +144,8 @@ def main():
             print("No novel spawn patterns detected (threshold: 3+ in 14 days)")
         return
 
-    if "--report" in sys.argv:
+    # Default to --report when run with no args (cron no_agent mode)
+    if "--report" in sys.argv or len(sys.argv) == 1:
         report = produce_report()
         if report:
             report_path = LOGBOARD / f"spawn-patterns-{dt.datetime.now().strftime('%Y%m%d')}.md"

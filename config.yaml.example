@@ -1,3 +1,9 @@
+# ═══════════════════════════════════════════════════════════════
+# LIVE CONFIG WARNING
+# This file contains host-specific paths, Discord IDs, and MCP configs
+# for Sahil's KenseiAgent deployment. It is NOT a clean example template.
+# Do not push to public repos without sanitising first.
+# ═══════════════════════════════════════════════════════════════
 model:
   base_url: https://ollama.com/v1
   default: deepseek-v4-flash
@@ -639,18 +645,18 @@ model_catalog:
   url: https://hermes-agent.nousresearch.com/docs/api/model-catalog.json
   ttl_hours: 1
   providers:
-  nous:
-    request_timeout_seconds: 1800
-    stale_timeout_seconds: 300
-  ollama-cloud:
-    request_timeout_seconds: 1800
-    stale_timeout_seconds: 300
-  openai-codex:
-    request_timeout_seconds: 1800
-    stale_timeout_seconds: 300
-  openrouter:
-    request_timeout_seconds: 1800
-    stale_timeout_seconds: 300
+    nous:
+      request_timeout_seconds: 1800
+      stale_timeout_seconds: 300
+    ollama-cloud:
+      request_timeout_seconds: 1800
+      stale_timeout_seconds: 300
+    openai-codex:
+      request_timeout_seconds: 1800
+      stale_timeout_seconds: 300
+    openrouter:
+      request_timeout_seconds: 1800
+      stale_timeout_seconds: 300
 network:
   force_ipv4: false
 gateway:

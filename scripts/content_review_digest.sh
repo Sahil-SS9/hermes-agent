@@ -17,5 +17,6 @@ set +a
 export PYTHONPATH="${CE}:${PYTHONPATH:-}"
 
 # Wrap in timeout to prevent FAL/Discord hangs from blocking the cron slot
-# 150s gives FAL enough time for image generation (was 90s, too short)
-timeout 150 /home/kensei/repos/KenseiAgent/.venv/bin/python /home/kensei/repos/KenseiAgent/content_engine/content_engine.py review-digest --since-minutes 75 --max 3
+# 300s matches the cron-level timeout; FAL image generation can take 90-300s
+# when the API is slow (not locked — locked returns 403 instantly)
+timeout 600 /home/kensei/repos/KenseiAgent/.venv/bin/python /home/kensei/repos/KenseiAgent/content_engine/content_engine.py review-digest --since-minutes 75 --max 3
