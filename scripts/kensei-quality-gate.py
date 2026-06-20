@@ -286,8 +286,11 @@ def main():
     logfile = OUT_DIR / f"quality-gate-{now.strftime('%d-%m-%y-%H%M')}.json"
     logfile.write_text(json.dumps(log_entry, indent=2, default=str))
 
-    # Silent when nothing to review (stdout feeds cron delivery)
-    if count == 0:
+    # Silent unless QA gates were actually dispatched. An empty review queue,
+    # or a queue where every task needed no gates, is routine pipeline churn:
+    # it should not post to Discord (it rolls into the daily briefing instead).
+    # The logboard JSON above still records every run for auditability.
+    if dispatched == 0:
         sys.exit(0)
 
     print(f"Quality gate · {now.strftime('%d/%m/%Y %H:%M:%S')}")
