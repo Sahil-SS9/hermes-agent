@@ -1029,6 +1029,11 @@ CREATE TABLE IF NOT EXISTS tasks (
     tenant               TEXT,
     result               TEXT,
     idempotency_key      TEXT,
+    -- Human-escalation target for the daily briefing's "NEEDS YOU" section.
+    -- Set to a recipient slug (e.g. 'sahil') when a job decides this task
+    -- genuinely needs a human decision; NULL means no escalation. Read by
+    -- the briefing to list every still-open task awaiting a person.
+    escalation_target    TEXT,
     -- Unified consecutive-failure counter. Incremented on spawn
     -- failure, timeout, or crash; reset only on successful completion.
     -- The circuit breaker in _record_task_failure trips when this
@@ -1694,6 +1699,10 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
     if "idempotency_key" not in cols:
         _add_column_if_missing(
             conn, "tasks", "idempotency_key", "idempotency_key TEXT"
+        )
+    if "escalation_target" not in cols:
+        _add_column_if_missing(
+            conn, "tasks", "escalation_target", "escalation_target TEXT"
         )
     # ``idx_tasks_idempotency`` is created unconditionally below alongside
     # the other additive-column indexes — see the block after the
@@ -5906,6 +5915,75 @@ def edit_task_skills(
         "applies_on_next_spawn": status == "running",
         "status": status,
     }
+
+
+def set_escalation_target(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    target: Optional[str],
+    author: str,
+) -> dict:
+    """Set or clear a task's ``escalation_target``. Scope-locked to that column.
+
+    ``target`` is a recipient slug (e.g. ``'sahil'``) when a job decides the
+    task genuinely needs a human; pass ``None``/empty to clear it once resolved.
+    The daily briefing's "NEEDS YOU" section reads every still-open task whose
+    ``escalation_target`` is set, so this is the single structured signal that
+    drives human escalation. Allowed on any non-terminal status.
+    """
+    cleaned = (str(target).strip() or None) if target is not None else None
+    with write_txn(conn):
+        row = conn.execute(
+            "SELECT status, escalation_target FROM tasks WHERE id = ?", (task_id,),
+        ).fetchone()
+        if not row:
+            raise ValueError(f"unknown task {task_id!r}")
+        status = row["status"]
+        if status in {"done", "archived"}:
+            raise ValueError(
+                f"cannot set escalation_target on terminal task (status={status!r})"
+            )
+        if row["escalation_target"] == cleaned:
+            return {"ok": True, "escalation_target": cleaned, "changed": False,
+                    "status": status}
+        conn.execute(
+            "UPDATE tasks SET escalation_target = ? WHERE id = ?",
+            (cleaned, task_id),
+        )
+        if author:
+            _add_comment_inline(
+                conn, task_id,
+                author=author,
+                body=f"edit: escalation_target <- {cleaned!r}",
+            )
+        _append_event(
+            conn, task_id, "edited",
+            {"fields": ["escalation_target"], "escalation_target": cleaned,
+             "author": author},
+        )
+    return {"ok": True, "escalation_target": cleaned, "changed": True,
+            "status": status}
+
+
+def list_open_escalations(conn: sqlite3.Connection) -> list[dict]:
+    """Return non-terminal tasks awaiting a human, for the briefing NEEDS-YOU list.
+
+    A task is "open and escalated" when ``escalation_target`` is set and the
+    status is not ``done``/``archived``. Ordered oldest-first so the briefing
+    surfaces the longest-waiting decisions at the top.
+    """
+    rows = conn.execute(
+        """
+        SELECT id, title, status, assignee, escalation_target,
+               status_reason, priority, created_at
+        FROM tasks
+        WHERE escalation_target IS NOT NULL
+          AND status NOT IN ('done', 'archived')
+        ORDER BY created_at ASC
+        """
+    ).fetchall()
+    return [dict(r) for r in rows]
 
 
 def _pin_sticky_reviewers(conn: sqlite3.Connection) -> int:
