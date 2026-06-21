@@ -573,6 +573,24 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
     )
     p_unblock.add_argument("task_ids", nargs="+")
 
+    p_escalate = sub.add_parser(
+        "escalate",
+        help="Flag a task as needing Sahil's decision (appears in the daily briefing's NEEDS YOU). Use --clear to resolve.",
+    )
+    p_escalate.add_argument("task_ids", nargs="+")
+    p_escalate.add_argument(
+        "--target", default="sahil",
+        help="Escalation recipient slug (default: sahil).",
+    )
+    p_escalate.add_argument(
+        "--reason", default=None,
+        help="One-line reason, recorded as a comment. Quote multi-word reasons.",
+    )
+    p_escalate.add_argument(
+        "--clear", action="store_true",
+        help="Clear the escalation instead of setting it.",
+    )
+
     p_pgate = sub.add_parser(
         "profile-gate",
         help="Review profile create/delete approvals (PROFILE-GATE manual path)",
@@ -969,6 +987,7 @@ def kanban_command(args: argparse.Namespace) -> int:
             "block":    _cmd_block,
             "schedule": _cmd_schedule,
             "unblock":  _cmd_unblock,
+            "escalate": _cmd_escalate,
             "profile-gate": _cmd_profile_gate,
             "promote":  _cmd_promote,
             "promote-backlog":  _cmd_promote_backlog,
@@ -2162,6 +2181,35 @@ def _cmd_unblock(args: argparse.Namespace) -> int:
                 print(f"cannot unblock {tid} (not blocked/scheduled?)", file=sys.stderr)
             else:
                 print(f"Unblocked {tid}" + (f": {reason}" if reason else ""))
+    return 0 if not failed else 1
+
+
+def _cmd_escalate(args: argparse.Namespace) -> int:
+    ids = list(args.task_ids or [])
+    if not ids:
+        print("at least one task_id is required", file=sys.stderr)
+        return 1
+    clearing = bool(getattr(args, "clear", False))
+    target = None if clearing else (str(getattr(args, "target", "sahil") or "sahil").strip() or "sahil")
+    reason = getattr(args, "reason", None)
+    if reason is not None:
+        reason = reason.strip() or None
+    author = _profile_author()
+    failed: list[str] = []
+    with kb.connect_closing() as conn:
+        for tid in ids:
+            try:
+                if reason and not clearing:
+                    kb.add_comment(conn, tid, author, f"ESCALATE: {reason}")
+                kb.set_escalation_target(conn, tid, target=target, author=author)
+            except ValueError as e:
+                failed.append(tid)
+                print(f"cannot escalate {tid}: {e}", file=sys.stderr)
+                continue
+            if clearing:
+                print(f"Cleared escalation on {tid}")
+            else:
+                print(f"Escalated {tid} -> {target}" + (f": {reason}" if reason else ""))
     return 0 if not failed else 1
 
 

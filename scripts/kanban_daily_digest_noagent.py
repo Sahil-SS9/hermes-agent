@@ -250,4 +250,34 @@ html_path.write_text(html_doc)
 if not html_path.exists():
     raise SystemExit('HTML attachment was not written')
 
+# Optional spoken briefing via on-box Kokoro. Off by default; enable with
+# BRIEFING_AUDIO=1 on the cron job. Runs under the repo .venv (Kokoro is not
+# importable under system python3). Fail-safe: if synthesis fails the briefing
+# still delivers as HTML + text.
+if os.environ.get('BRIEFING_AUDIO', '').strip().lower() in ('1', 'true', 'yes', 'on'):
+    import subprocess
+    import sys
+    spoken = '\n'.join(ln for ln in lines if not ln.startswith('MEDIA:')).strip()
+    mp3_path = out_dir / 'briefing.mp3'
+    txt_path = out_dir / 'briefing-audio.txt'
+    try:
+        txt_path.write_text(spoken, encoding='utf-8')
+        subprocess.run(
+            ['/home/kensei/repos/KenseiAgent/.venv/bin/python',
+             '/home/kensei/.hermes/scripts/briefing_audio.py',
+             str(txt_path), str(mp3_path),
+             os.environ.get('BRIEFING_AUDIO_VOICE', 'kokoro:bf_emma')],
+            check=True, timeout=240,
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+        )
+        if mp3_path.exists():
+            lines.append(f'MEDIA:{mp3_path}')
+    except Exception as e:
+        # Surface the helper's stderr so a synth failure is diagnosable from
+        # the cron log, not just the CalledProcessError repr.
+        detail = getattr(e, 'stderr', b'') or b''
+        if isinstance(detail, bytes):
+            detail = detail.decode('utf-8', 'replace')
+        print(f'briefing audio skipped: {e} {detail}'.strip(), file=sys.stderr)
+
 print('\n'.join(lines).strip())
