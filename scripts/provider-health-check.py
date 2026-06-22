@@ -69,7 +69,7 @@ def main():
     if not alerts:
         sys.exit(0)  # Silent when healthy
     
-    print("**🟡 Provider Health Alert — DD/MM/YY HH:MM**\n")
+    print(f"**🟡 Provider Health Alert — {time.strftime('%d/%m/%y %H:%M')}**\n")
     for alert in alerts:
         print(f"• {alert}")
     print(f"\n**Action:** Check provider status pages. If persistent, check API keys and rate limits.")

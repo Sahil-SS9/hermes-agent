@@ -93,7 +93,7 @@ def main():
     if not alerts:
         sys.exit(0)  # Silent when healthy
     
-    print("**🟡 MCP Server Health Alert — DD/MM/YY HH:MM**\n")
+    print(f"**🟡 MCP Server Health Alert — {time.strftime('%d/%m/%y %H:%M')}**\n")
     for alert in alerts:
         print(f"• {alert}")
     print(f"\n**Action:** Check MCP server configuration and restart if needed.")
