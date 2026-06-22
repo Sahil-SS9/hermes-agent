@@ -52,7 +52,8 @@ MAX_BODY_CHARS = 700
 # channel rather than being buried in an attachment, up to Discord's message
 # limit (2000 chars; we leave headroom for the title and severity prefix).
 DISCORD_SAFE_LIMIT = 1850
-_URL_RE = re.compile(r"https?://\S+")
+# Excludes quote/angle chars so a crafted URL can't break out of an HTML attribute.
+_URL_RE = re.compile(r"https?://[^\s\"'<>]+")
 # Summary shown in-channel when content is offloaded.
 SUMMARY_MAX_LINES = 3
 SUMMARY_MAX_CHARS = 320
@@ -193,7 +194,9 @@ def _linkify_html(text: str) -> str:
         while raw and raw[-1] in ").,;]":
             trail = raw[-1] + trail
             raw = raw[:-1]
-        return f'<a href="{raw}">{raw}</a>{trail}'
+        # Escape the URL for the attribute/text context — cron stdout is untrusted.
+        safe = _html.escape(raw, quote=True)
+        return f'<a href="{safe}">{safe}</a>{trail}'
 
     out, last = [], 0
     for m in _URL_RE.finditer(text):

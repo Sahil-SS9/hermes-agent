@@ -159,3 +159,16 @@ def test_oversized_links_offload_to_clickable_html():
     assert media.endswith(".html")
     html = Path(media).read_text()
     assert '<a href="https://example.com/very/long/path/0">' in html
+
+
+def test_html_attachment_no_xss_breakout():
+    payload = '🟡 t\n' + "\n".join(
+        f'see https://evil.com/{i}"><script>alert(1)</script> and more text line {i}'
+        for i in range(40)
+    )
+    d = oe.build_envelope(JOB, payload)
+    media = [l[6:] for l in d.text.splitlines() if l.startswith("MEDIA:")][0]
+    html = Path(media).read_text()
+    # No live script tag and no unescaped attribute breakout survived.
+    assert "<script>" not in html
+    assert '"><script' not in html
