@@ -452,7 +452,16 @@ def main() -> int:
         print("[SILENT]")
         return 0
 
-    print(f"Worker Failure Analysis · {display_now(scan_time)}")
+    # Lead with a severity marker so the delivery envelope can route correctly:
+    # 🔴 actionable (live critical, or DB integrity/scan failures) pings; 🟡 live
+    # non-critical posts quietly; 🟢 historical-only drift goes to the briefing.
+    if integrity_failures or scan_errors or live_by_severity.get("critical"):
+        marker = "🔴"
+    elif live_findings:
+        marker = "🟡"
+    else:
+        marker = "🟢"
+    print(f"{marker} Worker Failure Analysis · {display_now(scan_time)}")
     print(
         f"DBs scanned: {len(dbs)} · tasks: {payload['summary']['task_count']} · "
         f"live findings: {len(live_findings)} · historical terminal drift: {len(historical_findings)}"

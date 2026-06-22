@@ -19,7 +19,12 @@ from config import IMAGE_PROVIDERS
 def _pollinations_generate(prompt: str, width: int = 1024, height: int = 1024, seed: int = None) -> bytes:
     """Pollinations.ai — free, no API key, poor quality. Last resort fallback."""
     seed = seed or int(time.time())
-    encoded = quote(prompt)
+    # Pollinations takes the prompt in the URL path. Art-directed prompts can be
+    # thousands of chars (full style guides with markdown tables), which blows
+    # past the server's URL limit and 404s — defeating the free fallback. Collapse
+    # whitespace and cap to a concise lead so the fallback actually fires.
+    clean = " ".join(str(prompt).split())[:480]
+    encoded = quote(clean)
     url = f"https://image.pollinations.ai/prompt/{encoded}?width={width}&height={height}&nologo=true&seed={seed}"
     resp = requests.get(url, timeout=120)
     resp.raise_for_status()
