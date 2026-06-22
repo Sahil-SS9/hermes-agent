@@ -178,6 +178,12 @@ def generate_image(
                     return _download(url, output_dir, model, filename) if url else None
                 print(f"FAL sync: no images (keys {list(r.json().keys())[:8]})")
                 return None
+            # Auth/permission/billing errors are not transient: retrying just
+            # multiplies identical noise into #content and burns time. Fail fast
+            # with a single concise line and stop attempting this model.
+            if r.status_code in (401, 402, 403):
+                print(f"FAL {model}: {r.status_code} auth/billing rejected (check FAL_KEY / spend cap)")
+                return None
             if r.status_code not in (202, 429):
                 print(f"FAL sync failed: {r.status_code} {r.text[:160]}")
             # 202/429/other -> queue fallback below
@@ -269,6 +275,9 @@ def generate_image_edit(
                     url = imgs[0].get("url") if isinstance(imgs[0], dict) else imgs[0]
                     return _download(url, output_dir, "edit", filename) if url else None
                 print(f"FAL edit: no images (keys {list(r.json().keys())[:8]})")
+                return None
+            if r.status_code in (401, 402, 403):
+                print(f"FAL edit: {r.status_code} auth/billing rejected (check FAL_KEY / spend cap)")
                 return None
             if r.status_code not in (202, 429):
                 print(f"FAL edit failed: {r.status_code} {r.text[:160]}")

@@ -42,9 +42,20 @@ def now() -> dt.datetime:
     return dt.datetime.now(TZ)
 
 
-def fmt_ts(value: int | None) -> str | None:
+def fmt_ts(value: int | str | None) -> str | None:
     if not value:
         return None
+    # Board DBs store created_at inconsistently: some rows are int epochs, some
+    # are ISO/text strings. Coerce defensively so a single string row cannot
+    # crash the whole board scan (which previously surfaced as a false
+    # "Integrity: FAIL" in the Discord summary).
+    if not isinstance(value, (int, float)):
+        text = str(value).strip()
+        try:
+            value = float(text)
+        except (TypeError, ValueError):
+            # Already a human/ISO timestamp; pass it through untouched.
+            return text
     # Historic rows may be seconds; defensive support for ms.
     seconds = value / 1000 if value > 10_000_000_000 else value
     return dt.datetime.fromtimestamp(seconds, tz=TZ).strftime("%d/%m/%Y %H:%M:%S")

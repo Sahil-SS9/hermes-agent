@@ -109,7 +109,9 @@ def generate_draft_image(
         print(f"[draft_media] pollinations (free) saved: {fpath} ({len(img_bytes)} bytes)")
         return str(fpath)
     except Exception as exc:  # noqa: BLE001
-        print(f"[draft_media] pollinations failed: {exc}")
+        # The pollinations error embeds the full prompt as a URL-encoded query
+        # string (thousands of chars); truncate so it doesn't flood the log/digest.
+        print(f"[draft_media] pollinations failed: {str(exc)[:160]}")
 
     return None
 

@@ -2156,6 +2156,9 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
                     )
             except Exception as e:
                 logger.debug("Job '%s': failed to load credential pool for %s: %s", job_id, runtime_provider, e)
+        # Set environment variables for llm_generate module to use the job's provider/model
+        os.environ["CONTENT_LLM_BASE_URL"] = runtime.get("base_url", "")
+        os.environ["CONTENT_LLM_MODEL"] = model
 
         # Initialize MCP servers so configured mcp_servers are available to
         # the agent's tool registry before AIAgent is constructed. Without
@@ -2528,6 +2531,38 @@ def tick(verbose: bool = True, adapters=None, loop=None, sync: bool = True) -> i
                 if should_deliver and success and SILENT_MARKER in deliver_content.strip().upper():
                     logger.info("Job '%s': agent returned %s — skipping delivery", job["id"], SILENT_MARKER)
                     should_deliver = False
+
+                # Unified output envelope: severity tiers (🔴 ACT / 🟡 FYI /
+                # 🟢 LOG), attachment offload for walls of text, and 12h dedup.
+                # Applied here at the single delivery choke point so SCRIPT jobs
+                # are governed too — the cron-output-contract skill only reaches
+                # agent jobs. Fail-safe: any error falls back to raw delivery.
+                if should_deliver and str(job.get("deliver", "local")).lower() != "local":
+                    try:
+                        from cron.output_envelope import build_envelope
+                        env_cfg = {}
+                        try:
+                            env_cfg = (load_config().get("cron", {}) or {}).get("envelope", {}) or {}
+                        except Exception:
+                            pass
+                        if env_cfg.get("enabled", True):
+                            decision = build_envelope(
+                                job,
+                                deliver_content,
+                                success=success,
+                                mention=env_cfg.get("mention", "@Sahil"),
+                                enable_dedup=env_cfg.get("dedup", True),
+                            )
+                            if decision.suppress:
+                                logger.info(
+                                    "Job '%s': envelope suppressed delivery (%s)",
+                                    job["id"], decision.reason,
+                                )
+                                should_deliver = False
+                            elif decision.text:
+                                deliver_content = decision.text
+                    except Exception as ee:
+                        logger.warning("Job '%s': envelope failed, delivering raw (%s)", job["id"], ee)
 
                 delivery_error = None
                 if should_deliver:
