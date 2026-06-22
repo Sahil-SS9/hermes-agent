@@ -48,6 +48,11 @@ DEDUP_WINDOW = dt.timedelta(hours=12)
 # channel only ever carries title + summary.
 MAX_BODY_LINES = 8
 MAX_BODY_CHARS = 700
+# Link-bearing output (deal scans, job listings) keeps its links CLICKABLE in the
+# channel rather than being buried in an attachment, up to Discord's message
+# limit (2000 chars; we leave headroom for the title and severity prefix).
+DISCORD_SAFE_LIMIT = 1850
+_URL_RE = re.compile(r"https?://\S+")
 # Summary shown in-channel when content is offloaded.
 SUMMARY_MAX_LINES = 3
 SUMMARY_MAX_CHARS = 320
@@ -169,7 +174,7 @@ def _action_line(content: str) -> Optional[str]:
 def _gc_detail() -> None:
     """Drop offloaded detail files past the retention window."""
     cutoff = (_now() - DETAIL_RETENTION).timestamp()
-    for old in DETAIL_DIR.glob("*.md"):
+    for old in list(DETAIL_DIR.glob("*.html")) + list(DETAIL_DIR.glob("*.md")):
         try:
             if old.stat().st_mtime < cutoff:
                 old.unlink()
@@ -177,22 +182,54 @@ def _gc_detail() -> None:
             pass
 
 
+def _linkify_html(text: str) -> str:
+    """Escape HTML then turn bare URLs into clickable anchors."""
+    import html as _html
+
+    def _repl(m: re.Match) -> str:
+        raw = m.group(0)
+        # Trailing punctuation shouldn't be swallowed into the href.
+        trail = ""
+        while raw and raw[-1] in ").,;]":
+            trail = raw[-1] + trail
+            raw = raw[:-1]
+        return f'<a href="{raw}">{raw}</a>{trail}'
+
+    out, last = [], 0
+    for m in _URL_RE.finditer(text):
+        out.append(_html.escape(text[last:m.start()]))
+        out.append(_repl(m))
+        last = m.end()
+    out.append(_html.escape(text[last:]))
+    return "".join(out)
+
+
 def _write_detail(job: dict, severity: str, content: str) -> Path:
+    """Write the offloaded detail as clickable HTML (links stay usable)."""
     DETAIL_DIR.mkdir(parents=True, exist_ok=True)
     _gc_detail()
     now = _now()
     name = _job_title(job)
     safe = re.sub(r"[^a-zA-Z0-9_-]+", "-", name).strip("-").lower() or "cron"
-    path = (DETAIL_DIR / f"{safe}-{now.strftime('%Y%m%d-%H%M%S')}.md").resolve()
+    path = (DETAIL_DIR / f"{safe}-{now.strftime('%Y%m%d-%H%M%S')}.html").resolve()
     # Defence in depth: never write outside DETAIL_DIR even if the slug or a
     # symlinked dir tries to escape.
     if path.parent != DETAIL_DIR.resolve():
-        path = DETAIL_DIR.resolve() / f"cron-{now.strftime('%Y%m%d-%H%M%S')}.md"
+        path = DETAIL_DIR.resolve() / f"cron-{now.strftime('%Y%m%d-%H%M%S')}.html"
     body = content.strip()
     if len(body.encode("utf-8")) > MAX_DETAIL_BYTES:
         body = body.encode("utf-8")[:MAX_DETAIL_BYTES].decode("utf-8", "ignore") + "\n\n[truncated]"
-    header = f"# {name} · {_EMOJI[severity]} {severity}\n_{now.strftime('%d/%m/%Y %H:%M %Z')}_\n\n"
-    path.write_text(header + body + "\n", encoding="utf-8")
+    doc = (
+        "<!doctype html><meta charset=utf-8>"
+        "<style>body{font:15px/1.5 -apple-system,Segoe UI,Roboto,sans-serif;"
+        "max-width:760px;margin:2rem auto;padding:0 1rem;color:#1c1c1c}"
+        "h1{font-size:1.2rem} .meta{color:#888;font-size:.85rem}"
+        "pre{white-space:pre-wrap;word-wrap:break-word} a{color:#1a73e8}</style>"
+        f"<h1>{_EMOJI[severity]} {_linkify_html(name)}</h1>"
+        f"<p class=meta>{now.strftime('%d/%m/%Y %H:%M %Z')} · {severity}</p>"
+        f"<pre>{_linkify_html(body)}</pre>\n"
+    )
+    path.write_text(doc, encoding="utf-8")
     return path
 
 
@@ -299,7 +336,15 @@ def build_envelope(
         if _is_duplicate(key):
             return EnvelopeDecision(suppress=True, severity=severity, reason="deduped-12h")
 
-    offload = len(_nonempty_lines(body)) > MAX_BODY_LINES or len(body) > MAX_BODY_CHARS
+    # Link-bearing output (deal scans, job alerts) must keep its links clickable
+    # in the channel, so it stays inline up to Discord's message limit instead of
+    # being buried in an attachment. Only genuinely oversized link output, or
+    # link-free walls, get offloaded.
+    head_len = len(mention) + len(plain_title) + 8
+    if _URL_RE.search(body):
+        offload = head_len + len(body) > DISCORD_SAFE_LIMIT
+    else:
+        offload = len(_nonempty_lines(body)) > MAX_BODY_LINES or len(body) > MAX_BODY_CHARS
 
     parts: list[str] = []
     if severity == ACT:

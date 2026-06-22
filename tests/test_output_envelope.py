@@ -132,7 +132,30 @@ def test_detail_file_size_capped(monkeypatch):
 def test_deduped_repeat_writes_no_attachment(tmp_path):
     big = "🟡 wall\n" + "\n".join(f"line {i} of detail" for i in range(40))
     oe.build_envelope(JOB, big)
-    before = len(list(oe.DETAIL_DIR.glob("*.md")))
+    before = len(list(oe.DETAIL_DIR.glob("*.html")))
     oe.build_envelope(JOB, big)  # deduped repeat
-    after = len(list(oe.DETAIL_DIR.glob("*.md")))
+    after = len(list(oe.DETAIL_DIR.glob("*.html")))
     assert after == before  # no orphaned detail file from the suppressed repeat
+
+
+def test_links_stay_inline_clickable():
+    deals = "🟡 North Hope rig deals\n" + "\n".join(
+        f"- RTX 3090 #{i} £620 https://cex.co.uk/item/{i}" for i in range(12)
+    )
+    d = oe.build_envelope({"id": "j_deal", "name": "rig-deal-scanner"}, deals)
+    assert not d.suppress
+    # No attachment: the links are in the channel body, clickable.
+    assert "MEDIA:" not in d.text
+    assert "https://cex.co.uk/item/0" in d.text
+    assert "https://cex.co.uk/item/11" in d.text
+
+
+def test_oversized_links_offload_to_clickable_html():
+    deals = "🟡 deals\n" + "\n".join(
+        f"- item {i} https://example.com/very/long/path/{i}" for i in range(120)
+    )
+    d = oe.build_envelope({"id": "j_deal", "name": "rig-deal-scanner"}, deals)
+    media = [l[6:] for l in d.text.splitlines() if l.startswith("MEDIA:")][0]
+    assert media.endswith(".html")
+    html = Path(media).read_text()
+    assert '<a href="https://example.com/very/long/path/0">' in html
