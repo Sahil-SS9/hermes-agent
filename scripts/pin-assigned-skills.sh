@@ -30,8 +30,9 @@ trap 'rm -f "$LOCKFILE"' EXIT
 BASE="$HOME/.hermes"
 SKILL_NAME_RE='^[A-Za-z0-9._-]+$'
 
-echo "=== Kensei Skill Pinning — $(date -u '+%Y-%m-%dT%H:%M:%SZ') ==="
-echo ""
+# Problem lines are buffered; routine successes are NOT printed so a clean run
+# stays silent (the delivery envelope suppresses empty/[SILENT] output).
+declare -a PROBLEMS=()
 
 # ── Helper: extract skill names from a config YAML via Python ──
 # Prints one skill per line to stdout; errors to stderr (not mixed)
@@ -86,8 +87,6 @@ done
 shopt -u nullglob
 
 UNIQUE=${#ALL_SKILLS[@]}
-echo "Collected $UNIQUE unique skills ($TOTAL references)"
-echo ""
 
 # ── Pin each skill ──
 PINNED=0
@@ -97,7 +96,7 @@ FAILED=0
 for SKILL in "${!ALL_SKILLS[@]}"; do
     # Validate skill name format
     if ! [[ "$SKILL" =~ $SKILL_NAME_RE ]]; then
-        echo "  ⚠️  $SKILL — invalid characters, skipping"
+        PROBLEMS+=("  ⚠️  $SKILL — invalid characters, skipping")
         SKIPPED=$((SKIPPED + 1))
         continue
     fi
@@ -106,7 +105,7 @@ for SKILL in "${!ALL_SKILLS[@]}"; do
     SKILL_PATH=$(find "$BASE/skills" -path "*/${SKILL}/SKILL.md" \
         -not -path '*/_archived/*' 2>/dev/null | head -1)
     if [ -z "$SKILL_PATH" ]; then
-        echo "  ⚠️  $SKILL — not found on disk (stale reference)"
+        PROBLEMS+=("  ⚠️  $SKILL — not found on disk (stale reference)")
         SKIPPED=$((SKIPPED + 1))
         continue
     fi
@@ -114,16 +113,19 @@ for SKILL in "${!ALL_SKILLS[@]}"; do
     # Pin via hermes curator — check exit code, not output text
     if hermes curator pin "$SKILL" > /dev/null 2>&1; then
         PINNED=$((PINNED + 1))
-        echo "  ✅ $SKILL"
     else
         FAILED=$((FAILED + 1))
-        echo "  ❌ $SKILL — pin failed (exit code non-zero)"
+        PROBLEMS+=("  ❌ $SKILL — pin failed (exit code non-zero)")
     fi
 done
 
-echo ""
-echo "=== Summary ==="
-echo "Pinned:   $PINNED"
-echo "Skipped:  $SKIPPED (stale or invalid)"
-echo "Failed:   $FAILED"
-echo "Total unique: $UNIQUE"
+# Speak only when there is something to act on; a fully clean run is silent.
+if [ "$FAILED" -gt 0 ]; then
+    echo "🔴 Skill pinning · $FAILED failed, $SKIPPED skipped (of $UNIQUE)"
+    printf '%s\n' "${PROBLEMS[@]}"
+elif [ "$SKIPPED" -gt 0 ]; then
+    echo "🟡 Skill pinning · $SKIPPED stale/invalid ref(s) of $UNIQUE ($PINNED pinned)"
+    printf '%s\n' "${PROBLEMS[@]}"
+else
+    echo "[SILENT]"
+fi

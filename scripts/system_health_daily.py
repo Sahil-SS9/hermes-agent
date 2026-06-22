@@ -309,10 +309,20 @@ def check_stale_crons() -> dict | None:
                 elif "weekly" in display.lower() or "weekly" in j.get("name","").lower():
                     threshold = 10
                 elif expr:
-                    # Parse cron expr: daily = 5 fields with day=*, weekly = specific day
+                    # Parse cron expr by cadence. A weekly job (0 9 * * 1) and a
+                    # daily job (0 9 * * *) both have 5 fields, so field COUNT is
+                    # not enough — inspect day-of-week and day-of-month.
                     parts = expr.split()
                     if len(parts) == 5:
-                        threshold = 3  # default daily
+                        _min, hour, dom, mon, dow = parts
+                        if dow != "*":
+                            threshold = 10  # weekly (fires on a specific weekday)
+                        elif dom != "*":
+                            threshold = 100 if mon != "*" else 35  # quarterly / monthly
+                        elif any(c in hour for c in "*/,-"):
+                            threshold = 1  # sub-daily / hourly
+                        else:
+                            threshold = 3  # daily
                     else:
                         threshold = 7
                 else:
