@@ -183,6 +183,11 @@ def _gc_detail() -> None:
             pass
 
 
+def _html_escape(text: str) -> str:
+    import html as _html
+    return _html.escape(str(text), quote=True)
+
+
 def _linkify_html(text: str) -> str:
     """Escape HTML then turn bare URLs into clickable anchors."""
     import html as _html
@@ -222,14 +227,26 @@ def _write_detail(job: dict, severity: str, content: str) -> Path:
     body = content.strip()
     if len(body.encode("utf-8")) > MAX_DETAIL_BYTES:
         body = body.encode("utf-8")[:MAX_DETAIL_BYTES].decode("utf-8", "ignore") + "\n\n[truncated]"
+    # Dark KENSEI theme — the agreed cron-output-contract palette
+    # (#11100f background, #fbbf24 accent, #f5f5f4 text). Keep it consistent with
+    # the HTML agents generate themselves so attachments look uniform.
     doc = (
-        "<!doctype html><meta charset=utf-8>"
-        "<style>body{font:15px/1.5 -apple-system,Segoe UI,Roboto,sans-serif;"
-        "max-width:760px;margin:2rem auto;padding:0 1rem;color:#1c1c1c}"
-        "h1{font-size:1.2rem} .meta{color:#888;font-size:.85rem}"
-        "pre{white-space:pre-wrap;word-wrap:break-word} a{color:#1a73e8}</style>"
-        f"<h1>{_EMOJI[severity]} {_linkify_html(name)}</h1>"
-        f"<p class=meta>{now.strftime('%d/%m/%Y %H:%M %Z')} · {severity}</p>"
+        "<!doctype html><html lang=en><meta charset=utf-8>"
+        "<meta name=viewport content='width=device-width,initial-scale=1'>"
+        f"<title>{_html_escape(name)}</title>"
+        "<style>"
+        ":root{color-scheme:dark}"
+        "body{font:15px/1.6 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;"
+        "background:#11100f;color:#f5f5f4;max-width:780px;margin:0 auto;padding:2.2rem 1.2rem}"
+        ".hd{border-bottom:1px solid #2a2826;padding-bottom:.9rem;margin-bottom:1.3rem}"
+        "h1{font-size:1.25rem;margin:0;color:#fbbf24;font-weight:650;letter-spacing:.2px}"
+        ".meta{color:#8a847c;font-size:.82rem;margin-top:.35rem}"
+        "pre{white-space:pre-wrap;word-wrap:break-word;font:14px/1.65 ui-monospace,SFMono-Regular,Menlo,monospace;"
+        "background:#1a1816;border:1px solid #2a2826;border-radius:10px;padding:1.1rem 1.2rem;margin:0}"
+        "a{color:#fbbf24;text-decoration:none;border-bottom:1px solid #5a4a16}a:hover{border-bottom-color:#fbbf24}"
+        "</style>"
+        f"<div class=hd><h1>{_EMOJI[severity]} {_linkify_html(name)}</h1>"
+        f"<div class=meta>{now.strftime('%d/%m/%Y %H:%M %Z')} · {severity}</div></div>"
         f"<pre>{_linkify_html(body)}</pre>\n"
     )
     path.write_text(doc, encoding="utf-8")
@@ -343,6 +360,23 @@ def build_envelope(
         key = _dedup_key(job, summary or title)
         if _is_duplicate(key):
             return EnvelopeDecision(suppress=True, severity=severity, reason="deduped-12h")
+
+    # The job already produced its own HTML attachment (the cron-output-contract
+    # skill mandates one). Never offload over it — that would create a second,
+    # competing attachment. Keep our title + summary and pass the MEDIA tag(s)
+    # through untouched so the agent's own artifact is what gets delivered.
+    media_tags = re.findall(r"(?m)^\s*MEDIA:\S.*$", body)
+    if media_tags:
+        clean_body = re.sub(r"(?m)^\s*MEDIA:\S.*$", "", body).strip()
+        summary = _build_summary(clean_body, title)
+        parts = [f"{_EMOJI[ACT]} {mention} · {plain_title}" if severity == ACT else title]
+        if summary:
+            parts.append(summary)
+        parts.extend(t.strip() for t in media_tags)
+        return EnvelopeDecision(
+            suppress=False, text="\n".join(p for p in parts if p).strip(),
+            severity=severity, reason="passthrough-media",
+        )
 
     # Link-bearing output (deal scans, job alerts) must keep its links clickable
     # in the channel, so it stays inline up to Discord's message limit instead of

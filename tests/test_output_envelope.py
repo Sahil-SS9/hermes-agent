@@ -128,7 +128,9 @@ def test_detail_file_size_capped(monkeypatch):
     media = [l[6:] for l in d.text.splitlines() if l.startswith("MEDIA:")][0]
     content = Path(media).read_text()
     assert "[truncated]" in content
-    assert len(content.encode("utf-8")) < 1000
+    # Body is capped to MAX_DETAIL_BYTES; the fixed dark-theme template adds a
+    # constant overhead on top, so allow for that rather than asserting < 1KB.
+    assert len(content.encode("utf-8")) < 2500
 
 
 def test_deduped_repeat_writes_no_attachment(tmp_path):
@@ -161,6 +163,31 @@ def test_oversized_links_offload_to_clickable_html():
     assert media.endswith(".html")
     html = Path(media).read_text()
     assert '<a href="https://example.com/very/long/path/0">' in html
+
+
+def test_attachment_is_dark_theme():
+    body = "🟡 wall\n" + "\n".join(f"detail line {i}" for i in range(40))
+    d = oe.build_envelope(JOB, body)
+    media = [l[6:] for l in d.text.splitlines() if l.startswith("MEDIA:")][0]
+    html = Path(media).read_text()
+    assert "#11100f" in html and "#fbbf24" in html and "#f5f5f4" in html
+    assert "color:#1c1c1c" not in html  # no light-mode regression
+
+
+def test_agent_media_passthrough_no_double_offload():
+    # Agent emitted its own attachment; envelope must not create a second one.
+    body = (
+        "🟡 Mailbox cleaner\nProcessed 14 messages, 2 need replies.\n"
+        + "\n".join(f"thread {i} summary line" for i in range(30))
+        + "\nMEDIA:/home/kensei/.hermes/runbooks/mailbox/main-cleaner.html"
+    )
+    before = len(list(oe.DETAIL_DIR.glob("*.html")))
+    d = oe.build_envelope(JOB, body)
+    after = len(list(oe.DETAIL_DIR.glob("*.html")))
+    assert after == before  # no envelope-generated attachment
+    assert d.reason == "passthrough-media"
+    assert "MEDIA:/home/kensei/.hermes/runbooks/mailbox/main-cleaner.html" in d.text
+    assert "thread 29 summary line" not in d.text  # wall not dumped to channel
 
 
 def test_html_attachment_no_xss_breakout():
