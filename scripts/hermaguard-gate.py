@@ -193,8 +193,9 @@ def main():
     if not flagged:
         sys.exit(0)
 
-    # Deliver report
-    print(f"**Gate 0 (Adversarial Review) Compliance Report**")
+    # Deliver report. Only reached when tasks are missing Gate 0, so this is
+    # always an action item (silent exit above when all compliant).
+    print(f"🔴 **Gate 0 (Adversarial Review) Compliance Report**")
     print(f"Window: last {WINDOW_HOURS}h  |  {now.strftime('%d/%m/%Y %H:%M:%S')}")
     print()
     print(f"Scanned: {len(tasks)} tasks  |  Compliant: {len(compliant)}  |  **Missing Gate 0: {len(flagged)}**")

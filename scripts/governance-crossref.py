@@ -235,10 +235,14 @@ def main():
     report_path = LOGBOARD / f"cross-ref-{now.strftime('%Y%m%d')}.md"
     report_path.write_text(report)
 
-    # Print summary for cron delivery
+    # Print summary for cron delivery. Speak only when there is drift to act on;
+    # an all-aligned run is silent (the full report is still written to disk).
     healthy = len([r for r in rows if r["decision"] == "HEALTHY"])
     mismatches = len([r for r in rows if r["mismatch"] != "aligned"])
-    print(f"**Cross-Reference Complete - {now.strftime('%d/%m/%Y %H:%M')}**")
+    if mismatches == 0:
+        print("[SILENT]")
+        return
+    print(f"🔴 Governance cross-ref - {mismatches} mismatch(es) - {now.strftime('%d/%m/%Y %H:%M')}")
     print(f"{len(rows)} profiles | {healthy} healthy | {mismatches} mismatches")
     print(f"Report: {report_path}")
 

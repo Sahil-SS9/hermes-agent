@@ -329,21 +329,27 @@ def log_event(event_type: str, payload: dict) -> None:
 
 
 def main():
+    # Routine status goes to stderr (not delivered). Only genuinely actionable
+    # findings (blocked archivals, skills needing manual review) reach Discord
+    # stdout; an uneventful run is [SILENT].
+    def status(msg):
+        print(msg, file=sys.stderr)
+
     profile_skills = load_profile_skills()
-    print(f"Loaded {len(profile_skills)} skills referenced by profiles")
+    status(f"Loaded {len(profile_skills)} skills referenced by profiles")
 
     report = read_curator_report()
 
     if report is None:
-        print("No curator report found - curator may not have run yet.")
-        print("This is expected on first run (curator is seeded, will run after one interval).")
+        status("No curator report found - curator may not have run yet (expected on first run).")
+        print("[SILENT]")
         return
 
-    print(f"\nCurator report: {report.get('started_at', 'unknown')}")
     c = report.get("counts", {}) or {}
-    print(f"  Checked: {c.get('checked', 0)}")
-    print(f"  Archived: {c.get('archived_this_run', 0)}")
-    print(f"  Added: {c.get('added_this_run', 0)}")
+    status(f"Curator report {report.get('started_at', 'unknown')}: "
+           f"checked={c.get('checked', 0)} archived={c.get('archived_this_run', 0)} added={c.get('added_this_run', 0)}")
+
+    actionable = []  # Discord-bound lines
 
     # ── Validate proposed archivals ──
     archival_overrides = []
@@ -369,9 +375,9 @@ def main():
                     })
 
     if archival_overrides:
-        print(f"\n🚫 ARCHIVAL OVERRIDES ({len(archival_overrides)}):")
+        actionable.append(f"🚫 ARCHIVAL OVERRIDES ({len(archival_overrides)}):")
         for name, profiles in archival_overrides:
-            print(f"  {name} - referenced by: {', '.join(profiles)}")
+            actionable.append(f"  {name} - referenced by: {', '.join(profiles)}")
             log_event("curator.archival_blocked", {
                 "skill": name,
                 "profiles": profiles,
@@ -386,42 +392,44 @@ def main():
         for entry in added_raw
     ]
     classifications = {}
-    if added:
-        print(f"\n📦 NEW SKILLS DETECTED ({len(added)}):")
-        for skill_name in added:
-            lead, confidence = classify_skill(skill_name)
-            classifications[skill_name] = (lead, confidence)
-            if lead and confidence >= 80:
-                ok, msg = add_skill_to_enabled(skill_name, lead)
-                status = "auto-assigned" if ok else f"failed: {msg}"
-                if ok:
-                    ok2, msg2 = set_adoption_status(skill_name, "dynamic")
-                    dyn = "✓" if ok2 else msg2
-                else:
-                    dyn = "skipped (enable failed)"
-                print(f"  {skill_name} → {lead} (conf={confidence}%) [{status}] [dynamic={dyn}]")
-                log_event("curator.skill_dynamic_assigned", {
-                    "skill": skill_name,
-                    "profile": lead,
-                    "confidence": confidence,
-                    "status": status
-                })
+    pending_lines = []
+    for skill_name in added:
+        lead, confidence = classify_skill(skill_name)
+        classifications[skill_name] = (lead, confidence)
+        if lead and confidence >= 80:
+            ok, msg = add_skill_to_enabled(skill_name, lead)
+            status_txt = "auto-assigned" if ok else f"failed: {msg}"
+            if ok:
+                ok2, msg2 = set_adoption_status(skill_name, "dynamic")
+                dyn = "✓" if ok2 else msg2
             else:
-                print(f"  {skill_name} → needs manual review (conf={confidence}%)")
-                log_event("curator.skill_dynamic_unclassified", {
-                    "skill": skill_name,
-                    "confidence": confidence
-                })
+                dyn = "skipped (enable failed)"
+            status(f"  {skill_name} -> {lead} (conf={confidence}%) [{status_txt}] [dynamic={dyn}]")
+            log_event("curator.skill_dynamic_assigned", {
+                "skill": skill_name,
+                "profile": lead,
+                "confidence": confidence,
+                "status": status_txt
+            })
+        else:
+            pending_lines.append(f"  {skill_name} (conf={confidence}%)")
+            log_event("curator.skill_dynamic_unclassified", {
+                "skill": skill_name,
+                "confidence": confidence
+            })
 
-    # ── Summary ──
-    print(f"\n✅ Curator governance hook complete")
-    print(f"   Archival overrides: {len(archival_overrides)}")
-    auto = sum(1 for s in (added or [])
-               if classifications.get(s, (None, 0))[1] >= 80)
-    pending = sum(1 for s in (added or [])
-                  if classifications.get(s, (None, 0))[1] < 80)
-    print(f"   New skills auto-assigned: {auto}")
-    print(f"   New skills pending review: {pending}")
+    if pending_lines:
+        actionable.append(f"📦 NEW SKILLS NEED MANUAL REVIEW ({len(pending_lines)}):")
+        actionable.extend(pending_lines)
+
+    # ── Deliver only when there is something to act on ──
+    if actionable:
+        sev = "🔴" if archival_overrides else "🟡"
+        print(f"{sev} Curator governance - {len(archival_overrides)} blocked archival(s), "
+              f"{len(pending_lines)} skill(s) need review")
+        print("\n".join(actionable))
+    else:
+        print("[SILENT]")
 
 
 if __name__ == "__main__":
