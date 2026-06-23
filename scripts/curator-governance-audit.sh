@@ -1,12 +1,12 @@
 #!/bin/bash
-# curator-governance-audit.sh — One-shot validation checkpoint
+# curator-governance-audit.sh - One-shot validation checkpoint
 # Captures the full state of the curator governance layer after implementation.
-# Session context: 09/06/26 — implement Denji-as-curator-extension architecture
+# Session context: 09/06/26 - implement Denji-as-curator-extension architecture
 #
 # Architecture decisions (this session):
 # 1. Re-enabled Hermes curator with Kensei config (45d stale, 120d archive)
-# 2. Created pin-assigned-skills.sh — daily proactive pinning of 118 profile-referenced skills
-# 3. Created curator-governance-hook.py — weekly reactive validation of curator decisions
+# 2. Created pin-assigned-skills.sh - daily proactive pinning of 118 profile-referenced skills
+# 3. Created curator-governance-hook.py - weekly reactive validation of curator decisions
 # 4. Applied simplify-swarm (SAFE + CAREFUL tiers) + hermaguard (all CRITICAL + HIGH fixes)
 # 5. Key fixes: atomic writes, error logging, concurrency lockfile, shell word-splitting, glob→rglob
 #
@@ -18,8 +18,8 @@ TIMESTAMP=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
 DATE=$(date -u '+%d/%m/%y')
 
 echo "═══════════════════════════════════════════"
-echo "  CURATOR GOVERNANCE AUDIT — $DATE"
-echo "  Session: 09/06/26 — curator extension implementation"
+echo "  CURATOR GOVERNANCE AUDIT - $DATE"
+echo "  Session: 09/06/26 - curator extension implementation"
 echo "═══════════════════════════════════════════"
 echo ""
 
@@ -89,7 +89,7 @@ echo "- Profile references: $STALE_REFS"
 
 # ── Section 3: Governance Hook Validation ──
 echo ""
-echo "## Governance Hook — Dry Run"
+echo "## Governance Hook - Dry Run"
 HOOK_OUTPUT=$(python3 "$BASE/scripts/curator-governance-hook.py" 2>&1)
 HOOK_EXIT=$?
 echo '```'
@@ -99,7 +99,7 @@ echo "- Exit code: $HOOK_EXIT"
 
 # ── Section 4: Pin Script Validation ──
 echo ""
-echo "## Pin Script — Dry Run"
+echo "## Pin Script - Dry Run"
 PIN_OUTPUT=$(bash "$BASE/scripts/pin-assigned-skills.sh" 2>&1)
 PIN_EXIT=$?
 echo '```'
@@ -121,7 +121,7 @@ for lock in "$BASE/.curator_governance_hook.lock" "$BASE/.pin_assigned_skills.lo
     if [ -f "$lock" ]; then
         echo "  ⚠️  Stale lockfile: $lock (will be cleaned on next run)"
     else
-        echo "  ✅ $(basename "$lock") — clean"
+        echo "  ✅ $(basename "$lock") - clean"
     fi
 done
 
@@ -139,10 +139,10 @@ if $OK; then
     echo ""
     echo "System is operational. First live curator run expected within ~24h."
 else
-    echo "- ❌ Issues detected — review output above"
+    echo "- ❌ Issues detected - review output above"
 fi
 
 echo ""
 echo "═══════════════════════════════════════════"
-echo "  AUDIT COMPLETE — $DATE"
+echo "  AUDIT COMPLETE - $DATE"
 echo "═══════════════════════════════════════════"

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Backup Staleness Monitor — alerts when backups are old, missing, or shrinking.
+"""Backup Staleness Monitor - alerts when backups are old, missing, or shrinking.
 
 Silent when healthy (exit 0, empty stdout).
 Outputs alert text when backup age > 48h, size shrinking, or no backups found.
@@ -102,15 +102,15 @@ def main():
         # Check age
         if age_hours > MAX_AGE_HOURS:
             age_days = age_hours / 24
-            alerts.append(f"**Latest backup is {age_days:.1f} days old** — {latest.name} (max: {MAX_AGE_HOURS/24:.0f} days)")
+            alerts.append(f"**Latest backup is {age_days:.1f} days old** - {latest.name} (max: {MAX_AGE_HOURS/24:.0f} days)")
         # Check size trend (shrinking = possible corruption)
         current_size = sum(f.stat().st_size for f in files if f.is_file())
         if state["last_size"] > 0 and current_size > 0:
             if current_size < state["last_size"] * 0.5:  # Shrank by >50%
-                alerts.append(f"**Backup size shrinking** — was {state['last_size']/(1024*1024):.1f}MB, now {current_size/(1024*1024):.1f}MB")
+                alerts.append(f"**Backup size shrinking** - was {state['last_size']/(1024*1024):.1f}MB, now {current_size/(1024*1024):.1f}MB")
         # Check backup count
         if len(files) < 3:
-            alerts.append(f"**Only {len(files)} backup files** — expected multiple rotation copies")
+            alerts.append(f"**Only {len(files)} backup files** - expected multiple rotation copies")
 
     # Perform cleanup
     deleted_daily = cleanup_old_daily()
@@ -134,12 +134,12 @@ def main():
 
     # Output alerts and cleanup info
     if alerts:
-        print(f"**🟡 Backup Staleness Alert — {now.strftime('%d/%m/%y %H:%M')}**\\n")
+        print(f"**🟡 Backup Staleness Alert - {now.strftime('%d/%m/%y %H:%M')}**\\n")
         for alert in alerts:
             print(f"• {alert}")
         print()
     if cleanup_msgs:
-        print(f"**🔧 Backup Cleanup — {now.strftime('%d/%m/%y %H:%M')}**\\n")
+        print(f"**🔧 Backup Cleanup - {now.strftime('%d/%m/%y %H:%M')}**\\n")
         for msg in cleanup_msgs:
             print(f"• {msg}")
         print()

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ================================================================
-# KENSEI Fork Patches — Integrity Verification Script
+# KENSEI Fork Patches - Integrity Verification Script
 # ================================================================
 # Reads ~/.hermes/kensei/fork-patches.yaml and checks every
 # customisation point against the current codebase.
@@ -162,7 +162,7 @@ run_check() {
         echo -e "$FAIL"
         [ -n "$extra" ] && echo "$extra"
         FAILED=$((FAILED + 1))
-        FAILURES+="  ${RED}$name${NC} — $desc"$'\n'
+        FAILURES+="  ${RED}$name${NC} - $desc"$'\n'
     fi
 }
 
@@ -173,12 +173,12 @@ if [ ! -f "$MANIFEST" ]; then
     exit 1
 fi
 
-echo "=== KENSEI Fork Patches — Integrity Check ==="
+echo "=== KENSEI Fork Patches - Integrity Check ==="
 echo "Manifest: $MANIFEST"
 echo "Repo:     $REPO"
 echo ""
 
-# Parse YAML — extract blocks with simple line-based parsing
+# Parse YAML - extract blocks with simple line-based parsing
 current_name=""
 current_file=""
 current_path=""

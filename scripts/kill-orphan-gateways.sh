@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# kill-orphan-gateways.sh — Kill orphaned `gateway run --replace` processes
+# kill-orphan-gateways.sh - Kill orphaned `gateway run --replace` processes
 #
 # Gateway crash/restart loops can spawn `gateway run --replace` processes
-# that don't properly die — they get reparented to PID 1 (init) and accumulate
+# that don't properly die - they get reparented to PID 1 (init) and accumulate
 # as orphans, wasting ~30MB each.
 #
-# v4 — 03/06/26: fix false-positive kills of systemd-managed specialist gateways.
+# v4 - 03/06/26: fix false-positive kills of systemd-managed specialist gateways.
 # v3 introduced delta detection but still classified ALL PPID=1 processes as orphans,
 # which killed 11 legitimate per-profile systemd gateway services every 15 minutes.
 # 
@@ -115,12 +115,12 @@ if ! $DRY_RUN; then
     for pid in "${KILL_LIST[@]}"; do
         # Triple-check: never kill the keeper, even if classification slipped.
         if [[ -n "$PRIMARY" && "$pid" == "$PRIMARY" ]]; then
-            echo "  [SKIP] $pid is PRIMARY — refusing to kill" >&2
+            echo "  [SKIP] $pid is PRIMARY - refusing to kill" >&2
             continue
         fi
         # Quadruple-check: never kill a systemd-tracked PID.
         if [[ -n "${SYSTEMD_PIDS[$pid]+_}" ]]; then
-            echo "  [SKIP] $pid is tracked by a systemd service — refusing to kill" >&2
+            echo "  [SKIP] $pid is tracked by a systemd service - refusing to kill" >&2
             continue
         fi
         rss_kb=$(ps -o rss= -p "$pid" 2>/dev/null | tr -d ' ' || echo 0)
@@ -186,7 +186,7 @@ fi
 # Output (silent when healthy, summary on alert)
 if $SHOULD_ALERT; then
     ts=$(date +%d/%m/%y\ %H:%M)
-    echo "🟡 Gateway Orphan Watchdog — ${ts}"
+    echo "🟡 Gateway Orphan Watchdog - ${ts}"
     echo "Reason: ${ALERT_REASON}"
     echo "Primary: PID ${PRIMARY:-?} (PPID=${PRIMARY_PPID:-?})"
     echo "Total gateway --replace: ${TOTAL}  |  Orphans (PPID=1, not systemd): ${ORPHAN_COUNT}  |  Systemd-kept: ${KEPT_COUNT}"

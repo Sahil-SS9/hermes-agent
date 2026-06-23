@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# KENSEI Content Engine v4 — Daily Digest Runner
+# KENSEI Content Engine v4 - Daily Digest Runner
 # Runs AFTER generation crons (08:50 personal, 09:00 app) to deliver
 # the morning approval packet to Discord #content.
 #
@@ -44,5 +44,5 @@ echo ""
 if [ -n "$LATEST_HTML" ]; then
     echo "MEDIA:${LATEST_HTML}"
 else
-    echo "HTML digest not found — check content_engine.py digest output."
+    echo "HTML digest not found - check content_engine.py digest output."
 fi

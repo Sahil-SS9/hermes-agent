@@ -16,6 +16,6 @@ cd "$REPO"
 
 export PYTHONPATH="$REPO:${PYTHONPATH:-}"
 
-echo "$(date -Iseconds) — Rejecting draft $DRAFT_ID..."
+echo "$(date -Iseconds) - Rejecting draft $DRAFT_ID..."
 python3 content_engine.py reject "$DRAFT_ID"
-echo "$(date -Iseconds) — Done."
+echo "$(date -Iseconds) - Done."

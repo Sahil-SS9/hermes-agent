@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-curator-governance-hook.py — Kensei governance validation layer
+curator-governance-hook.py - Kensei governance validation layer
 Runs AFTER each Hermes curator pass. Validates decisions against Kensei rules.
 
 1. Read curator's last run report
 2. For each skill the curator proposes to archive:
    - Check if it's in any profile's always_skills or enabled_skills
-   - If yes: OVERRIDE — re-pin, log to logboard, flag as blocked
+   - If yes: OVERRIDE - re-pin, log to logboard, flag as blocked
    - If no: allow
 3. For each NEW skill the curator discovered:
    - Classify by category path → lead profile
@@ -77,7 +77,7 @@ def acquire_lock() -> bool:
             warn(f"Another hook instance is running (PID {old_pid}). Exiting.")
             return False
         except (OSError, ValueError):
-            # Stale lock — old process is dead
+            # Stale lock - old process is dead
             LOCK_FILE.unlink(missing_ok=True)
     LOCK_FILE.write_text(str(os.getpid()))
     return True
@@ -126,7 +126,7 @@ def load_profile_skills():
             root = yaml.safe_load(f) or {}
         _extract_skills_from_block(root.get("skills", {}), "root", profile_skills)
     except FileNotFoundError:
-        warn("Root config.yaml not found — no root skills loaded")
+        warn("Root config.yaml not found - no root skills loaded")
     except (yaml.YAMLError, PermissionError) as e:
         warn(f"Failed to parse root config.yaml: {e}")
 
@@ -156,7 +156,7 @@ def classify_skill(skill_name: str):
     """Determine suggested lead profile for an unassigned skill."""
     if not _valid_skill_name(skill_name):
         return None, 0
-    # Use Path.rglob instead of subprocess find — faster, no injection risk
+    # Use Path.rglob instead of subprocess find - faster, no injection risk
     # **/ matches at any directory depth (some skills are top-level, some nested)
     matches = [
         p for p in SKILLS_DIR.glob(f"**/{skill_name}/SKILL.md")
@@ -273,7 +273,7 @@ def set_adoption_status(skill_name: str, status: str):
         if content.startswith("---"):
             end_idx = content.find("---", 3)
             if end_idx == -1:
-                return False, "malformed frontmatter — no closing ---"
+                return False, "malformed frontmatter - no closing ---"
             frontmatter = content[3:end_idx]
             body = content[end_idx + 3:]
 
@@ -289,7 +289,7 @@ def set_adoption_status(skill_name: str, status: str):
 
             new_content = f"---{frontmatter}---{body}"
         else:
-            # No frontmatter at all — prepend one
+            # No frontmatter at all - prepend one
             new_content = f"---\nadoption_status: {status}\n---\n{content}"
 
         # Atomic write
@@ -310,7 +310,7 @@ def set_adoption_status(skill_name: str, status: str):
 
 
 def log_event(event_type: str, payload: dict) -> None:
-    """Log governance event to the logboard. Best-effort — never crashes."""
+    """Log governance event to the logboard. Best-effort - never crashes."""
     try:
         today = datetime.now(timezone.utc).strftime("%Y%m%d")
         log_path = GOVERNANCE_LOG / f"curator-governance-{today}.mdl"
@@ -335,7 +335,7 @@ def main():
     report = read_curator_report()
 
     if report is None:
-        print("No curator report found — curator may not have run yet.")
+        print("No curator report found - curator may not have run yet.")
         print("This is expected on first run (curator is seeded, will run after one interval).")
         return
 
@@ -371,7 +371,7 @@ def main():
     if archival_overrides:
         print(f"\n🚫 ARCHIVAL OVERRIDES ({len(archival_overrides)}):")
         for name, profiles in archival_overrides:
-            print(f"  {name} — referenced by: {', '.join(profiles)}")
+            print(f"  {name} - referenced by: {', '.join(profiles)}")
             log_event("curator.archival_blocked", {
                 "skill": name,
                 "profiles": profiles,

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""MCP Server Health Check — probes configured MCP servers for responsiveness.
+"""MCP Server Health Check - probes configured MCP servers for responsiveness.
 
 Silent when healthy (exit 0, empty stdout).
 Outputs alert text when a server is unreachable or slow.
@@ -13,7 +13,7 @@ from pathlib import Path
 HERMES = Path("/home/kensei/.hermes")
 
 # MCP servers to check (name, pgrep -f pattern matching real process cmdline)
-# v2 — fix 03/06/26: previous patterns ("outlook-mcp-server",
+# v2 - fix 03/06/26: previous patterns ("outlook-mcp-server",
 # "google-workspace-mcp-server", "mailbox-cleaner-mcp") did not match the
 # actual node command lines spawned by the gateway. They returned 0 hits
 # every run and produced false "process not found" alerts whenever a real
@@ -52,7 +52,7 @@ def check_process_alive(pattern):
 
 def check_mcp_port(name):
     """Check if MCP server is listening on expected port."""
-    # Most MCP servers use stdio, not TCP — so we check process existence
+    # Most MCP servers use stdio, not TCP - so we check process existence
     return check_process_alive(name)
 
 def check_mcp_log_errors(name):
@@ -82,18 +82,18 @@ def main():
             # Check if it's expected to be running (not all MCPs run all the time)
             errors = check_mcp_log_errors(name)
             if errors:
-                alerts.append(f"**{name}** — process not found, recent errors: {'; '.join(errors[:2])}")
-            # Don't alert if process just isn't configured/started — only alert on errors
+                alerts.append(f"**{name}** - process not found, recent errors: {'; '.join(errors[:2])}")
+            # Don't alert if process just isn't configured/started - only alert on errors
     
     # Also check for orphaned MCP processes (running but not parented to a gateway)
     if running_mcps:
-        # Just report count — the orphan watchdog handles killing
+        # Just report count - the orphan watchdog handles killing
         pass
     
     if not alerts:
         sys.exit(0)  # Silent when healthy
     
-    print(f"**🟡 MCP Server Health Alert — {time.strftime('%d/%m/%y %H:%M')}**\n")
+    print(f"**🟡 MCP Server Health Alert - {time.strftime('%d/%m/%y %H:%M')}**\n")
     for alert in alerts:
         print(f"• {alert}")
     print(f"\n**Action:** Check MCP server configuration and restart if needed.")

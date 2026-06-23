@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Discord Bot Health Monitor — checks all 9 gateway bots for Discord connectivity.
+"""Discord Bot Health Monitor - checks all 9 gateway bots for Discord connectivity.
 
 Silent when healthy (exit 0, empty stdout).
 Outputs alert text when a bot is down or unreachable.
@@ -75,30 +75,30 @@ def main():
     for name, service in SERVICES:
         is_active = check_service(name, service)
         if not is_active:
-            alerts.append(f"**{name}** — service NOT active ({service})")
+            alerts.append(f"**{name}** - service NOT active ({service})")
             continue
         
         has_pid, pid = check_pid(name, service)
         if not has_pid:
-            alerts.append(f"**{name}** — service active but PID {pid} not found in /proc")
+            alerts.append(f"**{name}** - service active but PID {pid} not found in /proc")
             continue
         
         # Check for recent critical errors in logs
         errors = check_gateway_log_errors(name)
         if errors:
             error_summary = "; ".join(errors[:2])
-            alerts.append(f"**{name}** — recent errors: {error_summary}")
+            alerts.append(f"**{name}** - recent errors: {error_summary}")
     
     if not alerts:
         sys.exit(0)  # Silent when healthy
     
     # Output alert
     ts = datetime.now().strftime("%d/%m/%y %H:%M")
-    print(f"**🔴 Discord Bot Health Alert — {ts}**\n")
+    print(f"**🔴 Discord Bot Health Alert - {ts}**\n")
     for alert in alerts:
         print(f"• {alert}")
     print(f"\n**Action:** Check `systemctl status <service>` for affected bots.")
-    sys.exit(0)  # Still exit 0 — we delivered the alert via stdout
+    sys.exit(0)  # Still exit 0 - we delivered the alert via stdout
 
 if __name__ == "__main__":
     main()

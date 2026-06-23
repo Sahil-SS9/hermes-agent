@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Sub-Agent Spawn Logger — hooks into delegate_task events to track
+Sub-Agent Spawn Logger - hooks into delegate_task events to track
 ad-hoc sub-agent creation patterns. Logs novel spawns to the central
 activity ledger. Denji's weekly profile review reads these events
 and surfaces repeated patterns as candidates for permanent profiles.
@@ -20,7 +20,7 @@ HERMES_HOME = Path(os.environ.get("HERMES_HOME", "/home/kensei/.hermes"))
 LEDGER_DB = HERMES_HOME / "data" / "activity-ledger.db"
 LOGBOARD = HERMES_HOME / "governance" / "logboard"
 
-# Known specialist profiles — spawns matching these are routine, not novel
+# Known specialist profiles - spawns matching these are routine, not novel
 KNOWN_PROFILES = {
     "default", "gojo", "kensei-review", "octacon", "octacon-frontend",
     "remii-deep", "wesker", "wesker-ops", "ceecee", "dezzy",
@@ -81,7 +81,7 @@ def log_spawn(profile: str, goal: str, task_id: str = ""):
         conn.commit()
         conn.close()
     except Exception as e:
-        # Fails-open — logging failure shouldn't block the actual spawn
+        # Fails-open - logging failure shouldn't block the actual spawn
         print(f"spawn-logger: failed to log spawn: {e}", file=__import__('sys').stderr)
 
 
@@ -120,7 +120,7 @@ def produce_report(days: int = 14) -> str:
 
     now = dt.datetime.now()
     lines = [
-        f"## Sub-Agent Spawn Patterns — {now.strftime('%d/%m/%Y')}",
+        f"## Sub-Agent Spawn Patterns - {now.strftime('%d/%m/%Y')}",
         "",
         f"Period: past {days} days | Threshold: 3+ spawns per category",
         "",
@@ -139,7 +139,7 @@ def main():
         patterns = detect_patterns()
         if patterns:
             for p in patterns:
-                print(f"{p['category']}: {p['count']} spawns — {p['recommendation']}")
+                print(f"{p['category']}: {p['count']} spawns - {p['recommendation']}")
         else:
             print("No novel spawn patterns detected (threshold: 3+ in 14 days)")
         return
@@ -152,7 +152,7 @@ def main():
             report_path.write_text(report)
             print(report)
         else:
-            print("[SILENT] — no pattern to report")
+            print("[SILENT] - no pattern to report")
         return
 
     print("Usage: spawn-logger.py [--query | --report]")

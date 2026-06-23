@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-KENSEI Quality Gate — picks up tasks in 'review' status and routes through Multi-Gate QA.
+KENSEI Quality Gate - picks up tasks in 'review' status and routes through Multi-Gate QA.
 Runs as no_agent: true cron at 09:00, 13:00, 17:00, 21:00.
 
 NOTE: As of 04/06/26 the canonical review path is the sdlc-review skill loaded
@@ -16,7 +16,7 @@ import os
 import secrets
 from pathlib import Path
 
-# Cross-process write lock — prevents WAL checkpoint races
+# Cross-process write lock - prevents WAL checkpoint races
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 try:
     from kanban_write_lock import write_lock
@@ -73,11 +73,11 @@ def get_required_gates(title, body):
     combined = (title or "") + " " + (body or "")
     combined_lower = combined.lower()
 
-    # Config change — advisory only
+    # Config change - advisory only
     if any(k in combined_lower for k in ["config", "cron", "skill activation", "metadata"]):
         return [{"gate": "code_review", "worker": "quan-code", "advisory": True}]
 
-    # Content change — no gates
+    # Content change - no gates
     if any(k in combined_lower for k in ["content", "post", "copy", "draft", "article"]):
         return []
 
@@ -111,7 +111,7 @@ def get_required_gates(title, body):
         ]
         return gates
 
-    # New feature — everything
+    # New feature - everything
     gates = [
         {"gate": "code_review", "worker": "quan-code", "advisory": False},
         {"gate": "code_simplify", "worker": "quan-code", "advisory": False},
@@ -152,7 +152,7 @@ def process_tasks(tasks_in_review):
             gates = get_required_gates(title, body)
 
             if not gates:
-                # No gates needed — complete directly (wrapped in txn)
+                # No gates needed - complete directly (wrapped in txn)
                 if write_lock is not None:
                     with write_lock(conn):
                         conn.execute(
@@ -172,7 +172,7 @@ def process_tasks(tasks_in_review):
                 results.append({"task": tid[:12], "board": board_slug, "gates": [], "outcome": "skip"})
                 continue
 
-            # Update task to note gates, then create sub-tasks — single txn
+            # Update task to note gates, then create sub-tasks - single txn
             if write_lock is not None:
                 with write_lock(conn):
                     gate_names = ", ".join(g["gate"] for g in gates)
@@ -190,7 +190,7 @@ def process_tasks(tasks_in_review):
                             f"## Gate: {gate_name}\n"
                             f"**Original task:** {tid}\n"
                             f"**Board:** {board_slug}\n"
-                            f"**Advisory:** {'Yes — human can override' if advisory else 'No — mandatory pass'}\n"
+                            f"**Advisory:** {'Yes - human can override' if advisory else 'No - mandatory pass'}\n"
                             f"**Worker:** {worker}\n\n"
                             f"Review the output of task {tid}. "
                             f"Apply the gate criteria from "
@@ -232,7 +232,7 @@ def process_tasks(tasks_in_review):
                             f"## Gate: {gate_name}\n"
                             f"**Original task:** {tid}\n"
                             f"**Board:** {board_slug}\n"
-                            f"**Advisory:** {'Yes — human can override' if advisory else 'No — mandatory pass'}\n"
+                            f"**Advisory:** {'Yes - human can override' if advisory else 'No - mandatory pass'}\n"
                             f"**Worker:** {worker}\n\n"
                             f"Review the output of task {tid}. "
                             f"Apply the gate criteria from "
@@ -300,7 +300,7 @@ def main():
         print()
         for r in results:
             if r["outcome"] == "skip":
-                print(f"  `{r['task']}` skipped — no gates required")
+                print(f"  `{r['task']}` skipped - no gates required")
             else:
                 gates_str = ", ".join(f"`{g['gate']}`->{g['worker']}" for g in r["gates"])
                 print(f"  `{r['task']}` {gates_str}")

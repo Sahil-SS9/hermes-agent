@@ -9,7 +9,7 @@
 # Side effects:
 #   1. Sets draft status='approved' + queues post in Postiz (via content_engine.py approve)
 #   2. Triggers Stage 2 which generates FAL.ai images + FFMPEG/HyperFrames videos for
-#      ALL currently-approved drafts (the function is idempotent — already-enriched
+#      ALL currently-approved drafts (the function is idempotent - already-enriched
 #      drafts won't double-spend)
 #
 # Note: this is the Phase 2 interim helper. The full automated bridge
@@ -48,10 +48,10 @@ export PYTHONPATH="$REPO:${PYTHONPATH:-}"
 # to import on this aarch64 box.
 VENV_PY=/home/kensei/repos/KenseiAgent/.venv/bin/python
 
-echo "$(date -Iseconds) — Approving draft $DRAFT_ID..."
+echo "$(date -Iseconds) - Approving draft $DRAFT_ID..."
 "$VENV_PY" content_engine.py approve "$DRAFT_ID"
 
-echo "$(date -Iseconds) — Running Stage 2 (AI enrichment for all approved drafts)..."
+echo "$(date -Iseconds) - Running Stage 2 (AI enrichment for all approved drafts)..."
 "$VENV_PY" content_engine.py stage2
 
-echo "$(date -Iseconds) — Done. Draft queued to Postiz (if integration is wired for brand/platform)."
+echo "$(date -Iseconds) - Done. Draft queued to Postiz (if integration is wired for brand/platform)."

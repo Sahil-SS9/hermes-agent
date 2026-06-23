@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-KENSEI Governance — Cross-Reference Engine + Change Registry
+KENSEI Governance - Cross-Reference Engine + Change Registry
 Takes Denji's profile review JSON and produces:
   1. Cross-reference report (self-eval vs Denji vs audit)
   2. Change registry (per-profile SOUL.md/skills/tools diffs)
@@ -61,7 +61,7 @@ def load_self_evals():
             # Flag STUB presence
             if "[STUB]" in stripped:
                 if "STUB" not in profile:
-                    claims.append("⚠️ STUB content found — self-eval is pro forma, not evidence-grounded")
+                    claims.append("⚠️ STUB content found - self-eval is pro forma, not evidence-grounded")
         
         # Classify the self-eval quality
         is_stub = "[STUB]" in content
@@ -164,7 +164,7 @@ def render_report(now, rows, changes):
     intervene = [r for r in rows if r["decision"] == "INTERVENE"]
 
     lines = [
-        f"# Governance Cross-Reference — {now.strftime('%d/%m/%Y')}",
+        f"# Governance Cross-Reference - {now.strftime('%d/%m/%Y')}",
         "",
         f"Active profiles: {len(rows)} | Healthy: {len(healthy)} | Observe: {len(observe)} | Rework: {len(rework)} | Intervene: {len(intervene)}",
         "",
@@ -187,7 +187,7 @@ def render_report(now, rows, changes):
         lines.append("")
         for r in mismatches:
             emoji = "🔴" if r["mismatch"] == "major" else "🟡"
-            lines.append(f"- {emoji} **{r['profile']}** — self-eval says \"{r['self_eval'][:60]}\", Denji scores {r['denji_score']}/100")
+            lines.append(f"- {emoji} **{r['profile']}** - self-eval says \"{r['self_eval'][:60]}\", Denji scores {r['denji_score']}/100")
         lines.append("")
 
     # Change registry
@@ -195,7 +195,7 @@ def render_report(now, rows, changes):
         lines.append("## Change Registry")
         lines.append("")
         for c in changes:
-            lines.append(f"### {c['profile']} — Score {c['score']}/100 ({c['decision']})")
+            lines.append(f"### {c['profile']} - Score {c['score']}/100 ({c['decision']})")
             lines.append("")
             for domain, items in c["changes"].items():
                 lines.append(f"**{domain}:**")
@@ -211,7 +211,7 @@ def render_report(now, rows, changes):
         lines.append("")
         lines.append("These profiles rate themselves healthy but Denji's evidence-based review disagrees significantly:")
         for t in theatre:
-            lines.append(f"- **{t['profile']}** — self-eval positive, Denji {t['denji_score']}/100, honesty {t['honesty']}/20")
+            lines.append(f"- **{t['profile']}** - self-eval positive, Denji {t['denji_score']}/100, honesty {t['honesty']}/20")
 
     return "\n".join(lines)
 
@@ -238,7 +238,7 @@ def main():
     # Print summary for cron delivery
     healthy = len([r for r in rows if r["decision"] == "HEALTHY"])
     mismatches = len([r for r in rows if r["mismatch"] != "aligned"])
-    print(f"**Cross-Reference Complete — {now.strftime('%d/%m/%Y %H:%M')}**")
+    print(f"**Cross-Reference Complete - {now.strftime('%d/%m/%Y %H:%M')}**")
     print(f"{len(rows)} profiles | {healthy} healthy | {mismatches} mismatches")
     print(f"Report: {report_path}")
 

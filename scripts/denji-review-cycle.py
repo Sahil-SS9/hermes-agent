@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Denji profile review execution engine — scheduled weekly/monthly/quarterly scans.
+"""Denji profile review execution engine - scheduled weekly/monthly/quarterly scans.
 
 Reads profile configs, session stats, ledger activity, and file timestamps to produce
 structured review entries in the central activity ledger as ``profile.review.*`` events.
 
 Each review cycle has a dedicated event type:
-  - ``profile.review.weekly``   — lightweight activity snapshot
-  - ``profile.review.monthly``  — mid-weight: usage + config drift + auto-promotions
-  - ``profile.review.quarterly`` — full audit: session history + config + identity + trends
+  - ``profile.review.weekly``   - lightweight activity snapshot
+  - ``profile.review.monthly``  - mid-weight: usage + config drift + auto-promotions
+  - ``profile.review.quarterly`` - full audit: session history + config + identity + trends
 
 All findings are tamper-evident: append-only ledger events with per-profile payloads.
 Exportable via any ``query_events(event_types=['profile.review.*'])`` call.
@@ -205,11 +205,11 @@ def _quarter_review(profile: str, since: int) -> dict:
 
 def _assess_activity(total: int) -> str:
     if total >= 100:
-        return "active — profile is in regular use"
+        return "active - profile is in regular use"
     elif total >= 10:
-        return "low activity — monitor for obsolescence"
+        return "low activity - monitor for obsolescence"
     else:
-        return "dormant — consider archival or removal"
+        return "dormant - consider archival or removal"
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -232,7 +232,7 @@ def _run_cycle(cycle: str) -> str:
     event_type = f"profile.review.{cycle}"
     profiles = _all_profiles()
 
-    print(f"Denji Review Cycle — {cycle} — {len(profiles)} profiles — {datetime.now(timezone.utc).isoformat()}")
+    print(f"Denji Review Cycle - {cycle} - {len(profiles)} profiles - {datetime.now(timezone.utc).isoformat()}")
     print()
 
     results = []

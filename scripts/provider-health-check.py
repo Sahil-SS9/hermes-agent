@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Provider API Reachability Check — tests each configured provider endpoint.
+"""Provider API Reachability Check - tests each configured provider endpoint.
 
 Silent when healthy (exit 0, empty stdout).
 Outputs alert text when a provider is unreachable or responding slowly.
@@ -12,7 +12,7 @@ from pathlib import Path
 
 HERMES = Path("/home/kensei/.hermes")
 
-# Providers to check (name, base_url, endpoint) — only actively configured providers
+# Providers to check (name, base_url, endpoint) - only actively configured providers
 PROVIDERS = [
     ("ollama-cloud", "https://ollama.com/v1", "/models"),
     ("openrouter", "https://openrouter.ai/api/v1", "/models"),
@@ -58,18 +58,18 @@ def main():
         status, elapsed, detail = check_provider(name, base_url, endpoint)
         
         if status == "unreachable":
-            alerts.append(f"**{name}** — unreachable ({detail})")
+            alerts.append(f"**{name}** - unreachable ({detail})")
         elif status == "error":
-            alerts.append(f"**{name}** — error ({detail})")
+            alerts.append(f"**{name}** - error ({detail})")
         elif status == "timeout":
-            alerts.append(f"**{name}** — timed out after {elapsed:.1f}s")
+            alerts.append(f"**{name}** - timed out after {elapsed:.1f}s")
         elif status == "slow":
-            alerts.append(f"**{name}** — slow ({detail})")
+            alerts.append(f"**{name}** - slow ({detail})")
     
     if not alerts:
         sys.exit(0)  # Silent when healthy
     
-    print(f"**🟡 Provider Health Alert — {time.strftime('%d/%m/%y %H:%M')}**\n")
+    print(f"**🟡 Provider Health Alert - {time.strftime('%d/%m/%y %H:%M')}**\n")
     for alert in alerts:
         print(f"• {alert}")
     print(f"\n**Action:** Check provider status pages. If persistent, check API keys and rate limits.")

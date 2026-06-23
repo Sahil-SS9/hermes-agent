@@ -4,7 +4,7 @@
 # to verify the custom mode system survived.  Exit code 0 = all good.
 #
 # If this fails, follow /home/kensei/.hermes/skills/devops/agent-modes/SKILL.md
-# and /home/kensei/.hermes/skills/governance/SOUL.md "KENSEI CUSTOM MODE — RESTORE"
+# and /home/kensei/.hermes/skills/governance/SOUL.md "KENSEI CUSTOM MODE - RESTORE"
 # ──────────────────────────────────────────────────────────────────────
 
 set -euo pipefail
@@ -95,7 +95,7 @@ check_ts "ui-tui/src/types.ts" "AskUserQuestionsReq" "AskUserQuestionsReq type d
 check_ts "ui-tui/src/app/createGatewayEventHandler.ts" "ask_user_questions.request" "TUI handles ask_user_questions.request event (B3 fix)"
 check_ts "ui-tui/src/app/createGatewayEventHandler.ts" "patchOverlayState" "TUI populates overlay state on ask_user_questions.request"
 
-# 12) Python: hermes_cli/mode_prompts.py (Q1 fix — single source of truth)
+# 12) Python: hermes_cli/mode_prompts.py (Q1 fix - single source of truth)
 check_file "$REPO/hermes_cli/mode_prompts.py" "hermes_cli/mode_prompts.py (Q1: shared prompt source of truth)"
 check_grep "$REPO/hermes_cli/mode_prompts.py" "PLAN_PROMPT" "PLAN_PROMPT constant"
 check_grep "$REPO/hermes_cli/mode_prompts.py" "ULTRAPLAN_PROMPT" "ULTRAPLAN_PROMPT constant"
@@ -152,13 +152,13 @@ if [[ -d "$RECON_DIR" ]]; then
     echo "  ✓ Recon output directory exists: $RECON_DIR"
 else
     echo "  ⚠ Recon output directory does not exist (will be created on first recon): $RECON_DIR"
-    # Not a failure — just a warning.  The mode prompt tells the agent to create it.
+    # Not a failure - just a warning.  The mode prompt tells the agent to create it.
 fi
 
 echo ""
 if [ "$FAIL" -eq 0 ]; then
     echo "  All mode components verified ✓"
 else
-    echo "  $FAIL component(s) MISSING — mode system is broken. Restore from skill doc."
+    echo "  $FAIL component(s) MISSING - mode system is broken. Restore from skill doc."
 fi
 exit "$FAIL"
