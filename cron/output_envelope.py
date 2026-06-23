@@ -188,6 +188,52 @@ def _html_escape(text: str) -> str:
     return _html.escape(str(text), quote=True)
 
 
+def _md_inline(s: str) -> str:
+    """Escape, then render inline markdown (code, bold, italic, links)."""
+    import html as _html
+    s = _html.escape(s, quote=True)
+    s = re.sub(r"`([^`]+)`", r"<code>\1</code>", s)
+    s = re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", s)
+    s = re.sub(r"(?<![\*\w])\*([^*\n]+)\*(?!\*)", r"<em>\1</em>", s)
+    # URLs are already escaped (no raw quotes/angles can survive), so a bounded
+    # match is safe to wrap in an anchor.
+    s = re.sub(r"(https?://[^\s<]+)", r'<a href="\1">\1</a>', s)
+    return s
+
+
+def _render_markdown(text: str) -> str:
+    """Render the common markdown a cron emits (headings, bold, bullets, code,
+    links) to safe HTML so the fallback attachment reads cleanly instead of
+    showing raw ``**`` / ``-`` / backticks."""
+    out: list[str] = []
+    in_list = False
+    for raw in text.splitlines():
+        ln = raw.rstrip()
+        if not ln.strip():
+            if in_list:
+                out.append("</ul>"); in_list = False
+            continue
+        h = re.match(r"\s*(#{1,6})\s+(.*)", ln)
+        if h:
+            if in_list:
+                out.append("</ul>"); in_list = False
+            lvl = min(len(h.group(1)) + 1, 4)
+            out.append(f"<h{lvl}>{_md_inline(h.group(2))}</h{lvl}>")
+            continue
+        b = re.match(r"\s*[-*•]\s+(.*)", ln)
+        if b:
+            if not in_list:
+                out.append("<ul>"); in_list = True
+            out.append(f"<li>{_md_inline(b.group(1))}</li>")
+            continue
+        if in_list:
+            out.append("</ul>"); in_list = False
+        out.append(f"<p>{_md_inline(ln)}</p>")
+    if in_list:
+        out.append("</ul>")
+    return "\n".join(out)
+
+
 def _linkify_html(text: str) -> str:
     """Escape HTML then turn bare URLs into clickable anchors."""
     import html as _html
@@ -241,13 +287,19 @@ def _write_detail(job: dict, severity: str, content: str) -> Path:
         ".hd{border-bottom:1px solid #2a2826;padding-bottom:.9rem;margin-bottom:1.3rem}"
         "h1{font-size:1.25rem;margin:0;color:#fbbf24;font-weight:650;letter-spacing:.2px}"
         ".meta{color:#8a847c;font-size:.82rem;margin-top:.35rem}"
-        "pre{white-space:pre-wrap;word-wrap:break-word;font:14px/1.65 ui-monospace,SFMono-Regular,Menlo,monospace;"
-        "background:#1a1816;border:1px solid #2a2826;border-radius:10px;padding:1.1rem 1.2rem;margin:0}"
-        "a{color:#fbbf24;text-decoration:none;border-bottom:1px solid #5a4a16}a:hover{border-bottom-color:#fbbf24}"
+        ".body{background:#1a1816;border:1px solid #2a2826;border-radius:10px;padding:.4rem 1.3rem 1rem}"
+        ".body h2{color:#fbbf24;font-size:1.05rem;margin:1.3rem 0 .5rem;font-weight:600}"
+        ".body h3{color:#e7b53a;font-size:.95rem;margin:1.1rem 0 .4rem;font-weight:600}"
+        ".body h4{color:#caa84f;font-size:.9rem;margin:1rem 0 .3rem}"
+        ".body p{margin:.5rem 0}.body ul{margin:.4rem 0 .7rem;padding-left:1.25rem}.body li{margin:.25rem 0}"
+        "code{font:13px ui-monospace,SFMono-Regular,Menlo,monospace;background:#2a2826;color:#fbd968;"
+        "padding:.1rem .35rem;border-radius:4px}"
+        "strong{color:#fff;font-weight:650}em{color:#d6cfc6}"
+        "a{color:#60a5fa;text-decoration:none}a:hover{text-decoration:underline}"
         "</style>"
-        f"<div class=hd><h1>{_EMOJI[severity]} {_linkify_html(name)}</h1>"
+        f"<div class=hd><h1>{_EMOJI[severity]} {_html_escape(name)}</h1>"
         f"<div class=meta>{now.strftime('%d/%m/%Y %H:%M %Z')} · {severity}</div></div>"
-        f"<pre>{_linkify_html(body)}</pre>\n"
+        f"<div class=body>{_render_markdown(body)}</div>\n"
     )
     path.write_text(doc, encoding="utf-8")
     return path
