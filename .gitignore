@@ -62,3 +62,35 @@ _archived/
 
 # Lock files
 *.lock
+
+# Python venv / build artefacts
+.venv/
+*.egg-info/
+.pytest-cache/
+.pytest_cache/
+
+# Built web assets
+hermes_cli/web_dist/
+
+# Runtime working dirs and agent output
+.hermes_work/
+investigations/
+reports/
+runbooks/
+content_engine/data/
+content_engine/inbox/
+content_engine/output/
+content_engine/.pytest-cache/
+data/github-radar/
+scripts/.backup-staleness-state.json
+
+# Stray agent report artefacts
+recommendation-report-*.md
+report-t_*.md
+t_*-report.md
+t_*-investigation-report.md
+t_*-wesker*-report.md
+t_*_recommendation_report.md
+FILETREE.md
+*.bak.*
+t_*_report.md

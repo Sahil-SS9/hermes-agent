@@ -1,5 +1,5 @@
 #!/bin/bash
-# Wiki daily sync — commits and pushes any changes to GitHub
+# Wiki daily sync - commits and pushes any changes to GitHub
 # Silent on no changes, brief log on push
 set -euo pipefail
 
@@ -11,15 +11,25 @@ WIKI_DIR="$HOME/wiki"
 cd "$WIKI_DIR" || { echo "ERROR: cannot cd to $WIKI_DIR"; exit 1; }
 
 # --- Auth setup ---
-# Fetch the gh token at runtime and use GIT_ASKPASS to provide it to git.
-# This bypasses the gh credential helper which can fail in cron environments.
-GH_TOKEN=$(gh auth token 2>/dev/null) || {
-    echo "ERROR: gh auth token failed — is gh logged in?"
-    gh auth status 2>&1
-    exit 1
-}
+# Fetch token from env (set by Hermes config) or gh CLI as fallback.
+# Use GIT_ASKPASS to bypass the gh credential helper which can return stale cached tokens.
+if [[ -n "${GITHUB_PERSONAL_ACCESS_TOKEN:-}" ]]; then
+    GH_TOKEN="$GITHUB_PERSONAL_ACCESS_TOKEN"
+elif [[ -n "${GH_TOKEN:-}" ]]; then
+    :  # already set
+else
+    GH_TOKEN=$(gh auth token 2>/dev/null) || {
+        echo "ERROR: gh auth token failed - is gh logged in?"
+        gh auth status 2>&1
+        exit 1
+    }
+fi
 export GH_TOKEN
 export GIT_ASKPASS="$HOME/.hermes/scripts/git-askpass.sh"
+# Suppress credential helper - force GIT_ASKPASS path (fresh token each run)
+export GIT_CONFIG_COUNT=1
+export GIT_CONFIG_KEY_0=credential.helper
+export GIT_CONFIG_VALUE_0=""
 
 # 1. Push any unpushed commits from a previous failed run (idempotent recovery)
 if [[ -n "$(git log origin/main..HEAD --oneline 2>/dev/null)" ]]; then
@@ -31,7 +41,7 @@ if git diff --quiet && git diff --cached --quiet && [ -z "$(git status --porcela
     exit 0
 fi
 
-# 3. Commit + push (with retry — GitHub has transient auth hiccups)
+# 3. Commit + push (with retry - GitHub has transient auth hiccups)
 git add -A
 git commit -m "wiki sync: $(date +%Y-%m-%d_%H:%M:%S)"
 for attempt in 1 2 3; do
