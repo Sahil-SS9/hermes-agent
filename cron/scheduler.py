@@ -2537,14 +2537,26 @@ def tick(verbose: bool = True, adapters=None, loop=None, sync: bool = True) -> i
                 # Applied here at the single delivery choke point so SCRIPT jobs
                 # are governed too — the cron-output-contract skill only reaches
                 # agent jobs. Fail-safe: any error falls back to raw delivery.
-                if should_deliver and str(job.get("deliver", "local")).lower() != "local":
+                env_cfg = {}
+                try:
+                    env_cfg = (load_config().get("cron", {}) or {}).get("envelope", {}) or {}
+                except Exception:
+                    pass
+
+                deliver_str = str(job.get("deliver", "local"))
+                # Human-only channels (e.g. #ai-learning-qa) are reserved for live
+                # conversation; no cron may post there.
+                human_only = {str(c) for c in (env_cfg.get("human_only_channels") or [])}
+                if should_deliver and any(h and h in deliver_str for h in human_only):
+                    logger.warning(
+                        "Job '%s': delivery to human-only channel (%s) blocked",
+                        job["id"], deliver_str,
+                    )
+                    should_deliver = False
+
+                if should_deliver and deliver_str.lower() != "local":
                     try:
                         from cron.output_envelope import build_envelope
-                        env_cfg = {}
-                        try:
-                            env_cfg = (load_config().get("cron", {}) or {}).get("envelope", {}) or {}
-                        except Exception:
-                            pass
                         if env_cfg.get("enabled", True):
                             decision = build_envelope(
                                 job,
@@ -2553,6 +2565,17 @@ def tick(verbose: bool = True, adapters=None, loop=None, sync: bool = True) -> i
                                 mention=env_cfg.get("mention", "@Sahil"),
                                 enable_dedup=env_cfg.get("dedup", True),
                             )
+                            # 🟢 LOG: never posts to the domain channel, but mirror a
+                            # one-liner to the #cron-outputs audit sink if configured.
+                            log_sink = env_cfg.get("log_sink")
+                            if (decision.severity == "LOG" and decision.text and log_sink
+                                    and str(log_sink) not in deliver_str):
+                                try:
+                                    sink_job = dict(job)
+                                    sink_job["deliver"] = f"discord:{log_sink}"
+                                    _deliver_result(sink_job, decision.text, adapters=adapters, loop=loop)
+                                except Exception as se:
+                                    logger.warning("Job '%s': LOG sink mirror failed (%s)", job["id"], se)
                             if decision.suppress:
                                 logger.info(
                                     "Job '%s': envelope suppressed delivery (%s)",

@@ -33,6 +33,8 @@ def test_log_severity_suppressed_and_logged():
     assert d.suppress and d.severity == oe.LOG
     logs = list((oe.BRIEFING_LOG_DIR).glob("*.jsonl"))
     assert logs and "healthy" in logs[0].read_text()
+    # Carries a compact line for the #cron-outputs audit sink, still suppressed live.
+    assert d.text and d.text.startswith("🟢")
 
 
 def test_fyi_short_passthrough_no_ping():

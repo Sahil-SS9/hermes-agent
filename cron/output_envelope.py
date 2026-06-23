@@ -326,7 +326,12 @@ def build_envelope(
 
     if severity == LOG:
         _append_briefing_log(job, severity, body)
-        return EnvelopeDecision(suppress=True, severity=LOG, reason="log-to-briefing")
+        # Carry a compact one-liner so the scheduler can mirror it to the
+        # #cron-outputs audit sink. It still never posts to the domain channel.
+        log_title = _build_title(body, job)
+        log_summary = _build_summary(body, f"🟢 {log_title}")
+        log_line = f"🟢 {log_title}" + (f"\n{log_summary}" if log_summary else "")
+        return EnvelopeDecision(suppress=True, severity=LOG, text=log_line, reason="log-to-briefing")
 
     plain_title = _build_title(body, job)
     title = f"{_EMOJI[severity]} {plain_title}"
