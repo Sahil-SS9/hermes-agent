@@ -244,10 +244,20 @@ def _allowed_tool_names_for_agent(agent) -> Optional[frozenset]:
     """
     enabled = getattr(agent, "enabled_toolsets", None)
     disabled = getattr(agent, "disabled_toolsets", None)
+    # Include the registry generation (bumped by mark_ambient / MCP refresh) so a
+    # toolset marked ambient after this agent was first used invalidates the
+    # cache, keeping the fence in step with the schemas. Mirrors
+    # _tool_search_scope_cache above.
+    try:
+        from tools.registry import registry as _reg
+        _gen = getattr(_reg, "_generation", 0)
+    except Exception:
+        _gen = 0
     key = (
         tuple(enabled) if enabled is not None else None,
         tuple(disabled) if disabled is not None else (),
         bool(os.environ.get("HERMES_KANBAN_TASK")),
+        _gen,
     )
 
     cached = getattr(agent, "_allowed_tool_names", _UNSET)

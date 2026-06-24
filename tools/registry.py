@@ -165,6 +165,11 @@ class ToolRegistry:
         # against it: a cache entry keyed on the generation is valid for as
         # long as the generation hasn't changed.
         self._generation: int = 0
+        # Ambient toolsets: their tools are always available to every session
+        # regardless of enabled_toolsets scope. Used by plugins whose result
+        # transform fires ungated (e.g. Toolaria's rescue hook) so the
+        # companion retrieval tool can never become an unredeemable handle.
+        self._ambient_toolsets: set[str] = set()
 
     def _snapshot_state(self) -> tuple[List[ToolEntry], Dict[str, Callable]]:
         """Return a coherent snapshot of registry entries and toolset checks."""
@@ -221,6 +226,42 @@ class ToolRegistry:
         """Return a snapshot of ``{alias: canonical_toolset}`` mappings."""
         with self._lock:
             return dict(self._toolset_aliases)
+
+    def mark_ambient(self, toolset: str) -> None:
+        """Mark ``toolset`` as ambient: its tools are always reachable in every
+        session, regardless of that session's enabled/disabled toolset scope.
+
+        Generalises the kanban-lifecycle exemption (a scoped worker must always
+        keep its handoff tools) to any plugin whose result-transform hook fires
+        ungated. Toolaria rescues oversized results in EVERY session via an
+        ungated hook; its inverse, ``rescuer_fetch``, must therefore be callable
+        in every session too, or a rescue becomes an unredeemable handle.
+
+        Safe to expose broadly because the tool itself stays session-scoped at
+        the data layer (it can only read blobs the calling session rescued)."""
+        if not toolset:
+            return
+        with self._lock:
+            if toolset not in self._ambient_toolsets:
+                self._ambient_toolsets.add(toolset)
+                self._generation += 1
+
+    def is_ambient(self, toolset: str) -> bool:
+        """True if ``toolset`` has been marked ambient (always-on)."""
+        with self._lock:
+            return toolset in self._ambient_toolsets
+
+    def ambient_toolsets(self) -> set:
+        """Snapshot of the toolset names marked ambient."""
+        with self._lock:
+            return set(self._ambient_toolsets)
+
+    def unmark_ambient(self, toolset: str) -> None:
+        """Drop a toolset's ambient marking (plugin hot-unload, test teardown)."""
+        with self._lock:
+            if toolset in self._ambient_toolsets:
+                self._ambient_toolsets.discard(toolset)
+                self._generation += 1
 
     def get_toolset_alias_target(self, alias: str) -> Optional[str]:
         """Return the canonical toolset name for an alias, or None."""

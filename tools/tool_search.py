@@ -178,6 +178,12 @@ def is_deferrable_tool_name(name: str) -> bool:
         entry = registry.get_entry(name)
         if entry is None:
             return False
+        if registry.is_ambient(entry.toolset):
+            # Ambient tools (e.g. Toolaria's rescuer_fetch) stay visible in
+            # every session; deferring one would force a scoped session to
+            # discover it via tool_search before it could redeem a rescue
+            # handle the model was just told to fetch directly.
+            return False
         if entry.toolset.startswith("mcp-"):
             return True
         # Non-MCP, non-core → plugin tool, eligible.

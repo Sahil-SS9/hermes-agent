@@ -393,6 +393,18 @@ def resolve_allowed_tool_names(
     if os.environ.get("HERMES_KANBAN_TASK"):
         allowed.update(resolve_toolset("kanban"))
 
+    # Ambient toolsets are always allowed, mirroring the union in
+    # _compute_tool_definitions so the execution-time scope fence agrees with
+    # the tool schemas the model was shown. Widening only; never narrows.
+    try:
+        for _amb in registry.ambient_toolsets():
+            allowed.update(resolve_toolset(_amb))
+    except Exception as exc:
+        # Never silent: a dropped ambient union recreates the unredeemable-handle
+        # bug this mechanism exists to prevent.
+        logger.warning("ambient toolset union (fence) failed; ambient tools may "
+                       "be blocked this session: %s", exc)
+
     return allowed
 
 
@@ -473,6 +485,27 @@ def _compute_tool_definitions(
                     print(f"🚫 Disabled legacy toolset '{toolset_name}': {', '.join(legacy_tools)}")
             elif not quiet_mode:
                 print(f"⚠️  Unknown toolset: {toolset_name}")
+
+    # Ambient toolsets: always-on tools that must stay reachable regardless of
+    # the session's enabled/disabled scope (e.g. Toolaria's rescuer_fetch, the
+    # inverse of an ungated result-rescue hook). Unioned in AFTER the disabled
+    # subtraction so an unrelated `disabled_toolsets` entry cannot strip them.
+    # Mirrors the HERMES_KANBAN_TASK lifecycle exemption above. No-op when
+    # enabled_toolsets is None, since the unrestricted branch already included
+    # every toolset.
+    if enabled_toolsets is not None:
+        try:
+            for _amb in registry.ambient_toolsets():
+                if disabled_toolsets and _amb in disabled_toolsets:
+                    # Ambient wins by design; surface it so an operator who
+                    # disabled the toolset on purpose is not left guessing.
+                    logger.debug("ambient toolset '%s' overrides its presence in "
+                                 "disabled_toolsets (always-on by design)", _amb)
+                tools_to_include.update(resolve_toolset(_amb))
+        except Exception as exc:
+            # Never silent: see resolve_allowed_tool_names.
+            logger.warning("ambient toolset union (schema) failed; ambient tools "
+                           "may be unavailable this session: %s", exc)
 
     # Plugin-registered tools are now resolved through the normal toolset
     # path — validate_toolset() / resolve_toolset() / get_all_toolsets()
