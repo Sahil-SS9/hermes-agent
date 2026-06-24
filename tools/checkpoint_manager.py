@@ -275,11 +275,12 @@ def _git_env(
 def _repair_bare_repo_dirs(store: Path) -> None:
     """Recreate refs/ and branches/ dirs that ``git gc`` may have removed.
 
-    ``git gc --prune=now`` on a bare repo with only packed refs can remove the
-    empty ``refs/heads/`` directory.  Git 2.34+ requires ``refs/`` (and some
-    versions require ``branches/``) to exist even when all refs are packed in
-    ``packed-refs``.  Without them, ``git add -A`` returns ``fatal: not a git
-    repository`` and all checkpoint operations fail silently.
+    ``git gc --prune=now`` on a bare repo with only packed refs can remove
+    the empty ``refs/heads/`` directory.  Git 2.34+ requires ``refs/`` (and
+    some versions require ``branches/``) to exist even when all refs are
+    packed in ``packed-refs``.  Without them, ``git add -A`` returns
+    ``fatal: not a git repository`` and all checkpoint operations fail
+    silently.
     """
     for subdir in ("refs/heads", "branches"):
         path = store / subdir

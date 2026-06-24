@@ -16,19 +16,53 @@ import os
 import sqlite3
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 # Match the logger run.py uses (logging.getLogger(__name__) where __name__ ==
 # "gateway.run") so extracted log records keep their original logger name.
 logger = logging.getLogger("gateway.run")
 
 
+def _resolve_auto_decompose_settings(
+    load_config: Callable[[], Any],
+) -> "tuple[bool, int]":
+    """Resolve the live (enabled, per_tick) auto-decompose settings.
+
+    Read fresh from config on every dispatcher tick (#49638) so that flipping
+    ``kanban.auto_decompose: false`` to STOP runaway fan-out takes effect on the
+    next tick instead of requiring a gateway restart. Auto-decompose is a
+    safety toggle — a user who sees it create and launch tasks they didn't
+    intend reaches for this flag to halt it, and a stale boot-captured value
+    silently ignoring that change is the bug reported in #49638.
+
+    Fails **safe**: if the config read raises, return ``(False, 3)`` — a
+    transient read error must never re-enable a feature the user turned off,
+    nor fall back to the burst-prone default-on behaviour. ``per_tick`` is
+    clamped to ``>= 1``.
+    """
+    try:
+        cfg = load_config()
+    except Exception:
+        return False, 3
+    kcfg = cfg.get("kanban", {}) if isinstance(cfg, dict) else {}
+    enabled = bool(kcfg.get("auto_decompose", True))
+    try:
+        per_tick = int(kcfg.get("auto_decompose_per_tick", 3) or 3)
+    except (TypeError, ValueError):
+        per_tick = 3
+    if per_tick < 1:
+        per_tick = 1
+    return enabled, per_tick
+
+
 def _acquire_singleton_lock(lock_path) -> "tuple[Optional[object], str]":
     """Take an exclusive, non-blocking advisory lock for the sole dispatcher.
 
     Only one gateway process machine-wide may run the embedded kanban
-    dispatcher: concurrent dispatchers each sweep every board and corrupt the
-    shared kanban SQLite DBs (and double reclaim frequency). The
+    dispatcher: concurrent dispatchers double the reclaim frequency (each
+    runs its own ``release_stale_claims`` → promote → dispatch loop), double
+    claim-attempt events in the event log, and — with ``wal_autocheckpoint=0`` —
+    concurrent manual WAL checkpoints can corrupt index pages. The
     ``dispatch_in_gateway`` config flag is the primary control; this lock is the
     backstop that survives config drift and same-profile restart races.
 
@@ -49,7 +83,7 @@ def _acquire_singleton_lock(lock_path) -> "tuple[Optional[object], str]":
         return None, "unavailable"
     try:
         Path(lock_path).parent.mkdir(parents=True, exist_ok=True)
-        handle = open(str(lock_path), "a+")
+        handle = open(str(lock_path), "a+", encoding="utf-8")
     except OSError:
         return None, "unavailable"
     if not _try_acquire_file_lock(handle):
@@ -127,11 +161,6 @@ class GatewayKanbanWatchersMixin:
             return
 
         TERMINAL_KINDS = ("completed", "blocked", "gave_up", "crashed", "timed_out")
-        PIPELINE_KINDS = (
-            "pipeline_advanced", "pipeline_complete", "gate_failed",
-            "human_gate_stale_nudge",
-        )
-        NOTIFY_KINDS = TERMINAL_KINDS + PIPELINE_KINDS
         # Subscriptions are removed only when the task reaches a truly final
         # status (done / archived). We used to also unsub on any terminal
         # event kind (gave_up / crashed / timed_out / blocked), but that
@@ -239,7 +268,7 @@ class GatewayKanbanWatchersMixin:
                                     platform=sub["platform"],
                                     chat_id=sub["chat_id"],
                                     thread_id=sub.get("thread_id") or "",
-                                    kinds=NOTIFY_KINDS,
+                                    kinds=TERMINAL_KINDS,
                                 )
                                 if not events:
                                     continue
@@ -502,113 +531,6 @@ class GatewayKanbanWatchersMixin:
         finally:
             conn.close()
 
-    async def _profile_gate_watcher(self, interval: float = 5.0) -> None:
-        """Deliver pending PROFILE-GATE approvals to Discord as button prompts.
-
-        Polls each board's ``profile_lifecycle_approvals`` for undelivered
-        pending rows and posts an Approve / Reject prompt to the Discord home
-        channel. Runs only on the dispatch-owning gateway (same gate as the
-        notifier) so a single process owns kanban-DB access. Marking a row
-        ``notified`` is the idempotency guard against re-posting every tick.
-        """
-        env_override = os.environ.get(
-            "HERMES_KANBAN_DISPATCH_IN_GATEWAY", ""
-        ).strip().lower()
-        if env_override in {"0", "false", "no", "off"}:
-            return
-        try:
-            from hermes_cli.config import load_config as _load_config
-            cfg = _load_config()
-        except Exception as exc:
-            logger.warning("profile-gate watcher: config unavailable (%s); disabled", exc)
-            return
-        kanban_cfg = cfg.get("kanban", {}) if isinstance(cfg, dict) else {}
-        if not kanban_cfg.get("dispatch_in_gateway", True):
-            return
-        from gateway.config import Platform as _Platform
-        try:
-            from hermes_cli import kanban_db as _kb
-        except Exception:
-            logger.warning("profile-gate watcher: kanban_db not importable; disabled")
-            return
-
-        await asyncio.sleep(6)  # let adapters wire up
-
-        while self._running:
-            try:
-                adapter = self.adapters.get(_Platform.DISCORD)
-                home = self.config.get_home_channel(_Platform.DISCORD)
-                if adapter is None or home is None:
-                    await asyncio.sleep(interval)
-                    continue
-
-                def _collect():
-                    out: list[tuple[str, dict]] = []
-                    try:
-                        boards = _kb.list_boards(include_archived=False)
-                    except Exception:
-                        boards = [_kb.read_board_metadata(_kb.DEFAULT_BOARD)]
-                    seen: set[str] = set()
-                    for board_meta in boards:
-                        slug = board_meta.get("slug") or _kb.DEFAULT_BOARD
-                        db_path = board_meta.get("db_path")
-                        try:
-                            resolved = str(
-                                Path(db_path).expanduser().resolve()
-                            ) if db_path else str(_kb.kanban_db_path(slug).resolve())
-                        except Exception:
-                            resolved = f"slug:{slug}"
-                        if resolved in seen:
-                            continue
-                        seen.add(resolved)
-                        try:
-                            conn = _kb.connect(board=slug)
-                        except Exception as exc:
-                            logger.warning(
-                                "profile-gate watcher: cannot open board %s: %s",
-                                slug, exc,
-                            )
-                            continue
-                        try:
-                            for row in _kb.list_pending_profile_lifecycle_approvals(
-                                conn, undelivered_only=True
-                            ):
-                                out.append((slug, row))
-                        finally:
-                            conn.close()
-                    return out
-
-                def _mark(slug: str, approval_id: str):
-                    conn = _kb.connect(board=slug)
-                    try:
-                        _kb.mark_profile_lifecycle_notified(conn, approval_id)
-                    finally:
-                        conn.close()
-
-                pending = await asyncio.to_thread(_collect)
-                for slug, row in pending:
-                    metadata = {"thread_id": home.thread_id} if home.thread_id else None
-                    try:
-                        res = await adapter.send_profile_gate(
-                            home.chat_id, row, board=slug, metadata=metadata,
-                        )
-                    except Exception as exc:
-                        logger.warning(
-                            "profile-gate watcher: send failed for %s: %s",
-                            row.get("id"), exc,
-                        )
-                        continue
-                    if getattr(res, "success", False):
-                        await asyncio.to_thread(_mark, slug, row["id"])
-                    else:
-                        logger.warning(
-                            "profile-gate watcher: delivery unsuccessful for %s: %s",
-                            row.get("id"), getattr(res, "error", "?"),
-                        )
-            except Exception:
-                logger.exception("profile-gate watcher tick failed")
-            await asyncio.sleep(interval)
-
     async def _deliver_kanban_artifacts(
         self,
         *,
@@ -768,11 +690,13 @@ class GatewayKanbanWatchersMixin:
             logger.warning("kanban dispatcher: kanban_db not importable; dispatcher disabled")
             return
 
-        # Single-dispatcher backstop. Even with dispatch_in_gateway set on only
-        # one profile, drift (a new profile defaults to true) or a restart race
-        # can start a second dispatcher; concurrent dispatchers corrupt the
-        # shared kanban SQLite DBs. The lock lives at the machine-global kanban
-        # root (shared across profiles by design), so it serialises ALL gateways.
+        # Single-dispatcher backstop. dispatch_in_gateway defaults to true, so a
+        # new profile gateway (or a same-profile restart race) can silently
+        # start a second dispatcher; concurrent dispatchers double reclaim
+        # frequency, double claim-attempt events, and — with
+        # wal_autocheckpoint=0 — concurrent manual WAL checkpoints can corrupt
+        # index pages. The lock lives at the machine-global kanban root
+        # (shared across profiles by design), so it serialises ALL gateways.
         self._kanban_dispatcher_lock_handle = None
         _lock_path = _kb.kanban_home() / "kanban" / ".dispatcher.lock"
         _lock_handle, _lock_state = _acquire_singleton_lock(_lock_path)
@@ -1035,31 +959,6 @@ class GatewayKanbanWatchersMixin:
                     except Exception:
                         pass
 
-        def _checkpoint_all_boards() -> None:
-            """Manual WAL checkpoint on every board after a dispatch tick.
-
-            With wal_autocheckpoint=0, SQLite never triggers automatic
-            checkpoints.  Only the dispatcher runs them, from a single
-            thread, eliminating the WAL checkpoint race that corrupts
-            index B-tree pages under concurrent cross-process write load.
-            """
-            try:
-                boards = _kb.list_boards(include_archived=False)
-            except Exception:
-                boards = [_kb.read_board_metadata(_kb.DEFAULT_BOARD)]
-            for b in boards:
-                slug = b.get("slug") or _kb.DEFAULT_BOARD
-                try:
-                    db_path = _kb.kanban_db_path(board=slug)
-                    if db_path.exists():
-                        conn = _kb._sqlite_connect(db_path)
-                        try:
-                            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-                        finally:
-                            conn.close()
-                except Exception:
-                    pass  # transient — next tick will retry
-
         def _tick_once() -> "list[tuple[str, Optional[object]]]":
             """Run one dispatch_once per board. Returns (slug, result) pairs.
 
@@ -1118,17 +1017,20 @@ class GatewayKanbanWatchersMixin:
         # ``kanban.auto_decompose_per_tick`` (default 3) so a bulk-load
         # of triage tasks doesn't burst-spend the aux LLM in one tick;
         # remainder defers to subsequent ticks.
-        auto_decompose_enabled = bool(kanban_cfg.get("auto_decompose", True))
-        try:
-            auto_decompose_per_tick = int(
-                kanban_cfg.get("auto_decompose_per_tick", 3) or 3
-            )
-        except (TypeError, ValueError):
-            auto_decompose_per_tick = 3
-        if auto_decompose_per_tick < 1:
-            auto_decompose_per_tick = 1
+        #
+        # The flag is re-read from config EVERY tick (#49638) rather than
+        # captured once at boot. Auto-decompose is a safety toggle: a user who
+        # sees it fan out and run tasks they didn't intend reaches for
+        # ``kanban.auto_decompose: false`` to STOP it — and that must take
+        # effect on the next tick, not require a gateway restart. (Reported:
+        # auto-decompose created and launched destructive tasks while the user
+        # was still typing the task description, and the flag "couldn't be
+        # disabled" because the gateway had captured its boot-time value.)
+        def _read_auto_decompose_settings() -> tuple[bool, int]:
+            """Re-resolve (enabled, per_tick) from current config each tick."""
+            return _resolve_auto_decompose_settings(_load_config)
 
-        def _auto_decompose_tick() -> int:
+        def _auto_decompose_tick(auto_decompose_per_tick: int) -> int:
             """Run the auto-decomposer for up to N triage tasks across all
             boards. Returns the number of triage tasks that were
             successfully decomposed or specified this tick.
@@ -1223,8 +1125,12 @@ class GatewayKanbanWatchersMixin:
                 logger.exception("kanban dispatcher: zombie reaper failed")
 
             try:
-                if auto_decompose_enabled:
-                    await asyncio.to_thread(_auto_decompose_tick)
+                # Re-read the auto-decompose toggle live each tick so a user
+                # flipping kanban.auto_decompose=false to STOP runaway fan-out
+                # takes effect on the next tick, not on gateway restart (#49638).
+                _ad_enabled, _ad_per_tick = _read_auto_decompose_settings()
+                if _ad_enabled:
+                    await asyncio.to_thread(_auto_decompose_tick, _ad_per_tick)
                 results = await asyncio.to_thread(_tick_once)
                 any_spawned = False
                 for slug, res in (results or []):
@@ -1243,18 +1149,6 @@ class GatewayKanbanWatchersMixin:
                             res.promoted,
                             len(res.auto_blocked) if hasattr(res.auto_blocked, "__len__") else 0,
                         )
-                # After every dispatch tick, run a manual WAL checkpoint
-                # from this single thread.  Auto-checkpoint is disabled
-                # (wal_autocheckpoint=0) on all connections so concurrent
-                # worker processes never trigger a checkpoint mid-write.
-                # Only the dispatcher checkpoints — no race possible.
-                try:
-                    await asyncio.to_thread(_checkpoint_all_boards)
-                except Exception:
-                    logger.debug(
-                        "kanban dispatcher: WAL checkpoint skipped (transient)",
-                        exc_info=True,
-                    )
                 # Health telemetry (aggregate across boards)
                 ready_pending = await asyncio.to_thread(_ready_nonempty)
                 if ready_pending and not any_spawned:

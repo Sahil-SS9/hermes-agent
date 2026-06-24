@@ -130,6 +130,12 @@ _SUBAGENT_TOOLSETS = sorted(
 _TOOLSET_LIST_STR = ", ".join(f"'{n}'" for n in _SUBAGENT_TOOLSETS)
 
 _DEFAULT_MAX_CONCURRENT_CHILDREN = 3
+# One-shot guard: the high-concurrency cost advisory is emitted at most once
+# per process. _get_max_concurrent_children() runs on every get_definitions()
+# schema rebuild (via _build_top_level_description / _build_tasks_param_description),
+# so without this flag a config of max_concurrent_children>10 spams the log on
+# every turn / agent spawn even when delegate_task is never called.
+_HIGH_CONCURRENCY_WARNED = False
 MAX_DEPTH = 1  # flat by default: parent (0) -> child (1); grandchild rejected unless max_spawn_depth raised.
 # Configurable depth cap consulted by _get_max_spawn_depth; MAX_DEPTH
 # stays as the default fallback and is still the symbol tests import.
@@ -374,11 +380,14 @@ def _get_max_concurrent_children() -> int:
         try:
             result = max(1, int(val))
             if result > 10:
-                logger.warning(
-                    "delegation.max_concurrent_children=%d: each child consumes API tokens "
-                    "independently. High values multiply cost linearly.",
-                    result,
-                )
+                global _HIGH_CONCURRENCY_WARNED
+                if not _HIGH_CONCURRENCY_WARNED:
+                    _HIGH_CONCURRENCY_WARNED = True
+                    logger.warning(
+                        "delegation.max_concurrent_children=%d: each child consumes API tokens "
+                        "independently. High values multiply cost linearly.",
+                        result,
+                    )
             return result
         except (TypeError, ValueError):
             logger.warning(
@@ -1460,73 +1469,6 @@ def _dump_subagent_timeout_diagnostic(
         return None
 
 
-
-def _extract_finding(summary: str) -> str:
-    """Extract the core finding from a producer summary, stripping reasoning.
-
-    Tries multiple strategies in order:
-    1. JSON block with named key (finding / answer / conclusion / claim)
-    2. Any JSON block — serialise whole block as the finding
-    3. Markdown heading '## Finding' or '## Conclusion'
-
-    Returns the extracted finding string, or empty string on failure.
-    When empty, verification is skipped and a warning is logged.
-    """
-    if not summary or not summary.strip():
-        return ""
-
-    text = summary.strip()
-
-    # Cap scanned text to prevent pathological regex behaviour on unusually
-    # large producer summaries (bounded polynomial, not catastrophic, but
-    # this box has two documented regex-freeze incidents).
-    if len(text) > 20000:
-        text = text[-20000:]
-    import re as _re
-
-    # --- Strategy 1: JSON extraction via shared parser ---
-
-    # 1a: Try the shared parser on the whole text first
-    from hermes_cli.llm_json import parse_llm_json
-    parsed = parse_llm_json(text, raise_on_failure=False)
-    if parsed is not None:
-        for key in ("finding", "answer", "conclusion", "claim"):
-            if key in parsed and isinstance(parsed[key], str) and parsed[key]:
-                return str(parsed[key])
-        # No named key; serialise the whole dict as the finding
-        return json.dumps(parsed, indent=2)
-
-    # 1b: Scan for inline JSON blocks with named keys (the shared parser
-    #     expects a clean JSON document; inline blocks need regex extraction).
-    #     NOTE: regex handles ONE nesting level only; deeper nested JSON
-    #     falls through to the heading strategy below (DG-2, acceptable
-    #     degradation; nested findings are rare in practice).
-    key_pats = "finding|answer|conclusion|claim"
-    named_blocks = _re.findall(
-        r'\{[^{}]*"(?:' + key_pats + r')"[^{}]*\}',
-        text, _re.DOTALL,
-    )
-    for block in reversed(named_blocks):
-        try:
-            parsed = json.loads(block)
-            for key in ("finding", "answer", "conclusion", "claim"):
-                if key in parsed and parsed[key]:
-                    return str(parsed[key])
-        except (json.JSONDecodeError, TypeError, KeyError):
-            continue
-
-    # --- Strategy 2: Markdown heading ---
-    for heading in ("Finding", "Conclusion", "Claim", "Result"):
-        m = _re.search(
-            rf"^##\s+{heading}\s*\n(.+?)(?:\n##|\Z)",
-            text, _re.DOTALL | _re.MULTILINE | _re.IGNORECASE,
-        )
-        if m:
-            return m.group(1).strip()
-
-    # Structured extraction failed.
-    return ""
-
 def _run_single_child(
     task_index: int,
     goal: str,
@@ -2149,12 +2091,13 @@ def delegate_task(
     acp_args: Optional[List[str]] = None,
     role: Optional[str] = None,
     background: Optional[bool] = None,
-    parent_agent=None,
-    # KENSEI CUSTOM — synthesis and verification primitives (see v1.1 plan)
-    synthesize: bool = False,
+    # ── KENSEI CUSTOM params ──
+    synthesize: Optional[bool] = None,
     synthesis_prompt: Optional[str] = None,
-    verify: bool = False,
+    verify: Optional[bool] = None,
     verify_rubric: Optional[str] = None,
+    # ── END KENSEI CUSTOM ──
+    parent_agent=None,
 ) -> str:
     """
     Spawn one or more child agents to handle delegated tasks.
@@ -2167,16 +2110,6 @@ def delegate_task(
     'leaf' (default) cannot; 'orchestrator' retains the delegation
     toolset and can spawn its own workers, bounded by
     delegation.max_spawn_depth.  Per-task role beats the top-level one.
-
-    Synthesis (synthesize=True): After all children complete, spawn a
-    synthesis agent that merges results into a single coherent output.
-    Gated by delegation.synthesis_enabled config flag (default False).
-
-    Verification (verify=True): After a single-task child produces a
-    finding, spawn a skeptic agent in CLEAN context (no access to
-    producer reasoning) that tries to refute it. Returns both finding
-    and skeptic verdict. Gated by delegation.verify_enabled config
-    flag (default False). Only available in single-task mode.
 
     Returns JSON with results array, one entry per task.
     """
@@ -2195,18 +2128,12 @@ def delegate_task(
     # Normalise the top-level role once; per-task overrides re-normalise.
     top_role = _normalize_role(role)
 
-    # Async (background) delegation is single-task only in v1. A batch carries
-    # fan-out semantics (N handles, partial completion) that double the state
-    # model — reject early with a clear message rather than silently running
-    # the batch synchronously.
+    # Background (async) delegation now applies to BOTH single tasks and
+    # batches. A batch simply becomes N independent async dispatches: each
+    # child runs on the daemon executor and re-enters the conversation via
+    # the completion queue on its own, carrying its own handle. There's no
+    # combined "wait for all" — fan-out is exactly N background subagents.
     background = is_truthy_value(background, default=False) if background is not None else False
-    if background and tasks and isinstance(tasks, list) and len(tasks) > 1:
-        return tool_error(
-            "background=true is single-task only. Dispatch one background "
-            "subagent per delegate_task call (each returns its own handle and "
-            "re-enters the conversation independently), or run the batch "
-            "synchronously with background=false."
-        )
 
     # Depth limit — configurable via delegation.max_spawn_depth,
     # default 2 for parity with the original MAX_DEPTH constant.
@@ -2342,150 +2269,101 @@ def delegate_task(
         # Authoritative restore: reset global to parent's tool names after all children built
         _model_tools._last_resolved_tool_names = _parent_tool_names
 
-    if n_tasks == 1:
-        # Single task -- run directly (no thread pool overhead)
-        _i, _t, child = children[0]
+    def _execute_and_aggregate() -> dict:
+        """Run all built children (1 or N), join on them, aggregate results,
+        fire subagent_stop hooks + cost rollup, and return the combined result
+        dict. Used by BOTH the synchronous path and the background runner. In
+        the background case this whole function runs on the daemon executor, so
+        the parent turn isn't blocked — but the batch still JOINS on itself
+        here (all children must finish) before producing ONE consolidated
+        results block. That is the contract: fan-out runs in the background,
+        waits on each other, and returns together.
+        """
+        if n_tasks == 1:
+            # Single task -- run directly (no thread pool overhead)
+            _i, _t, child = children[0]
+            result = _run_single_child(_i, _t["goal"], child, parent_agent)
+            results.append(result)
+        else:
+            # Batch -- run in parallel with per-task progress lines
+            completed_count = 0
+            spinner_ref = getattr(parent_agent, "_delegate_spinner", None)
 
-        # ----- Async / background dispatch -----
-        # When background=true, hand the already-built child to the async
-        # delegation registry and return a handle immediately. The child runs
-        # on a daemon executor; its result re-enters the conversation as a
-        # fresh turn via process_registry.completion_queue (see
-        # tools/async_delegation.py). Batch async is intentionally NOT
-        # supported in v1 — the rejection is handled before we get here.
-        if background:
-            from tools.async_delegation import dispatch_async_delegation
-            from tools.approval import get_current_session_key
+            with ThreadPoolExecutor(max_workers=max_children) as executor:
+                futures = {}
+                for i, t, child in children:
+                    future = executor.submit(
+                        _run_single_child,
+                        task_index=i,
+                        goal=t["goal"],
+                        child=child,
+                        parent_agent=parent_agent,
+                    )
+                    futures[future] = i
 
-            # Capture the gateway routing key on THIS (parent) thread — the
-            # daemon worker won't carry the session contextvar.
-            _session_key = get_current_session_key(default="")
+                # Poll futures with interrupt checking.  as_completed() blocks
+                # until ALL futures finish — if a child agent gets stuck,
+                # the parent blocks forever even after interrupt propagation.
+                # Instead, use wait() with a short timeout so we can bail
+                # when the parent is interrupted.
+                # Map task_index -> child agent, so fabricated entries for
+                # still-pending futures can carry the correct _delegate_role.
+                _child_by_index = {i: child for (i, _, child) in children}
 
-            # Detach the child from the parent's interrupt-propagation list.
-            # _build_child_agent registered it there (correct for sync
-            # children, which block the parent's turn), but a BACKGROUND
-            # child must survive parent-turn interrupts (Ctrl+C, mid-turn
-            # steering), cache evicts (release_clients), and session close
-            # (/new) — otherwise the detached subagent dies with whatever
-            # the parent was doing when it was dispatched. Its lifecycle is
-            # owned by the async-delegation registry (interrupt_fn below),
-            # and _run_single_child's finally block closes its resources
-            # when it finishes.
-            if hasattr(parent_agent, "_active_children"):
-                try:
-                    _ac_lock = getattr(parent_agent, "_active_children_lock", None)
-                    if _ac_lock:
-                        with _ac_lock:
-                            parent_agent._active_children.remove(child)
-                    else:
-                        parent_agent._active_children.remove(child)
-                except ValueError:
-                    pass
-
-            def _async_runner(_child=child, _goal=_t["goal"]):
-                return _run_single_child(0, _goal, _child, parent_agent)
-
-            def _async_interrupt(_child=child):
-                try:
-                    if hasattr(_child, "interrupt"):
-                        _child.interrupt("Async delegation cancelled")
-                    elif hasattr(_child, "_interrupt_requested"):
-                        _child._interrupt_requested = True
-                except Exception:
-                    pass
-
-            dispatch = dispatch_async_delegation(
-                goal=_t["goal"],
-                context=_t.get("context"),
-                toolsets=_t.get("toolsets") or toolsets,
-                role=_normalize_role(_t.get("role") or top_role),
-                model=creds["model"],
-                session_key=_session_key,
-                runner=_async_runner,
-                interrupt_fn=_async_interrupt,
-                max_async_children=_get_max_async_children(),
-            )
-
-            if dispatch.get("status") == "dispatched":
-                return json.dumps(
-                    {
-                        "status": "dispatched",
-                        "delegation_id": dispatch["delegation_id"],
-                        "goal": _t["goal"],
-                        "mode": "background",
-                        "note": (
-                            "Subagent is running in the background. You and the "
-                            "user can keep working; the full task source and "
-                            "result will re-enter the conversation as a new "
-                            "message when it finishes. Do not wait or poll — "
-                            "just continue."
-                        ),
-                    },
-                    ensure_ascii=False,
-                )
-            # Rejected (at capacity or schedule failure) — surface as a tool
-            # error so the model can fall back to synchronous delegation.
-            return tool_error(
-                dispatch.get("error", "Async delegation could not be scheduled.")
-            )
-
-        result = _run_single_child(0, _t["goal"], child, parent_agent)
-        results.append(result)
-    else:
-        # Batch -- run in parallel with per-task progress lines
-        completed_count = 0
-        spinner_ref = getattr(parent_agent, "_delegate_spinner", None)
-
-        with ThreadPoolExecutor(max_workers=max_children) as executor:
-            futures = {}
-            for i, t, child in children:
-                future = executor.submit(
-                    _run_single_child,
-                    task_index=i,
-                    goal=t["goal"],
-                    child=child,
-                    parent_agent=parent_agent,
-                )
-                futures[future] = i
-
-            # Poll futures with interrupt checking.  as_completed() blocks
-            # until ALL futures finish — if a child agent gets stuck,
-            # the parent blocks forever even after interrupt propagation.
-            # Instead, use wait() with a short timeout so we can bail
-            # when the parent is interrupted.
-            # Map task_index -> child agent, so fabricated entries for
-            # still-pending futures can carry the correct _delegate_role.
-            _child_by_index = {i: child for (i, _, child) in children}
-
-            pending = set(futures.keys())
-            while pending:
-                if getattr(parent_agent, "_interrupt_requested", False) is True:
-                    # Parent interrupted — collect whatever finished and
-                    # abandon the rest.  Children already received the
-                    # interrupt signal; we just can't wait forever.
-                    for f in pending:
-                        idx = futures[f]
-                        if f.done():
-                            try:
-                                entry = f.result()
-                            except Exception as exc:
+                pending = set(futures.keys())
+                while pending:
+                    if getattr(parent_agent, "_interrupt_requested", False) is True:
+                        # Parent interrupted — collect whatever finished and
+                        # abandon the rest.  Children already received the
+                        # interrupt signal; we just can't wait forever.
+                        for f in pending:
+                            idx = futures[f]
+                            if f.done():
+                                try:
+                                    entry = f.result()
+                                except Exception as exc:
+                                    entry = {
+                                        "task_index": idx,
+                                        "status": "error",
+                                        "summary": None,
+                                        "error": str(exc),
+                                        "api_calls": 0,
+                                        "duration_seconds": 0,
+                                        "_child_role": getattr(
+                                            _child_by_index.get(idx), "_delegate_role", None
+                                        ),
+                                    }
+                            else:
                                 entry = {
                                     "task_index": idx,
-                                    "status": "error",
+                                    "status": "interrupted",
                                     "summary": None,
-                                    "error": str(exc),
+                                    "error": "Parent agent interrupted — child did not finish in time",
                                     "api_calls": 0,
                                     "duration_seconds": 0,
                                     "_child_role": getattr(
                                         _child_by_index.get(idx), "_delegate_role", None
                                     ),
                                 }
-                        else:
+                            results.append(entry)
+                            completed_count += 1
+                        break
+
+                    from concurrent.futures import wait as _cf_wait, FIRST_COMPLETED
+
+                    done, pending = _cf_wait(
+                        pending, timeout=0.5, return_when=FIRST_COMPLETED
+                    )
+                    for future in done:
+                        try:
+                            entry = future.result()
+                        except Exception as exc:
+                            idx = futures[future]
                             entry = {
                                 "task_index": idx,
-                                "status": "interrupted",
+                                "status": "error",
                                 "summary": None,
-                                "error": "Parent agent interrupted — child did not finish in time",
+                                "error": str(exc),
                                 "api_calls": 0,
                                 "duration_seconds": 0,
                                 "_child_role": getattr(
@@ -2494,341 +2372,420 @@ def delegate_task(
                             }
                         results.append(entry)
                         completed_count += 1
-                    break
 
-                from concurrent.futures import wait as _cf_wait, FIRST_COMPLETED
-
-                done, pending = _cf_wait(
-                    pending, timeout=0.5, return_when=FIRST_COMPLETED
-                )
-                for future in done:
-                    try:
-                        entry = future.result()
-                    except Exception as exc:
-                        idx = futures[future]
-                        entry = {
-                            "task_index": idx,
-                            "status": "error",
-                            "summary": None,
-                            "error": str(exc),
-                            "api_calls": 0,
-                            "duration_seconds": 0,
-                            "_child_role": getattr(
-                                _child_by_index.get(idx), "_delegate_role", None
-                            ),
-                        }
-                    results.append(entry)
-                    completed_count += 1
-
-                    # Print per-task completion line above the spinner
-                    idx = entry["task_index"]
-                    label = (
-                        task_labels[idx] if idx < len(task_labels) else f"Task {idx}"
-                    )
-                    dur = entry.get("duration_seconds", 0)
-                    status = entry.get("status", "?")
-                    icon = "✓" if status == "completed" else "✗"
-                    remaining = n_tasks - completed_count
-                    completion_line = f"{icon} [{idx+1}/{n_tasks}] {label}  ({dur}s)"
-                    if spinner_ref:
-                        try:
-                            spinner_ref.print_above(completion_line)
-                        except Exception:
+                        # Print per-task completion line above the spinner
+                        idx = entry["task_index"]
+                        label = (
+                            task_labels[idx] if idx < len(task_labels) else f"Task {idx}"
+                        )
+                        dur = entry.get("duration_seconds", 0)
+                        status = entry.get("status", "?")
+                        icon = "✓" if status == "completed" else "✗"
+                        remaining = n_tasks - completed_count
+                        completion_line = f"{icon} [{idx+1}/{n_tasks}] {label}  ({dur}s)"
+                        if spinner_ref:
+                            try:
+                                spinner_ref.print_above(completion_line)
+                            except Exception:
+                                print(f"  {completion_line}")
+                        else:
                             print(f"  {completion_line}")
-                    else:
-                        print(f"  {completion_line}")
 
-                    # Update spinner text to show remaining count
-                    if spinner_ref and remaining > 0:
-                        try:
-                            spinner_ref.update_text(
-                                f"🔀 {remaining} task{'s' if remaining != 1 else ''} remaining"
-                            )
-                        except Exception as e:
-                            logger.debug("Spinner update_text failed: %s", e)
+                        # Update spinner text to show remaining count
+                        if spinner_ref and remaining > 0:
+                            try:
+                                spinner_ref.update_text(
+                                    f"🔀 {remaining} task{'s' if remaining != 1 else ''} remaining"
+                                )
+                            except Exception as e:
+                                logger.debug("Spinner update_text failed: %s", e)
 
-        # Sort by task_index so results match input order
-        results.sort(key=lambda r: r["task_index"])
+            # Sort by task_index so results match input order
+            results.sort(key=lambda r: r["task_index"])
 
-    # KENSEI CUSTOM — verification primitive (single-task mode only)
-    # Detect intent: either explicit verify=True OR verify_rubric provided.
-    # verify_rubric fallback is a structural defence against dispatch bugs
-    # where boolean verify is dropped between the model and the function.
-    _effective_verify = bool(verify or verify_rubric)
-    logger.info(
-        "delegate_task: verify=%s rubric_set=%s effective=%s n_tasks=%s gate=%s — will%s enter verify branch",
-        verify, bool(verify_rubric), _effective_verify, n_tasks, _get_verify_enabled(),
-        "" if (_effective_verify and n_tasks == 1 and _get_verify_enabled()) else " NOT",
-    )
-    if _effective_verify and n_tasks == 1 and _get_verify_enabled():
-        try:
-            entry = results[0]
-            producer_summary = entry.get("summary") or ""
-            finding = _extract_finding(producer_summary)
-            if not finding:
-                logger.warning(
-                    "delegate_task: verify=True but could not extract finding "
-                    "from child output (%d chars, preview: %s); "
-                    "skipping verification. Producer keys used may not match "
-                    "expected 'finding'/'answer'/'conclusion'/'claim'. "
-                    "If this is a false-negative, add the key to "
-                    "_extract_finding's Strategy 1 or instruct the producer "
-                    "to use the JSON key 'finding'.",
-                    len(producer_summary), producer_summary[:80].replace("\n", " "),
-                )
-            else:
-                rubric = verify_rubric or "Evaluate whether this finding is factually correct, logically sound, and well-supported."
-                # Build skeptic prompt — CRITICAL: must NOT contain producer reasoning
-                # (G5: isolation enforced structurally, not by prompt)
-                skeptic_goal = (
-                    "You are a skeptical reviewer. Your job is to find flaws "
-                    "in the following finding. Be rigorous and evidence-based.\n\n"
-                    f"FINDING TO EVALUATE:\n{finding}\n\n"
-                    f"RUBRIC:\n{rubric}\n\n"
-                    "Respond with a structured verdict:\n"
-                    '{"claim": "<restated claim>", '
-                    '"survived": true|false, '
-                    '"verdict": "<your assessment>", '
-                    '"reasoning": "<evidence-based reasoning>", '
-                    '"confidence": 0.0-1.0}'
-                )
-                # Spawn skeptic in CLEAN context (no parent history — guaranteed
-                # by existing subagent isolation: skip_context_files=True,
-                # skip_memory=True, ephemeral_system_prompt). The skeptic goal
-                # string contains ONLY the finding + rubric — never producer
-                # reasoning (G5 enforcement point).
-                skeptic_result = _run_single_child(
-                    task_index=0,
-                    goal=skeptic_goal,
-                    child=_build_child_agent(
-                        task_index=len(task_list),
-                        goal=skeptic_goal,
-                        context=None,
-                        toolsets=None,
-                        model=creds["model"],
-                        max_iterations=effective_max_iter,
-                        task_count=1,
-                        parent_agent=parent_agent,
-                        override_provider=creds["provider"],
-                        override_base_url=creds["base_url"],
-                        override_api_key=creds["api_key"],
-                        override_api_mode=creds["api_mode"],
-                    ),
-                    parent_agent=parent_agent,
-                )
-                sk_summary = skeptic_result.get("summary") or ""
-                # F4: strip JSON fences, default to None (unknown) on parse failure
-                cleaned = sk_summary.strip()
-                for fence in ("```json", "```"):
-                    if cleaned.startswith(fence):
-                        cleaned = cleaned[len(fence):]
-                    if cleaned.endswith("```"):
-                        cleaned = cleaned[:-3]
-                cleaned = cleaned.strip()
-                try:
-                    sk_parsed = json.loads(cleaned) if cleaned.startswith("{") else {"raw": sk_summary, "survived": None}
-                except json.JSONDecodeError:
-                    sk_parsed = {"raw": sk_summary, "survived": None}
-                entry["verification"] = {
-                    "verified": sk_parsed.get("survived"),
-                    "skeptic_verdict": sk_parsed.get("verdict", ""),
-                    "skeptic_reasoning": sk_parsed.get("reasoning", ""),
-                    "skeptic_confidence": sk_parsed.get("confidence", 0.0),
-                }
-        except Exception as exc:
-            logger.warning(
-                "delegate_task: verification failed with exception: %s",
-                exc, exc_info=True,
+            # ── KENSEI CUSTOM — verification primitive (single-task mode only) ──
+            # Detect intent: either explicit verify=True OR verify_rubric provided.
+            # verify_rubric fallback is a structural defence against dispatch bugs
+            # where boolean verify is dropped between the model and the function.
+            _effective_verify = bool(verify or verify_rubric)
+            logger.info(
+                "delegate_task: verify=%s rubric_set=%s effective=%s n_tasks=%s gate=%s — will%s enter verify branch",
+                verify, bool(verify_rubric), _effective_verify, n_tasks, _get_verify_enabled(),
+                "" if (_effective_verify and n_tasks == 1 and _get_verify_enabled()) else " NOT",
             )
-            # Never let verification failure eat the original result.
-            # On error, mark as unverified and return original.
-            if results and "verification" not in results[0]:
-                results[0]["verification"] = {
-                    "verified": None,
-                    "error": f"Verification agent failed: {exc}",
-                }
+            if _effective_verify and n_tasks == 1 and _get_verify_enabled():
+                try:
+                    entry = results[0]
+                    producer_summary = entry.get("summary") or ""
+                    finding = _extract_finding(producer_summary)
+                    if not finding:
+                        logger.warning(
+                            "delegate_task: verify=True but could not extract finding "
+                            "from child output (%d chars, preview: %s); "
+                            "skipping verification.",
+                            len(producer_summary), producer_summary[:80].replace("\n", " "),
+                        )
+                    else:
+                        rubric = verify_rubric or "Evaluate whether this finding is factually correct, logically sound, and well-supported."
+                        skeptic_goal = (
+                            "You are a skeptical reviewer. Your job is to find flaws "
+                            "in the following finding. Be rigorous and evidence-based.\n\n"
+                            f"FINDING TO EVALUATE:\n{finding}\n\n"
+                            f"RUBRIC:\n{rubric}\n\n"
+                            "Respond with a structured verdict:\n"
+                            '{"claim": "<restated claim>", '
+                            '"survived": true|false, '
+                            '"verdict": "<your assessment>", '
+                            '"reasoning": "<evidence-based reasoning>", '
+                            '"confidence": 0.0-1.0}'
+                        )
+                        skeptic_result = _run_single_child(
+                            task_index=0,
+                            goal=skeptic_goal,
+                            child=_build_child_agent(
+                                task_index=len(task_list),
+                                goal=skeptic_goal,
+                                context=None,
+                                toolsets=None,
+                                model=creds["model"],
+                                max_iterations=effective_max_iter,
+                                task_count=1,
+                                parent_agent=parent_agent,
+                                override_provider=creds["provider"],
+                                override_base_url=creds["base_url"],
+                                override_api_key=creds["api_key"],
+                                override_api_mode=creds["api_mode"],
+                            ),
+                            parent_agent=parent_agent,
+                        )
+                        sk_summary = skeptic_result.get("summary") or ""
+                        cleaned = sk_summary.strip()
+                        for fence in ("```json", "```"):
+                            if cleaned.startswith(fence):
+                                cleaned = cleaned[len(fence):]
+                            if cleaned.endswith("```"):
+                                cleaned = cleaned[:-3]
+                        cleaned = cleaned.strip()
+                        try:
+                            sk_parsed = json.loads(cleaned) if cleaned.startswith("{") else {"raw": sk_summary, "survived": None}
+                        except json.JSONDecodeError:
+                            sk_parsed = {"raw": sk_summary, "survived": None}
+                        entry["verification"] = {
+                            "verified": sk_parsed.get("survived"),
+                            "skeptic_verdict": sk_parsed.get("verdict", ""),
+                            "skeptic_reasoning": sk_parsed.get("reasoning", ""),
+                            "skeptic_confidence": sk_parsed.get("confidence", 0.0),
+                        }
+                except Exception as exc:
+                    logger.warning(
+                        "delegate_task: verification failed with exception: %s",
+                        exc, exc_info=True,
+                    )
+                    if results and "verification" not in results[0]:
+                        results[0]["verification"] = {
+                            "verified": None,
+                            "error": f"Verification agent failed: {exc}",
+                        }
+            # ── END KENSEI CUSTOM verification primitive ──
 
-    # Notify parent's memory provider of delegation outcomes
-    if (
-        parent_agent
-        and hasattr(parent_agent, "_memory_manager")
-        and parent_agent._memory_manager
-    ):
-        for entry in results:
-            try:
-                _task_goal = (
-                    task_list[entry["task_index"]]["goal"]
-                    if entry["task_index"] < len(task_list)
-                    else ""
-                )
-                parent_agent._memory_manager.on_delegation(
-                    task=_task_goal,
-                    result=entry.get("summary", "") or "",
-                    child_session_id=(
-                        getattr(children[entry["task_index"]][2], "session_id", "")
-                        if entry["task_index"] < len(children)
+
+        # Notify parent's memory provider of delegation outcomes
+        if (
+            parent_agent
+            and hasattr(parent_agent, "_memory_manager")
+            and parent_agent._memory_manager
+        ):
+            for entry in results:
+                try:
+                    _task_goal = (
+                        task_list[entry["task_index"]]["goal"]
+                        if entry["task_index"] < len(task_list)
                         else ""
-                    ),
+                    )
+                    parent_agent._memory_manager.on_delegation(
+                        task=_task_goal,
+                        result=entry.get("summary", "") or "",
+                        child_session_id=(
+                            getattr(children[entry["task_index"]][2], "session_id", "")
+                            if entry["task_index"] < len(children)
+                            else ""
+                        ),
+                    )
+                except Exception:
+                    pass
+
+        # Fire subagent_stop hooks once per child, serialised on the parent thread.
+        # This keeps Python-plugin and shell-hook callbacks off of the worker threads
+        # that ran the children, so hook authors don't need to reason about
+        # concurrent invocation.  Role was captured into the entry dict in
+        # _run_single_child (or the fabricated-entry branches above) before the
+        # child was closed.
+        _parent_session_id = getattr(parent_agent, "session_id", None)
+        try:
+            from hermes_cli.plugins import invoke_hook as _invoke_hook
+        except Exception:
+            _invoke_hook = None
+        # Aggregate child spend here so the parent's footer/UI reflect the true
+        # cost of a subagent-heavy turn.  Port of Kilo-Org/kilocode#9448.  Each
+        # child's cost was captured in _run_single_child before its AIAgent was
+        # closed; we fold them into the parent in one pass alongside the
+        # subagent_stop hook loop so we don't walk `results` twice.
+        _children_cost_total = 0.0
+        for entry in results:
+            child_role = entry.pop("_child_role", None)
+            child_cost = entry.pop("_child_cost_usd", 0.0)
+            try:
+                if child_cost:
+                    _children_cost_total += float(child_cost)
+            except (TypeError, ValueError):
+                pass
+            if _invoke_hook is None:
+                continue
+            try:
+                _child_index = entry.get("task_index", -1)
+                _child_agent = (
+                    children[_child_index][2]
+                    if isinstance(_child_index, int) and 0 <= _child_index < len(children)
+                    else None
+                )
+                _invoke_hook(
+                    "subagent_stop",
+                    parent_session_id=_parent_session_id,
+                    parent_turn_id=getattr(parent_agent, "_current_turn_id", "") or "",
+                    child_session_id=getattr(_child_agent, "session_id", None),
+                    child_role=child_role,
+                    child_summary=entry.get("summary"),
+                    child_status=entry.get("status"),
+                    duration_ms=int((entry.get("duration_seconds") or 0) * 1000),
                 )
             except Exception:
-                pass
+                logger.debug("subagent_stop hook invocation failed", exc_info=True)
 
-    # Fire subagent_stop hooks once per child, serialised on the parent thread.
-    # This keeps Python-plugin and shell-hook callbacks off of the worker threads
-    # that ran the children, so hook authors don't need to reason about
-    # concurrent invocation.  Role was captured into the entry dict in
-    # _run_single_child (or the fabricated-entry branches above) before the
-    # child was closed.
-    _parent_session_id = getattr(parent_agent, "session_id", None)
-    try:
-        from hermes_cli.plugins import invoke_hook as _invoke_hook
-    except Exception:
-        _invoke_hook = None
-    # Aggregate child spend here so the parent's footer/UI reflect the true
-    # cost of a subagent-heavy turn.  Port of Kilo-Org/kilocode#9448.  Each
-    # child's cost was captured in _run_single_child before its AIAgent was
-    # closed; we fold them into the parent in one pass alongside the
-    # subagent_stop hook loop so we don't walk `results` twice.
-    _children_cost_total = 0.0
-    for entry in results:
-        child_role = entry.pop("_child_role", None)
-        child_cost = entry.pop("_child_cost_usd", 0.0)
-        try:
-            if child_cost:
-                _children_cost_total += float(child_cost)
-        except (TypeError, ValueError):
-            pass
-        if _invoke_hook is None:
-            continue
-        try:
-            _child_index = entry.get("task_index", -1)
-            _child_agent = (
-                children[_child_index][2]
-                if isinstance(_child_index, int) and 0 <= _child_index < len(children)
-                else None
-            )
-            _invoke_hook(
-                "subagent_stop",
-                parent_session_id=_parent_session_id,
-                parent_turn_id=getattr(parent_agent, "_current_turn_id", "") or "",
-                child_session_id=getattr(_child_agent, "session_id", None),
-                child_role=child_role,
-                child_summary=entry.get("summary"),
-                child_status=entry.get("status"),
-                duration_ms=int((entry.get("duration_seconds") or 0) * 1000),
-            )
-        except Exception:
-            logger.debug("subagent_stop hook invocation failed", exc_info=True)
+        # Fold the aggregated child cost into the parent's session total.  This is
+        # additive — each delegate_task call contributes its own children — so
+        # nested orchestrator→worker trees roll up naturally: each layer's own
+        # delegate_task() folds its direct children in, and when the orchestrator
+        # itself finishes, its parent folds the orchestrator's now-inflated total
+        # on top.  Degrades silently if the parent lacks the counter (older test
+        # fixtures, etc.).
+        if _children_cost_total > 0.0:
+            try:
+                current = float(getattr(parent_agent, "session_estimated_cost_usd", 0.0) or 0.0)
+                parent_agent.session_estimated_cost_usd = current + _children_cost_total
+                # Upgrade the cost_source so the UI doesn't label a partially-real
+                # total as "none" when the parent itself hadn't billed any calls
+                # yet (rare but possible when the parent's only action this turn
+                # was delegate_task).
+                if getattr(parent_agent, "session_cost_source", "none") in {None, "", "none"}:
+                    parent_agent.session_cost_source = "subagent"
+                if getattr(parent_agent, "session_cost_status", "unknown") in {None, "", "unknown"}:
+                    parent_agent.session_cost_status = "estimated"
+            except Exception:
+                logger.debug("Subagent cost rollup failed", exc_info=True)
 
-    # Fold the aggregated child cost into the parent's session total.  This is
-    # additive — each delegate_task call contributes its own children — so
-    # nested orchestrator→worker trees roll up naturally: each layer's own
-    # delegate_task() folds its direct children in, and when the orchestrator
-    # itself finishes, its parent folds the orchestrator's now-inflated total
-    # on top.  Degrades silently if the parent lacks the counter (older test
-    # fixtures, etc.).
-    if _children_cost_total > 0.0:
-        try:
-            current = float(getattr(parent_agent, "session_estimated_cost_usd", 0.0) or 0.0)
-            parent_agent.session_estimated_cost_usd = current + _children_cost_total
-            # Upgrade the cost_source so the UI doesn't label a partially-real
-            # total as "none" when the parent itself hadn't billed any calls
-            # yet (rare but possible when the parent's only action this turn
-            # was delegate_task).
-            if getattr(parent_agent, "session_cost_source", "none") in {None, "", "none"}:
-                parent_agent.session_cost_source = "subagent"
-            if getattr(parent_agent, "session_cost_status", "unknown") in {None, "", "unknown"}:
-                parent_agent.session_cost_status = "estimated"
-        except Exception:
-            logger.debug("Subagent cost rollup failed", exc_info=True)
+        total_duration = round(time.monotonic() - overall_start, 2)
 
-    total_duration = round(time.monotonic() - overall_start, 2)
-
-    # KENSEI CUSTOM — synthesis primitive (batch mode only, n > 1)
-    if synthesize and n_tasks > 1 and _get_synthesis_enabled():
+        # ── KENSEI CUSTOM — synthesis primitive (batch mode only, n > 1) ──
         synth_output = None
         missing_tasks = []
-        try:
-            summaries = []
-            for entry in results:
-                if entry.get("status") == "completed" and entry.get("summary"):
-                    summaries.append(entry["summary"])
-                elif entry.get("status") != "completed":
-                    idx = entry.get("task_index", -1)
-                    gl = task_labels[idx] if 0 <= idx < len(task_labels) else f"Task {idx}"
-                    missing_tasks.append(gl)
+        if synthesize and n_tasks > 1 and _get_synthesis_enabled():
+            try:
+                summaries = []
+                for entry in results:
+                    if entry.get("status") == "completed" and entry.get("summary"):
+                        summaries.append(entry["summary"])
+                    elif entry.get("status") != "completed":
+                        idx = entry.get("task_index", -1)
+                        gl = task_labels[idx] if 0 <= idx < len(task_labels) else f"Task {idx}"
+                        missing_tasks.append(gl)
 
-            if not summaries:
-                logger.warning(
-                    "delegate_task: synthesize=True but no children "
-                    "produced usable summaries; skipping synthesis"
-                )
-            else:
-                synth_prompt = synthesis_prompt or (
-                    "Synthesize the following findings from {n} parallel "
-                    "sub-agents into a single coherent output. Resolve "
-                    "contradictions. Deduplicate overlapping content. "
-                    "Flag confidence levels.\n\n"
-                    "{summary_block}\n\n"
-                    "Provide your synthesis as a structured report."
-                )
-                summary_block = "\n---\n".join(
-                    f"[TASK {i+1}]\n{s}" for i, s in enumerate(summaries)
-                )
-                # Capture presence BEFORE replace (F2 fix: after replace,
-                # the token is gone so 'not in' is always True).
-                had_block_token = "{summary_block}" in synth_prompt
-                synth_prompt = synth_prompt.replace(
-                    "{summary_block}", summary_block
-                ).replace("{n}", str(len(summaries)))
-                if not had_block_token:
-                    synth_prompt += f"\n\n{summary_block}"
-
-                if missing_tasks:
-                    synth_prompt += (
-                        f"\n\nNOTE: {len(missing_tasks)} task(s) did "
-                        f"not complete or produced no output: "
-                        f"{', '.join(missing_tasks)}. Account for these "
-                        f"gaps — do not fabricate findings."
+                if not summaries:
+                    logger.warning(
+                        "delegate_task: synthesize=True but no children "
+                        "produced usable summaries; skipping synthesis"
                     )
+                else:
+                    synth_prompt = synthesis_prompt or (
+                        "Synthesize the following findings from {n} parallel "
+                        "sub-agents into a single coherent output. Resolve "
+                        "contradictions. Deduplicate overlapping content. "
+                        "Flag confidence levels.\n\n"
+                        "{summary_block}\n\n"
+                        "Provide your synthesis as a structured report."
+                    )
+                    summary_block = "\n---\n".join(
+                        f"[TASK {i+1}]\n{s}" for i, s in enumerate(summaries)
+                    )
+                    had_block_token = "{summary_block}" in synth_prompt
+                    synth_prompt = synth_prompt.replace(
+                        "{summary_block}", summary_block
+                    ).replace("{n}", str(len(summaries)))
+                    if not had_block_token:
+                        synth_prompt += f"\n\n{summary_block}"
 
-                synth_result = _run_single_child(
-                    task_index=len(task_list),
-                    goal=synth_prompt,
-                    child=_build_child_agent(
+                    if missing_tasks:
+                        synth_prompt += (
+                            f"\n\nNOTE: {len(missing_tasks)} task(s) did "
+                            f"not complete or produced no output: "
+                            f"{', '.join(missing_tasks)}. Account for these "
+                            f"gaps — do not fabricate findings."
+                        )
+
+                    synth_result = _run_single_child(
                         task_index=len(task_list),
                         goal=synth_prompt,
-                        context=None,
-                        toolsets=None,
-                        model=creds["model"],
-                        max_iterations=effective_max_iter,
-                        task_count=1,
+                        child=_build_child_agent(
+                            task_index=len(task_list),
+                            goal=synth_prompt,
+                            context=None,
+                            toolsets=None,
+                            model=creds["model"],
+                            max_iterations=effective_max_iter,
+                            task_count=1,
+                            parent_agent=parent_agent,
+                            override_provider=creds["provider"],
+                            override_base_url=creds["base_url"],
+                            override_api_key=creds["api_key"],
+                            override_api_mode=creds["api_mode"],
+                        ),
                         parent_agent=parent_agent,
-                        override_provider=creds["provider"],
-                        override_base_url=creds["base_url"],
-                        override_api_key=creds["api_key"],
-                        override_api_mode=creds["api_mode"],
-                    ),
-                    parent_agent=parent_agent,
+                    )
+                    synth_output = synth_result.get("summary") or None
+            except Exception as exc:
+                logger.warning(
+                    "delegate_task: synthesis failed: %s", exc, exc_info=True
                 )
-                synth_output = synth_result.get("summary") or None
-        except Exception as exc:
-            logger.warning(
-                "delegate_task: synthesis failed: %s", exc, exc_info=True
+
+        response_dict = {
+            "results": results,
+            "total_duration_seconds": total_duration,
+        }
+        if synthesize and n_tasks > 1 and _get_synthesis_enabled():
+            if synth_output is not None:
+                response_dict["synthesis"] = synth_output
+            if missing_tasks:
+                response_dict["missing_tasks"] = missing_tasks
+        return response_dict
+
+    # ----- Background dispatch: run the WHOLE batch as one async unit -----
+    # When background is true, the entire fan-out runs on the daemon executor
+    # via a single async delegation. _execute_and_aggregate() joins on every
+    # child and produces ONE consolidated results block, which re-enters the
+    # conversation as a single message when ALL children finish. The chat is
+    # not blocked in the meantime. This is the contract: dispatch N subagents,
+    # keep chatting, get the combined summaries back together at the end.
+    if background:
+        from tools.async_delegation import dispatch_async_delegation_batch
+        from tools.approval import get_current_session_key
+
+        # Stateless request/response sessions (the API server / WebUI path)
+        # cannot route a detached subagent result back to the agent after the
+        # turn ends — there is no persistent channel and the adapter's send()
+        # is a no-op, so a background dispatch would silently never re-enter the
+        # conversation (issue #10760). Fall back to SYNCHRONOUS execution: the
+        # work still runs and its result returns in this same response, which is
+        # strictly better than a handle that never resolves. Mirrors the
+        # pool-at-capacity inline fallback below.
+        try:
+            from gateway.session_context import async_delivery_supported
+            _async_ok = async_delivery_supported()
+        except Exception:
+            _async_ok = True
+        if not _async_ok:
+            logger.info(
+                "delegate_task: async delivery unsupported on this session "
+                "(stateless HTTP API); running the batch synchronously instead."
             )
+            _sync_result = _execute_and_aggregate()
+            if isinstance(_sync_result, dict):
+                _sync_result["note"] = (
+                    "background=true is not available on this endpoint (stateless "
+                    "HTTP API — no channel to deliver a detached subagent result "
+                    "after the turn ends), so the subagent(s) ran SYNCHRONOUSLY and "
+                    "the result is included above."
+                )
+            return json.dumps(_sync_result, ensure_ascii=False)
 
-    # Build response dict with optional synthesis output
-    response_dict = {
-        "results": results,
-        "total_duration_seconds": total_duration,
-    }
-    if synthesize and n_tasks > 1 and _get_synthesis_enabled():
-        if synth_output is not None:
-            response_dict["synthesis"] = synth_output
-        if missing_tasks:
-            response_dict["missing_tasks"] = missing_tasks
+        _session_key = get_current_session_key(default="")
+        _child_agents = [c for (_, _, c) in children]
 
-    return json.dumps(response_dict, ensure_ascii=False)
+        # Detach every child from the parent's interrupt-propagation list — the
+        # batch's lifecycle is owned by the async registry now, not the parent
+        # turn. _build_child_agent attached them (correct for sync runs).
+        if hasattr(parent_agent, "_active_children"):
+            _ac_lock = getattr(parent_agent, "_active_children_lock", None)
+            for _c in _child_agents:
+                try:
+                    if _ac_lock:
+                        with _ac_lock:
+                            parent_agent._active_children.remove(_c)
+                    else:
+                        parent_agent._active_children.remove(_c)
+                except ValueError:
+                    pass
+
+        def _batch_runner():
+            return _execute_and_aggregate()
+
+        def _batch_interrupt():
+            for _c in _child_agents:
+                try:
+                    if hasattr(_c, "interrupt"):
+                        _c.interrupt("Async delegation cancelled")
+                    elif hasattr(_c, "_interrupt_requested"):
+                        _c._interrupt_requested = True
+                except Exception:
+                    pass
+
+        _goals = [t["goal"] for t in task_list]
+        dispatch = dispatch_async_delegation_batch(
+            goals=_goals,
+            context=context,
+            toolsets=toolsets,
+            role=top_role,
+            model=creds["model"],
+            session_key=_session_key,
+            runner=_batch_runner,
+            interrupt_fn=_batch_interrupt,
+            max_async_children=_get_max_async_children(),
+        )
+
+        if dispatch.get("status") == "dispatched":
+            n = len(_goals)
+            note = (
+                "Subagent is running in the background. You and the user can "
+                "keep working; its full result re-enters the conversation as a "
+                "new message when it finishes. Do not wait or poll — just "
+                "continue."
+                if n == 1 else
+                f"{n} subagents are running in parallel in the background. You "
+                f"and the user can keep working; they wait on each other and "
+                f"their consolidated results re-enter the conversation as a "
+                f"single message once ALL of them finish. Do not wait or poll "
+                f"— just continue."
+            )
+            payload = {
+                "status": "dispatched",
+                "mode": "background",
+                "count": n,
+                "delegation_id": dispatch["delegation_id"],
+                "goals": _goals,
+                "note": note,
+            }
+            return json.dumps(payload, ensure_ascii=False)
+
+        # Pool at capacity / schedule failure — children are still attached
+        # (we detach above only on the parent list, but the async unit was
+        # never accepted, so re-attaching isn't needed: we just run inline).
+        logger.info(
+            "delegate_task: async pool at capacity (%s); running the whole "
+            "batch synchronously instead.",
+            dispatch.get("error", "rejected"),
+        )
+        return json.dumps(_execute_and_aggregate(), ensure_ascii=False)
+
+    # ----- Synchronous path -----
+    return json.dumps(_execute_and_aggregate(), ensure_ascii=False)
 
 
 def _resolve_child_credential_pool(
@@ -2914,6 +2871,73 @@ def _resolve_child_credential_pool(
             exc,
         )
     return None
+
+
+def _extract_finding(summary: str) -> str:
+    """Extract the core finding from a producer summary, stripping reasoning.
+
+    Tries multiple strategies in order:
+    1. JSON block with named key (finding / answer / conclusion / claim)
+    2. Any JSON block — serialise whole block as the finding
+    3. Markdown heading '## Finding' or '## Conclusion'
+
+    Returns the extracted finding string, or empty string on failure.
+    When empty, verification is skipped and a warning is logged.
+    """
+    if not summary or not summary.strip():
+        return ""
+
+    text = summary.strip()
+
+    # Cap scanned text to prevent pathological regex behaviour on unusually
+    # large producer summaries (bounded polynomial, not catastrophic, but
+    # this box has two documented regex-freeze incidents).
+    if len(text) > 20000:
+        text = text[-20000:]
+    import re as _re
+
+    # --- Strategy 1: JSON extraction via shared parser ---
+
+    # 1a: Try the shared parser on the whole text first
+    from hermes_cli.llm_json import parse_llm_json
+    parsed = parse_llm_json(text, raise_on_failure=False)
+    if parsed is not None:
+        for key in ("finding", "answer", "conclusion", "claim"):
+            if key in parsed and isinstance(parsed[key], str) and parsed[key]:
+                return str(parsed[key])
+        # No named key; serialise the whole dict as the finding
+        return json.dumps(parsed, indent=2)
+
+    # 1b: Scan for inline JSON blocks with named keys (the shared parser
+    #     expects a clean JSON document; inline blocks need regex extraction).
+    #     NOTE: regex handles ONE nesting level only; deeper nested JSON
+    #     falls through to the heading strategy below (DG-2, acceptable
+    #     degradation; nested findings are rare in practice).
+    key_pats = "finding|answer|conclusion|claim"
+    named_blocks = _re.findall(
+        r'\{[^{}]*"(?:' + key_pats + r')"[^{}]*\}',
+        text, _re.DOTALL,
+    )
+    for block in reversed(named_blocks):
+        try:
+            parsed = json.loads(block)
+            for key in ("finding", "answer", "conclusion", "claim"):
+                if key in parsed and parsed[key]:
+                    return str(parsed[key])
+        except (json.JSONDecodeError, TypeError, KeyError):
+            continue
+
+    # --- Strategy 2: Markdown heading ---
+    for heading in ("Finding", "Conclusion", "Claim", "Result"):
+        m = _re.search(
+            rf"^##\s+{heading}\s*\n(.+?)(?:\n##|\Z)",
+            text, _re.DOTALL | _re.MULTILINE | _re.IGNORECASE,
+        )
+        if m:
+            return m.group(1).strip()
+
+    # Structured extraction failed.
+    return ""
 
 
 def _resolve_delegation_credentials(cfg: dict, parent_agent) -> dict:
@@ -3031,46 +3055,28 @@ def _resolve_delegation_credentials(cfg: dict, parent_agent) -> dict:
 
 
 def _load_config() -> dict:
-    """Load delegation config — persistent base, CLI overlay on top.
+    """Load delegation config from CLI_CONFIG or persistent config.
 
-    Always reads persistent config first so dynamic ``hermes config set``
-    changes (e.g. ``delegation.verify_enabled``) are visible without a
-    gateway restart.  CLI_CONFIG is then overlaid so runtime model /
-    provider overrides still take effect.
-
-    The previous short-circuit (CLI_CONFIG non-empty → return immediately)
-    blocked persistent reads and caused feature-flag staleness bug where
-    ``hermes config set delegation.verify_enabled true`` had zero effect
-    on a running gateway until the process was restarted.
+    Checks the runtime config (cli.py CLI_CONFIG) first, then falls back
+    to the persistent config (hermes_cli/config.py load_config()) so that
+    ``delegation.model`` / ``delegation.provider`` are picked up regardless
+    of the entry point (CLI, gateway, cron).
     """
-    # 1. Base: persistent config (always fresh — picks up hermes config set)
-    cfg: Dict[str, Any] = {}
+    try:
+        from cli import CLI_CONFIG
+
+        cfg = CLI_CONFIG.get("delegation") or {}
+        if cfg:
+            return cfg
+    except Exception:
+        pass
     try:
         from hermes_cli.config import load_config
 
         full = load_config()
-        cfg = dict(full.get("delegation") or {})
-    except Exception as exc:
-        import logging
-        logging.getLogger("tools.delegate_tool").warning(
-            "delegate_tool._load_config: persistent config load failed, "
-            "all delegation features will use defaults: %s", exc,
-        )
-
-    # 2. Overlay: CLI_CONFIG (runtime model/provider overrides)
-    try:
-        from cli import CLI_CONFIG
-
-        cli_del = CLI_CONFIG.get("delegation") or {}
-        if cli_del:
-            cfg.update(cli_del)
-    except Exception as exc:
-        import logging
-        logging.getLogger("tools.delegate_tool").warning(
-            "delegate_tool._load_config: CLI_CONFIG overlay failed: %s", exc,
-        )
-
-    return cfg
+        return full.get("delegation") or {}
+    except Exception:
+        return {}
 
 
 # ---------------------------------------------------------------------------
@@ -3128,11 +3134,16 @@ def _build_top_level_description() -> str:
         "Only the final summary is returned -- intermediate tool results "
         "never enter your context window.\n\n"
         "TWO MODES (one of 'goal' or 'tasks' is required):\n"
-        "1. Single task: provide 'goal' (+ optional context, toolsets)\n"
+        "1. Single task: provide 'goal' (+ optional context, toolsets).\n"
         f"2. Batch (parallel): provide 'tasks' array with up to {max_children} "
         f"items concurrently for this user (configured via "
-        f"delegation.max_concurrent_children in config.yaml). "
-        f"All run in parallel and results are returned together. {nesting_clause}\n\n"
+        f"delegation.max_concurrent_children in config.yaml). {nesting_clause}\n\n"
+        "BOTH MODES RUN IN THE BACKGROUND. delegate_task returns immediately — "
+        "you and the user keep working, and each subagent's full result "
+        "re-enters the conversation as its own new message when it finishes. A "
+        "batch is just N independent background subagents (N handles, each "
+        "completes on its own). Do NOT wait or poll; just continue with other "
+        "work after dispatching.\n\n"
         "WHEN TO USE delegate_task:\n"
         "- Reasoning-heavy subtasks (debugging, code review, research synthesis)\n"
         "- Tasks that would flood your context with intermediate data\n"
@@ -3143,11 +3154,10 @@ def _build_top_level_description() -> str:
         "- Tasks needing user interaction -> subagents cannot use clarify\n"
         "- Durable long-running work that must outlive the current turn -> "
         "use cronjob (action='create') or terminal(background=True, "
-        "notify_on_complete=True) instead. delegate_task runs SYNCHRONOUSLY "
-        "inside the parent turn: if the parent is interrupted (user sends a "
-        "new message, /stop, /new) the child is cancelled with status="
-        "'interrupted' and its work is discarded. Children cannot continue "
-        "in the background.\n\n"
+        "notify_on_complete=True) instead. Background delegations are NOT "
+        "durable: if the parent session is closed (/new) or the process exits "
+        "before a subagent finishes, that subagent's work is discarded, and "
+        "/stop cancels every running background subagent.\n\n"
         "IMPORTANT:\n"
         "- Subagents have NO memory of your conversation. Pass all relevant "
         "info (file paths, error messages, constraints) via the 'context' field.\n"
@@ -3171,6 +3181,7 @@ def _build_top_level_description() -> str:
         f"Orchestrators are bounded by max_spawn_depth={max_depth} for this "
         f"user and can be disabled globally via "
         "delegation.orchestrator_enabled=false.\n"
+        "- Subagent model is NOT selectable per call: children inherit the parent model (plus its fallback chain) unless you pin all subagents to a model via delegation.provider / delegation.model in config.yaml.\n"
         "- Each subagent gets its own terminal session (separate working directory and state).\n"
         "- Results are always returned as an array, one entry per task."
     )
@@ -3341,40 +3352,48 @@ DELEGATE_TASK_SCHEMA = {
                 "enum": ["leaf", "orchestrator"],
                 "description": "(rebuilt at get_definitions() time)",
             },
-            "synthesize": {
-                "type": "boolean",
-                "description": "KENSEI CUSTOM. After all children complete in batch mode, spawn a synthesis agent to merge results. Only active when delegation.synthesis_enabled=true and n_tasks > 1.",
-            },
-            "synthesis_prompt": {
-                "type": "string",
-                "description": "Custom prompt for the synthesis agent when synthesize=true.",
-            },
-            "verify": {
-                "type": "boolean",
-                "description": "KENSEI CUSTOM. After single-task child produces a finding, spawn skeptic in CLEAN context to refute. Only active when delegation.verify_enabled=true and n_tasks == 1.",
-            },
-            "verify_rubric": {
-                "type": "string",
-                "description": "Custom rubric for the skeptic when verify=true.",
-            },
             "background": {
                 "type": "boolean",
                 "description": (
-                    "Run the subagent asynchronously in the BACKGROUND "
-                    "instead of blocking this turn. When true, delegate_task "
-                    "returns immediately with a delegation_id; you and the "
-                    "user keep working while the subagent runs, and its full "
-                    "result re-enters the conversation as a new message when "
-                    "it finishes (similar to terminal background=true + "
-                    "notify_on_complete). The re-injected message includes the "
-                    "original goal/context so you can act on it even after "
-                    "moving on. Single-task only — cannot be combined with the "
-                    "'tasks' batch array. Use for long-running independent work "
-                    "the user shouldn't have to wait on (research, builds, "
-                    "multi-step investigations). Do NOT poll or wait after "
-                    "dispatching — just continue; the result will come to you."
+                    "DEPRECATED / IGNORED. Single-task delegations always run "
+                    "in the background automatically — you do not need to (and "
+                    "cannot) opt in or out. The result re-enters the "
+                    "conversation as a new message when the subagent finishes; "
+                    "just continue working in the meantime. Setting this has no "
+                    "effect; the parameter remains only for backward "
+                    "compatibility."
                 ),
             },
+            # ── KENSEI CUSTOM params ──
+            "synthesize": {
+                "type": "boolean",
+                "description": (
+                    "KENSEI CUSTOM. After all children complete in batch mode, "
+                    "spawn a synthesis agent to merge results. Only active when "
+                    "delegation.synthesis_enabled=true and n_tasks > 1."
+                ),
+            },
+            "synthesis_prompt": {
+                "type": "string",
+                "description": (
+                    "Custom prompt for the synthesis agent when synthesize=true."
+                ),
+            },
+            "verify": {
+                "type": "boolean",
+                "description": (
+                    "KENSEI CUSTOM. After single-task child produces a finding, "
+                    "spawn skeptic in CLEAN context to refute. Only active when "
+                    "delegation.verify_enabled=true and n_tasks == 1."
+                ),
+            },
+            "verify_rubric": {
+                "type": "string",
+                "description": (
+                    "Custom rubric for the skeptic when verify=true."
+                ),
+            },
+            # ── END KENSEI CUSTOM ──
             "acp_command": {
                 "type": "string",
                 "description": (
@@ -3406,6 +3425,7 @@ DELEGATE_TASK_SCHEMA = {
 # --- Registry ---
 from tools.registry import registry, tool_error
 
+
 def _handle_delegate_dispatch(args, **kw):
     """Dispatch wrapper with trace logging to diagnose verify=False in gateway."""
     import logging
@@ -3423,14 +3443,32 @@ def _handle_delegate_dispatch(args, **kw):
         acp_command=args.get("acp_command"),
         acp_args=args.get("acp_args"),
         role=args.get("role"),
-        background=args.get("background"),
-        parent_agent=kw.get("parent_agent"),
-        # KENSEI CUSTOM — synthesis + verify primitives (v1.1 plan)
-        synthesize=args.get("synthesize", False),
+        background=_model_background_value(args, kw.get("parent_agent")),
+        # ── KENSEI CUSTOM ──
+        synthesize=args.get("synthesize"),
         synthesis_prompt=args.get("synthesis_prompt"),
-        verify=args.get("verify", False),
+        verify=args.get("verify"),
         verify_rubric=args.get("verify_rubric"),
+        # ── END KENSEI CUSTOM ──
+        parent_agent=kw.get("parent_agent"),
     )
+
+
+def _model_background_value(args: dict, parent_agent=None) -> bool:
+    """Background flag for the MODEL-facing dispatch path (registry fallback).
+
+    Delegations from the top-level agent always run in the background — the
+    model does not choose. This applies to both a single task and a fan-out
+    batch (each task becomes its own independent background subagent). The one
+    exception is a delegation from an orchestrator subagent (depth > 0), which
+    needs its workers' results within its own turn. The live path is
+    ``run_agent._dispatch_delegate_task``; this lambda mirrors it for the rare
+    case the intercept is bypassed. Direct Python callers of ``delegate_task``
+    keep the historical synchronous default.
+    """
+    is_subagent = getattr(parent_agent, "_delegate_depth", 0) > 0
+    return not is_subagent
+
 
 registry.register(
     name="delegate_task",

@@ -2,6 +2,7 @@ import { forceRedraw, useInput } from '@hermes/ink'
 import { useStore } from '@nanostores/react'
 import { useEffect, useRef } from 'react'
 
+import { DASHBOARD_TUI_MODE } from '../config/env.js'
 import { TYPING_IDLE_MS } from '../config/timing.js'
 import type {
   ApprovalRespondResponse,
@@ -15,13 +16,30 @@ import { computePrecisionWheelStep, initPrecisionWheel } from '../lib/precisionW
 import { computeWheelStep, initWheelAccelForHost } from '../lib/wheelAccel.js'
 
 import { getInputSelection } from './inputSelectionStore.js'
-import { type AgentMode, AGENT_MODES, type InputHandlerContext, type InputHandlerResult } from './interfaces.js'
+import { type AgentMode, AGENT_MODES, type InputHandlerActions, type InputHandlerContext, type InputHandlerResult } from './interfaces.js'
 import { $isBlocked, $overlayState, patchOverlayState } from './overlayStore.js'
 import { turnController } from './turnController.js'
 import { patchTurnState } from './turnStore.js'
-import { getUiState, patchUiState } from './uiStore.js'
+import { getUiState } from './uiStore.js'
 
 const isCtrl = (key: { ctrl: boolean }, ch: string, target: string) => key.ctrl && ch.toLowerCase() === target
+const DASHBOARD_NEW_SESSION_MESSAGE = 'starting a fresh dashboard chat...'
+
+export const shouldAllowIdleHotkeyExit = (dashboardTuiMode = DASHBOARD_TUI_MODE) => !dashboardTuiMode
+
+export function handleIdleHotkeyExit(
+  actions: Pick<InputHandlerActions, 'die' | 'sys'>,
+  dashboardTuiMode = DASHBOARD_TUI_MODE,
+  requestDashboardNewSession?: () => void
+) {
+  if (!shouldAllowIdleHotkeyExit(dashboardTuiMode)) {
+    requestDashboardNewSession?.()
+
+    return actions.sys(DASHBOARD_NEW_SESSION_MESSAGE)
+  }
+
+  return actions.die()
+}
 
 /**
  * Approval / clarify / confirm overlays mount their own `useInput` handlers
@@ -145,6 +163,10 @@ export function useInputHandlers(ctx: InputHandlerContext): InputHandlerResult {
 
     if (overlay.modelPicker) {
       return patchOverlayState({ modelPicker: false })
+    }
+
+    if (overlay.billing) {
+      return patchOverlayState({ billing: null })
     }
 
     if (overlay.skillsHub) {
@@ -272,7 +294,7 @@ export function useInputHandlers(ctx: InputHandlerContext): InputHandlerResult {
       // answering felt like the prompt had locked the entire UI.  Explicitly
       // skip the prompt-overlay early-return for scroll keys so they fall
       // through to the wheel / PageUp / Shift+arrow handlers below.
-      const promptOverlay = overlay.approval || overlay.clarify || overlay.confirm
+      const promptOverlay = overlay.approval || overlay.billing || overlay.clarify || overlay.confirm
       const fallThroughForScroll = promptOverlay && shouldFallThroughForScroll(key)
 
       if (promptOverlay && !fallThroughForScroll) {
@@ -501,11 +523,23 @@ export function useInputHandlers(ctx: InputHandlerContext): InputHandlerResult {
         return cActions.clearIn()
       }
 
-      return actions.die()
+      return handleIdleHotkeyExit(actions, DASHBOARD_TUI_MODE, () => {
+        gateway.gw.publishLocalEvent({
+          payload: { reason: 'idle_exit_hotkey' },
+          session_id: live.sid ?? undefined,
+          type: 'dashboard.new_session_requested'
+        })
+      })
     }
 
     if (isAction(key, ch, 'd')) {
-      return actions.die()
+      return handleIdleHotkeyExit(actions, DASHBOARD_TUI_MODE, () => {
+        gateway.gw.publishLocalEvent({
+          payload: { reason: 'idle_exit_hotkey' },
+          session_id: live.sid ?? undefined,
+          type: 'dashboard.new_session_requested'
+        })
+      })
     }
 
     if (isAction(key, ch, 'l')) {
@@ -528,21 +562,27 @@ export function useInputHandlers(ctx: InputHandlerContext): InputHandlerResult {
       })
     }
 
-    // ── KENSEI CUSTOM: shift-tab cycles agent mode (plan → gods_plan → recon → auto) ──
-    // Replaces the stock shift-tab=yolo behaviour.
-    // See skill `agent-modes` for full spec.  Must survive upstream merges.
+    // shift-tab flips yolo without spending a turn (claude-code parity)
     if (key.shift && key.tab && !cState.completions.length) {
       if (!live.sid) {
-        return void actions.sys('mode cycling needs an active session')
+        return void actions.sys('yolo needs an active session')
       }
-      const current = getUiState().agentMode
-      const idx = AGENT_MODES.indexOf(current)
-      const next = AGENT_MODES[(idx + 1) % AGENT_MODES.length] as AgentMode
-      patchUiState({ agentMode: next })
 
-      // Push to gateway so the agent.ephemeral_system_prompt is updated
-      return void gateway.rpc('config.set', { key: 'mode', session_id: live.sid, value: next })
-        .then(() => actions.sys(`mode → ${next}`))
+      // gateway.rpc swallows errors with its own sys() message and resolves to null,
+      // so we only speak when it came back with a real shape. null = rpc already spoke.
+      return void gateway.rpc<ConfigSetResponse>('config.set', { key: 'yolo', session_id: live.sid }).then(r => {
+        if (r?.value === '1') {
+          return actions.sys('yolo on')
+        }
+
+        if (r?.value === '0') {
+          return actions.sys('yolo off')
+        }
+
+        if (r) {
+          actions.sys('failed to toggle yolo')
+        }
+      })
     }
 
     if (key.tab && cState.completions.length) {
