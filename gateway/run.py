@@ -5830,11 +5830,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # simply don't use kanban; this loop becomes a no-op.
         asyncio.create_task(self._kanban_dispatcher_watcher())
 
-        # Start background PROFILE-GATE watcher: delivers pending profile
-        # create/delete approvals to Discord as Approve/Reject button
-        # prompts. Same base-only gate as the notifier/dispatcher.
-        asyncio.create_task(self._profile_gate_watcher())
-
         # Start background reconnection watcher for platforms that failed at startup
         if self._failed_platforms:
             logger.info(
