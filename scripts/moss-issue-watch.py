@@ -13,6 +13,8 @@ import sys
 from datetime import datetime, timezone
 
 STATE_FILE = os.path.expanduser("~/.hermes/data/moss-issue-watch.json")
+FIX_QUEUE_FILE = os.path.expanduser("~/.hermes/data/moss-fix-queue.json")
+MAX_QUEUE_SIZE = 20
 TARGET_REPOS = [
     "NousResearch/hermes-agent",
 ]
@@ -63,19 +65,19 @@ def classify_issue(issue):
     return None
 
 def get_recent_prs(repo):
-    """Fetch recent PRs by tracked authors only."""
-    result = subprocess.run(
-        ["gh", "pr", "list", "--repo", repo, "--state", "all",
-         "--json", "number,title,state,author,createdAt,updatedAt,mergedAt,closedAt,url,labels,comments,reviews",
-         "--limit", "50"],
-        capture_output=True, text=True, timeout=30
-    )
-    if result.returncode != 0:
-        print(f"ERROR: gh pr list failed for {repo}: {result.stderr}", file=sys.stderr)
-        return []
-    all_prs = json.loads(result.stdout)
-    # Only track PRs by Sahil-SS9 — everyone else's PRs are noise
-    tracked = [pr for pr in all_prs if pr.get("author", {}).get("login") in TRACKED_AUTHORS]
+    """Fetch recent PRs by tracked authors only. Uses --author filter at the API level."""
+    tracked = []
+    for author in TRACKED_AUTHORS:
+        result = subprocess.run(
+            ["gh", "pr", "list", "--repo", repo, "--state", "all", "--author", author,
+             "--json", "number,title,state,author,createdAt,updatedAt,mergedAt,closedAt,url,labels,comments,reviews",
+             "--limit", "50"],
+            capture_output=True, text=True, timeout=30
+        )
+        if result.returncode != 0:
+            print(f"ERROR: gh pr list failed for {repo} author {author}: {result.stderr}", file=sys.stderr)
+            continue
+        tracked.extend(json.loads(result.stdout))
     return tracked
 
 def check_pr_activity(repo, state):
@@ -215,40 +217,153 @@ def main():
     state["last_checked"] = now
     save_state(state)
 
-    # Output
+    # Output — short Discord body + HTML attachment
     output_lines = []
-    if new_issues:
-        output_lines.append(f"New issues ({len(new_issues)}):")
-        for iss in new_issues:
-            output_lines.append(f"  [{iss['classification']}] {iss['repo']}#{iss['number']}: {iss['title']}")
-            output_lines.append(f"    {iss['url']}  Priority: {iss['priority']}")
+    html_parts = []
 
-    if pr_activity:
+    # Write fixable bugs to pipeline queue
+    fixable = [iss for iss in new_issues if iss["classification"] == "bug" and iss["priority"] in ("P1", "P2")]
+    if fixable:
+        queue_state = {"updated_at": now, "pending": []}
+        if os.path.exists(FIX_QUEUE_FILE):
+            try:
+                with open(FIX_QUEUE_FILE) as f:
+                    existing = json.load(f)
+                    queue_state["pending"] = existing.get("pending", [])
+            except (json.JSONDecodeError, OSError):
+                pass
+        existing_keys = {f"{i['repo']}#{i['number']}" for i in queue_state["pending"]}
+        for iss in fixable:
+            key = f"{iss['repo']}#{iss['number']}"
+            if key not in existing_keys and len(queue_state["pending"]) < MAX_QUEUE_SIZE:
+                queue_state["pending"].append(iss)
+                existing_keys.add(key)
+        with open(FIX_QUEUE_FILE, "w") as f:
+            json.dump(queue_state, f, indent=2)
+
+    if new_issues or pr_activity:
+        # Count issues by priority
+        p1 = sum(1 for iss in new_issues if iss["priority"] == "P1")
+        p2 = sum(1 for iss in new_issues if iss["priority"] == "P2")
+        p3 = sum(1 for iss in new_issues if iss["priority"] == "P3")
+
+        # Discord body — super concise
+        parts = []
         if new_issues:
-            output_lines.append("")
-        output_lines.append(f"PR activity ({len(pr_activity)}):")
-        for a in pr_activity:
-            if a["type"] == "new_pr":
-                output_lines.append(f"  [NEW PR] {a['repo']}#{a['number']} by {a['author']}: {a['title']}")
-                output_lines.append(f"    {a['url']}  Priority: {a['priority']}")
-            elif a["type"] == "merged_pr":
-                output_lines.append(f"  [MERGED] {a['repo']}#{a['number']} by {a['author']}: {a['title']}")
-                output_lines.append(f"    {a['url']}")
-            elif a["type"] == "closed_pr":
-                output_lines.append(f"  [CLOSED] {a['repo']}#{a['number']}: {a['title']}")
-                output_lines.append(f"    {a['url']}")
-            elif a["type"] == "pr_activity":
-                parts = []
-                if a["new_comments"] > 0:
-                    parts.append(f"{a['new_comments']} new comment(s)")
-                if a["new_reviews"] > 0:
-                    parts.append(f"{a['new_reviews']} new review(s)")
-                output_lines.append(f"  [ACTIVITY] {a['repo']}#{a['number']}: {', '.join(parts)}")
-                output_lines.append(f"    {a['title']}")
-                output_lines.append(f"    {a['url']}")
+            parts.append(f"NousResearch/hermes-agent has {len(new_issues)} new issues")
+            counts = []
+            if p1: counts.append(f"P1={p1}")
+            if p2: counts.append(f"P2={p2}")
+            if p3: counts.append(f"P3={p3}")
+            parts.append(", ".join(counts))
+        if pr_activity:
+            pr_count = len([a for a in pr_activity if a["type"] in ("new_pr", "merged_pr", "closed_pr")])
+            if pr_count:
+                parts.append(f"{pr_count} PR updates")
+        output_lines.append(" · ".join(parts))
 
-    if output_lines:
+        # Build HTML report
+        def esc(s):
+            return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;")
+
+        html_parts.append(f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mossy Issue Watch · {now[:10]}</title>
+<style>
+:root {{ color-scheme:dark; --bg:#0f1115; --card:#181b22; --line:#2a2f3a; --text:#e7e3d8; --muted:#8e96a6; }}
+* {{ box-sizing:border-box; }}
+body {{ margin:0; background:var(--bg); color:var(--text); font:14px/1.55 system-ui,-apple-system,sans-serif; }}
+main {{ width:min(900px,calc(100%-32px)); margin:0 auto; padding:28px 0 56px; }}
+h1 {{ margin:0 0 2px; font-size:24px; letter-spacing:-.02em; }}
+.sub {{ color:var(--muted); margin:0 0 24px; }}
+.pills {{ display:flex; gap:10px; flex-wrap:wrap; margin:14px 0 20px; }}
+.pill {{ background:var(--card); border:1px solid var(--line); border-radius:999px; padding:5px 11px; font-size:13px; font-variant-numeric:tabular-nums; }}
+section {{ background:var(--card); border:1px solid var(--line); border-radius:12px; margin:16px 0; overflow:hidden; }}
+h2 {{ font-size:16px; margin:0; padding:14px 16px; border-bottom:1px solid var(--line); }}
+table {{ width:100%; border-collapse:collapse; }}
+th {{ text-align:left; padding:10px 16px; font-size:12px; color:var(--muted); text-transform:uppercase; letter-spacing:.05em; border-bottom:1px solid var(--line); }}
+td {{ padding:10px 16px; border-bottom:1px solid var(--line); vertical-align:top; font-size:13px; }}
+td:last-child, th:last-child {{ text-align:right; }}
+a {{ color:#5b8def; text-decoration:none; }}
+a:hover {{ text-decoration:underline; }}
+.tag {{ display:inline-block; padding:1px 7px; border-radius:4px; font-size:11px; font-weight:600; }}
+.tag-bug {{ background:#401510; color:#e0584c; }}
+.tag-sec {{ background:#152040; color:#5b8def; }}
+.tag-P1 {{ background:#401510; color:#e0584c; }}
+.tag-P2 {{ background:#402e10; color:#e0982e; }}
+.tag-P3 {{ background:#152040; color:#5b8def; }}
+.tag-new {{ background:#0c3d2e; color:#46b39a; }}
+.tag-merged {{ background:#0c3d2e; color:#46b39a; }}
+.tag-closed {{ background:#2a2f3a; color:#8e96a6; }}
+</style></head><body>
+<main>
+<h1>Mossy Issue Watch</h1>
+<p class="sub">{now[:19].replace("T", " ")}</p>
+<div class="pills">""")
+
+        if new_issues:
+            html_parts.append(f"""<span class="pill">📋 <b>{len(new_issues)}</b> new issues</span>""")
+            if p1: html_parts.append(f"""<span class="pill">🔴 P1 <b>{p1}</b></span>""")
+            if p2: html_parts.append(f"""<span class="pill">🟡 P2 <b>{p2}</b></span>""")
+            if p3: html_parts.append(f"""<span class="pill">⚪ P3 <b>{p3}</b></span>""")
+
+        if pr_activity:
+            new_prs = sum(1 for a in pr_activity if a["type"] == "new_pr")
+            merged = sum(1 for a in pr_activity if a["type"] == "merged_pr")
+            closed = sum(1 for a in pr_activity if a["type"] == "closed_pr")
+            activity_count = sum(1 for a in pr_activity if a["type"] == "pr_activity")
+            if new_prs: html_parts.append(f"""<span class="pill">🆕 <b>{new_prs}</b> new PRs</span>""")
+            if merged: html_parts.append(f"""<span class="pill">✅ <b>{merged}</b> merged</span>""")
+            if closed: html_parts.append(f"""<span class="pill">❌ <b>{closed}</b> closed</span>""")
+            if activity_count: html_parts.append(f"""<span class="pill">💬 <b>{activity_count}</b> with activity</span>""")
+
+        html_parts.append("</div>")
+
+        # Issues table
+        if new_issues:
+            html_parts.append("""<section><h2>New Issues</h2><table><thead><tr><th>Issue</th><th>Title</th><th></th></tr></thead><tbody>""")
+            for iss in new_issues:
+                cls = "bug" if iss["classification"] == "bug" else "sec"
+                tag_line = f"<span class='tag tag-{cls}'>{iss['classification']}</span> <span class='tag tag-{iss['priority']}'>{iss['priority']}</span>"
+                html_parts.append(f"""<tr><td><a href="{esc(iss['url'])}">{esc(iss['repo'])}#{iss['number']}</a></td><td>{esc(iss['title'][:80])}</td><td>{tag_line}</td></tr>""")
+            html_parts.append("</tbody></table></section>")
+
+        # PR activity table
+        if pr_activity:
+            html_parts.append("""<section><h2>PR Activity</h2><table><thead><tr><th>PR</th><th>Title</th><th></th></tr></thead><tbody>""")
+            for a in pr_activity:
+                if a["type"] == "new_pr":
+                    tag = "<span class='tag tag-new'>NEW</span>"
+                    suffix = f"by {esc(a.get('author',''))}"
+                elif a["type"] == "merged_pr":
+                    tag = "<span class='tag tag-merged'>MERGED</span>"
+                    suffix = f"by {esc(a.get('author',''))}"
+                elif a["type"] == "closed_pr":
+                    tag = "<span class='tag tag-closed'>CLOSED</span>"
+                    suffix = ""
+                elif a["type"] == "pr_activity":
+                    parts = []
+                    if a["new_comments"] > 0: parts.append(f"{a['new_comments']} comments")
+                    if a["new_reviews"] > 0: parts.append(f"{a['new_reviews']} reviews")
+                    tag = "<span class='tag tag-new'>💬</span>"
+                    suffix = " · ".join(parts)
+                else:
+                    tag, suffix = "", ""
+                html_parts.append(f"""<tr><td><a href="{esc(a['url'])}">{esc(a['repo'])}#{a['number']}</a></td><td>{esc(a['title'][:70])}</td><td>{tag} {esc(suffix)}</td></tr>""")
+            html_parts.append("</tbody></table></section>")
+
+        html_parts.append("</main></body></html>")
+
+        # Write HTML report
+        report_dir = os.path.expanduser("~/.hermes/cron/output/moss-watch-reports")
+        os.makedirs(report_dir, exist_ok=True)
+        report_path = os.path.join(report_dir, f"moss-watch-{now[:10]}.html")
+        with open(report_path, "w") as f:
+            f.write("\n".join(html_parts))
+
+        # Final output: short Discord body + MEDIA tag
         print("\n".join(output_lines))
+        print(f"MEDIA:{report_path}")
 
 if __name__ == "__main__":
     main()
