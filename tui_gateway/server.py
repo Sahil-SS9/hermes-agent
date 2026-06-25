@@ -260,12 +260,19 @@ class _SlashWorker:
             argv += ["--model", model]
 
         self._closed = False
+        # Explicit encoding prevents multi-byte UTF-8 character corruption on
+        # Windows, where ``text=True`` defaults to the system locale encoding
+        # (e.g. cp1252) instead of utf-8.  Without this, agent output messages
+        # containing accented or non-ASCII characters are silently truncated /
+        # spliced mid-character when the subprocess decodes/encodes the pipe
+        # with the wrong codec (#52244).
         self.proc = subprocess.Popen(
             argv,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            encoding="utf-8",
             bufsize=1,
             cwd=os.getcwd(),
             env=os.environ.copy(),
