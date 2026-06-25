@@ -19,7 +19,7 @@ if [[ -n "${GITHUB_PERSONAL_ACCESS_TOKEN:-}" ]]; then
 elif [[ -n "${GH_TOKEN:-}" ]]; then
     :  # already set
 else
-    GH_TOKEN=$(*** auth token 2>/dev/null) || {
+    GH_TOKEN=$(gh auth token 2>/dev/null) || {
         echo "ERROR: gh auth token failed — is gh logged in?"
         gh auth status 2>&1
         exit 1

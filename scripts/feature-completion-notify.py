@@ -24,6 +24,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+# Cross-process write lock to prevent WAL checkpoint races under concurrent write load
+sys.path.insert(0, os.path.join(os.path.dirname(__file__)))
+try:
+    from kanban_write_lock import write_lock
+except ImportError:
+    write_lock = None
+
 BOARDS_ROOT = Path(os.path.expanduser("~/.hermes/kanban/boards"))
 STATE_FILE = Path(os.path.expanduser("~/.hermes/data/feature-completion-state.json"))
 
@@ -116,15 +123,24 @@ def main():
             if parent_id in state:
                 continue
 
-            # Auto-complete
+            # Auto-complete (under cross-process write lock)
             title = get_task_title(db_path, parent_id) or parent_id
-            conn = sqlite3.connect(str(db_path))
-            now_ts = int(datetime.now(timezone.utc).timestamp())
-            conn.execute(
-                "UPDATE tasks SET status='done', completed_at=? WHERE id=?",
-                (now_ts, parent_id)
-            )
-            conn.commit()
+            conn = sqlite3.connect(str(db_path), timeout=5.0)
+            if write_lock is not None:
+                with write_lock(conn):
+                    now_ts = int(datetime.now(timezone.utc).timestamp())
+                    conn.execute(
+                        "UPDATE tasks SET status='done', completed_at=? WHERE id=?",
+                        (now_ts, parent_id)
+                    )
+                    conn.commit()
+            else:
+                now_ts = int(datetime.now(timezone.utc).timestamp())
+                conn.execute(
+                    "UPDATE tasks SET status='done', completed_at=? WHERE id=?",
+                    (now_ts, parent_id)
+                )
+                conn.commit()
             conn.close()
 
             state[parent_id] = {
