@@ -80,6 +80,20 @@ def get_recent_prs(repo):
         tracked.extend(json.loads(result.stdout))
     return tracked
 
+def get_all_open_prs(repo):
+    """Return all currently OPEN PRs by tracked authors (no state tracking, just snapshot)."""
+    open_prs = []
+    for author in TRACKED_AUTHORS:
+        result = subprocess.run(
+            ["gh", "pr", "list", "--repo", repo, "--state", "open", "--author", author,
+             "--json", "number,title,createdAt,url,labels,headRefName",
+             "--limit", "50"],
+            capture_output=True, text=True, timeout=30
+        )
+        if result.returncode == 0:
+            open_prs.extend(json.loads(result.stdout))
+    return open_prs
+
 def check_pr_activity(repo, state):
     """Check for new or updated PRs and return activity report."""
     prs = get_recent_prs(repo)
@@ -189,6 +203,7 @@ def main():
     now = datetime.now(timezone.utc).isoformat()
     new_issues = []
     pr_activity = []
+    all_open_prs = []
 
     for repo in TARGET_REPOS:
         # Check issues
@@ -213,6 +228,9 @@ def main():
 
         # Check PR activity
         pr_activity.extend(check_pr_activity(repo, state))
+
+        # Collect all currently open PRs (for the report)
+        all_open_prs.extend(get_all_open_prs(repo))
 
     state["last_checked"] = now
     save_state(state)
@@ -241,25 +259,13 @@ def main():
         with open(FIX_QUEUE_FILE, "w") as f:
             json.dump(queue_state, f, indent=2)
 
-    if new_issues or pr_activity:
-        # Count issues by priority
-        p1 = sum(1 for iss in new_issues if iss["priority"] == "P1")
-        p2 = sum(1 for iss in new_issues if iss["priority"] == "P2")
-        p3 = sum(1 for iss in new_issues if iss["priority"] == "P3")
-
-        # Discord body — super concise
+    # Only output on PR activity — new issues silently populate the fix queue
+    if pr_activity:
+        # Discord body — PR activity only, no issue counts
         parts = []
-        if new_issues:
-            parts.append(f"NousResearch/hermes-agent has {len(new_issues)} new issues")
-            counts = []
-            if p1: counts.append(f"P1={p1}")
-            if p2: counts.append(f"P2={p2}")
-            if p3: counts.append(f"P3={p3}")
-            parts.append(", ".join(counts))
-        if pr_activity:
-            pr_count = len([a for a in pr_activity if a["type"] in ("new_pr", "merged_pr", "closed_pr")])
-            if pr_count:
-                parts.append(f"{pr_count} PR updates")
+        pr_count = len([a for a in pr_activity if a["type"] in ("new_pr", "merged_pr", "closed_pr")])
+        if pr_count:
+            parts.append(f"{pr_count} PR updates")
         output_lines.append(" · ".join(parts))
 
         # Build HTML report
@@ -302,6 +308,9 @@ a:hover {{ text-decoration:underline; }}
 <div class="pills">""")
 
         if new_issues:
+            p1 = sum(1 for iss in new_issues if iss["priority"] == "P1")
+            p2 = sum(1 for iss in new_issues if iss["priority"] == "P2")
+            p3 = sum(1 for iss in new_issues if iss["priority"] == "P3")
             html_parts.append(f"""<span class="pill">📋 <b>{len(new_issues)}</b> new issues</span>""")
             if p1: html_parts.append(f"""<span class="pill">🔴 P1 <b>{p1}</b></span>""")
             if p2: html_parts.append(f"""<span class="pill">🟡 P2 <b>{p2}</b></span>""")
@@ -350,6 +359,17 @@ a:hover {{ text-decoration:underline; }}
                 else:
                     tag, suffix = "", ""
                 html_parts.append(f"""<tr><td><a href="{esc(a['url'])}">{esc(a['repo'])}#{a['number']}</a></td><td>{esc(a['title'][:70])}</td><td>{tag} {esc(suffix)}</td></tr>""")
+            html_parts.append("</tbody></table></section>")
+
+        # All Open PRs section (always shown when PRs exist)
+        if all_open_prs:
+            html_parts.append("""<section><h2>All Open PRs</h2><table><thead><tr><th>PR</th><th>Title</th><th>Opened</th></tr></thead><tbody>""")
+            for pr in sorted(all_open_prs, key=lambda p: p.get("createdAt", "")):
+                created = pr.get("createdAt", "")[:10]
+                labels = [l["name"] for l in pr.get("labels", [])]
+                priority = "P1" if "P1" in labels else ("P2" if "P2" in labels else "P3")
+                pri_tag = f"<span class='tag tag-{priority}'>{priority}</span>"
+                html_parts.append(f"""<tr><td><a href="{esc(pr['url'])}">{esc(pr.get('repo','NousResearch/hermes-agent'))}#{pr['number']}</a></td><td>{esc(pr['title'][:80])}</td><td>{esc(created)} {pri_tag}</td></tr>""")
             html_parts.append("</tbody></table></section>")
 
         html_parts.append("</main></body></html>")
