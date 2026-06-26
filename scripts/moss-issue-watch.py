@@ -64,6 +64,38 @@ def classify_issue(issue):
         return None
     return None
 
+def has_linked_pr(repo, issue_number):
+    """Check if an issue already has a closing PR reference (linked or merged).
+
+    Returns True if a PR exists that references this issue, False otherwise.
+    """
+    # 1. Check via gh issue view for closing PR references
+    result = subprocess.run(
+        ["gh", "issue", "view", str(issue_number), "--repo", repo,
+         "--json", "closedByPullRequestsReferences"],
+        capture_output=True, text=True, timeout=15
+    )
+    if result.returncode == 0:
+        data = json.loads(result.stdout)
+        refs = data.get("closedByPullRequestsReferences", {})
+        if refs.get("totalCount", 0) > 0:
+            return True
+
+    # 2. Search for open PRs that reference this issue number
+    search_result = subprocess.run(
+        ["gh", "search", "prs", f"repo:{repo}", "is:open", f"\"#{issue_number}\"",
+         "--json", "number,title,state", "--limit", "10"],
+        capture_output=True, text=True, timeout=15
+    )
+    if search_result.returncode == 0:
+        prs = json.loads(search_result.stdout)
+        for pr in prs:
+            title = pr.get("title", "")
+            if f"#{issue_number}" in title:
+                return True
+
+    return False
+
 def get_recent_prs(repo):
     """Fetch recent PRs by tracked authors only. Uses --author filter at the API level."""
     tracked = []
@@ -218,6 +250,14 @@ def main():
             classification = classify_issue(issue)
             if classification is None:
                 seen[key] = {"number": num, "title": issue["title"], "classification": "skipped", "seen_at": now}
+                continue
+            # Skip issues that already have a linked or open PR — prevents
+            # the fix-pipeline from queuing issues that someone already
+            # addressed (the pipeline prompt says "skip any issue with an
+            # existing open PR by anyone" but the gate was text-only, not
+            # enforced programmatically. This is the programmatic gate.)
+            if has_linked_pr(repo, num):
+                seen[key] = {"number": num, "title": issue["title"], "classification": "has_pr", "seen_at": now}
                 continue
             labels = [l["name"] for l in issue.get("labels", [])]
             priority = "P1" if "P1" in labels else ("P2" if "P2" in labels else "P3")

@@ -47,22 +47,29 @@ def _scan_boards():
     for slug, db_path in BOARDS.items():
         if not db_path.is_file():
             continue
-        conn = sqlite3.connect(str(db_path))
-        conn.row_factory = sqlite3.Row
-        rows = conn.execute("""
-            SELECT id, title, body, assignee, reviewer, status, created_at,
-                   updated_at, status_reason, current_step_key
-            FROM tasks
-            WHERE status = 'review'
-            ORDER BY updated_at ASC
-        """).fetchall()
-        board_rows = [dict(r) for r in rows]
-        for r in board_rows:
-            r["_board_slug"] = slug
-            r["_board_db"] = db_path
-        board_tasks[slug] = board_rows
-        tasks_in_review.extend(board_rows)
-        conn.close()
+        try:
+            conn = sqlite3.connect(str(db_path))
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute("""
+                SELECT id, title, body, assignee, reviewer, status, created_at,
+                       updated_at, status_reason, current_step_key
+                FROM tasks
+                WHERE status = 'review'
+                ORDER BY updated_at ASC
+            """).fetchall()
+            board_rows = [dict(r) for r in rows]
+            for r in board_rows:
+                r["_board_slug"] = slug
+                r["_board_db"] = db_path
+            board_tasks[slug] = board_rows
+            tasks_in_review.extend(board_rows)
+            conn.close()
+        except sqlite3.OperationalError as e:
+            # Schema mismatch (e.g. missing updated_at on a freshly
+            # auto-recreated empty board). Skip this board, don't kill
+            # the whole scan — same self-healing pattern as
+            # feature-completion-notify.py
+            print(f"  [skip] {slug}: {e}", file=sys.stderr)
 
     return tasks_in_review, board_tasks
 

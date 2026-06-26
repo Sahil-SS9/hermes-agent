@@ -45,8 +45,27 @@ mkdir -p "$STATE_DIR"
 
 # Build a set of PIDs tracked by ANY hermes-gateway systemd service.
 # These are legitimate processes, NOT orphans, regardless of their PPID.
+#
+# ONLY trust a unit if it is actually active. ``systemctl list-units
+# --state=running`` can leak cached/stale unit definitions in non-systemd
+# contexts (cron env, missing $XDG_RUNTIME_DIR, etc.) — when no live
+# ``hermes-gateway*.service`` unit exists, ``systemctl show MainPID`` may
+# still return a non-zero PID that is in fact the ghost of a unit that
+# never loaded. The watchdog then "protects" PIDs that are not actually
+# managed by systemd, and the orphan herd grows unbounded (observed
+# 2026-06-26: 13 gateway --replace procs, 0 active units, watchdog
+# reported 0 orphans, 0 kills, KEEP_LIST included every PID). Guard
+# against that by verifying ActiveState==active before trusting the
+# MainPID. Ghost units are skipped — their PIDs go through normal
+# orphan classification and get killed if PPID=1.
 declare -A SYSTEMD_PIDS
 for svc in $(systemctl list-units --type=service --state=running --no-legend 2>/dev/null | grep -oP 'hermes-gateway\S*\.service' || true); do
+    active_state=$(systemctl show -p ActiveState --value "$svc" 2>/dev/null || true)
+    if [[ "$active_state" != "active" ]]; then
+        # Ghost unit — not actually running. Skip so its PID gets
+        # classified as an orphan instead of protected.
+        continue
+    fi
     main_pid=$(systemctl show -p MainPID --value "$svc" 2>/dev/null || true)
     if [[ -n "$main_pid" && "$main_pid" != "0" ]]; then
         SYSTEMD_PIDS[$main_pid]=1

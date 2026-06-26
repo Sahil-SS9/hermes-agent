@@ -488,6 +488,100 @@ def check_wfa_live() -> dict | None:
     return None
 
 
+def check_discord_bots() -> dict | None:
+    """Check all Discord gateway bot services are active."""
+    SERVICES = [
+        ("kensei", "hermes-gateway.service"),
+        ("ceecee", "hermes-gateway-ceecee.service"),
+        ("denji", "hermes-gateway-denji.service"),
+        ("dezzy", "hermes-gateway-dezzy.service"),
+        ("gojo", "hermes-gateway-gojo.service"),
+        ("light", "hermes-gateway-light.service"),
+        ("misa-misa", "hermes-gateway-misa-misa.service"),
+        ("mrhermagi", "hermes-gateway-mrhermagi.service"),
+        ("octacon", "hermes-gateway-octacon.service"),
+        ("remii", "hermes-gateway-remii.service"),
+        ("wesker", "hermes-gateway-wesker.service"),
+    ]
+    down = []
+    for name, service in SERVICES:
+        code, out, _ = run(["systemctl", "is-active", service], timeout=10)
+        if code != 0 or "active" not in out:
+            down.append(name)
+    if down:
+        return {
+            "title": f"Discord bots: {len(down)} down ({', '.join(down)})",
+            "body": f"Down: {', '.join(down)}. Check `systemctl status hermes-gateway-<name>.service`.",
+            "priority": "P2",
+            "slug": "discord-bots-down",
+        }
+    return None
+
+
+def check_web_backends() -> dict | None:
+    """Check SearXNG + GroktoCrawl + DDGS health."""
+    import json as _json
+
+    failures = []
+
+    # SearXNG
+    r = subprocess.run(
+        ["sudo", "docker", "inspect", "searxng", "--format", "{{.State.Status}}"],
+        capture_output=True, text=True, timeout=5
+    )
+    if r.returncode != 0 or "running" not in r.stdout:
+        failures.append("SearXNG container down")
+    else:
+        r2 = subprocess.run(
+            ["curl", "-sL", "--max-time", "5",
+             "http://127.0.0.1:8082/search?q=health+check&format=json"],
+            capture_output=True, text=True, timeout=10
+        )
+        if r2.returncode != 0 or not r2.stdout:
+            failures.append("SearXNG API not responding")
+        else:
+            try:
+                d = _json.loads(r2.stdout)
+                if len(d.get("results", [])) == 0:
+                    failures.append("SearXNG returning 0 results")
+            except Exception:
+                failures.append("SearXNG invalid JSON response")
+
+    # GroktoCrawl
+    r = subprocess.run(
+        ["sudo", "docker", "inspect", "groktocrawl-agent-svc-1", "--format", "{{.State.Status}}"],
+        capture_output=True, text=True, timeout=5
+    )
+    if r.returncode != 0 or "running" not in r.stdout:
+        failures.append("GroktoCrawl container down")
+    else:
+        r2 = subprocess.run(
+            ["curl", "-sL", "--max-time", "10", "http://localhost:8090/health"],
+            capture_output=True, text=True, timeout=15
+        )
+        if r2.returncode != 0 or not r2.stdout:
+            failures.append("GroktoCrawl health endpoint not responding")
+
+    # DDGS
+    r = subprocess.run(
+        ["python3", "-c",
+         "from ddgs import DDGS; ddgs=DDGS(); r=list(ddgs.text('test', max_results=1)); exit(0 if len(r)>0 else 1)"],
+        capture_output=True, text=True, timeout=15
+    )
+    if r.returncode != 0:
+        failures.append(f"DDGS: {r.stderr[:60]}" if r.stderr else "DDGS import/search failed")
+
+    if failures:
+        priority = "P1" if len(failures) >= 2 else "P2"
+        return {
+            "title": f"Web backends: {len(failures)} failure(s)",
+            "body": "\n".join(f"- {f}" for f in failures),
+            "priority": priority,
+            "slug": "web-backend-failures",
+        }
+    return None
+
+
 # ────────────────────────── Main ──────────────────────────
 
 
@@ -506,6 +600,8 @@ def main() -> int:
         ("Gateway", check_gateway),
         ("Kanban", check_kanban),
         ("WFA live", check_wfa_live),
+        ("Discord bots", check_discord_bots),
+        ("Web backends", check_web_backends),
     ]
 
     for name, check_fn in checks:

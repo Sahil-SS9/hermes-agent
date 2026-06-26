@@ -387,21 +387,24 @@ _SELF_CALL = False
 When False (cron mode), the cron agent handles generation via its own prompt."""
 
 
-# Canonical generation chain (verified live 2026-06-17, both return 200):
-#   1. OpenCode Zen Go — deepseek-v4-flash: cheap/mid tier, fast, strong prose.
-#   2. Ollama-Cloud — gpt-oss:120b: different model family for true redundancy.
-# These run after any CONTENT_LLM_* env override so the pipeline NEVER collapses
-# to frozen canned templates while a healthy provider exists. Each entry names its
-# provider so the right API key is attached (opencode vs ollama).
+# Canonical generation chain:
+#   1. OpenAI — gpt-4o-mini: cheap, fast, strong prose. Primary.
+#   2. OpenCode Zen Go — deepseek-v4-flash: free-tier fallback.
+#   3. Ollama-Cloud — gpt-oss:120b: different model family for redundancy.
+# Each entry names its provider so the right API key is attached.
+# OpenAI is primary — it costs ~$0.15/M input tokens, ~$0.60/M output (gpt-4o-mini).
+# At typical content engine volume (~20 posts/month, ~500 tokens each), monthly cost < $1.
 _FREE_FALLBACK_CHAIN = [
+    {"base": "https://api.openai.com/v1", "model": "gpt-4o-mini", "provider": "openai"},
     {"base": "https://opencode.ai/zen/go/v1", "model": "deepseek-v4-flash", "provider": "opencode"},
     {"base": "https://ollama.com/v1", "model": "gpt-oss:120b", "provider": "ollama"},
 ]
 
 # Long-form / factual tier (articles + blog): stronger, lower-hallucination models
 # where prose quality matters more than per-call cost. Low volume, so the modest
-# extra cost is fine. minimax-m3 (OpenGo) primary, glm-5.2 (Ollama-Cloud) fallback.
+# extra cost is fine. gpt-4o primary, minimax-m3 (OpenGo) fallback, glm-5.2 (Ollama) last.
 _LONGFORM_CHAIN = [
+    {"base": "https://api.openai.com/v1", "model": "gpt-4o", "provider": "openai"},
     {"base": "https://opencode.ai/zen/go/v1", "model": "minimax-m3", "provider": "opencode"},
     {"base": "https://ollama.com/v1", "model": "glm-5.2", "provider": "ollama"},
 ]
@@ -417,6 +420,8 @@ def _opencode_key() -> str:
 
 def _key_for(provider: str) -> str:
     """Resolve the bearer key for a chain entry's provider."""
+    if provider == "openai":
+        return os.getenv("OPENAI_API_KEY", "").strip()
     if provider == "ollama":
         return os.getenv("OLLAMA_API_KEY", "").strip()
     return _opencode_key()

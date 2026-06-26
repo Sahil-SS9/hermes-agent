@@ -100,20 +100,21 @@ def main():
     grok_ok, grok_detail = check_groktoCrawl()
     ddgs_ok, ddgs_detail = check_ddgs()
     
-    # Build status line
+    all_ok = searx_ok and grok_ok and ddgs_ok
+    search_ok = searx_ok or ddgs_ok  # at least one search backend
+    extract_ok = grok_ok  # only extract backend
+    
+    # Silent when healthy
+    if all_ok:
+        sys.exit(0)
+    
+    # Build alert only when something is wrong
     parts = []
     parts.append(f"SearXNG {'OK' if searx_ok else 'FAIL'} ({searx_detail})")
     parts.append(f"GroktoCrawl {'OK' if grok_ok else 'FAIL'} ({grok_detail})")
     parts.append(f"DDGS {'OK' if ddgs_ok else 'FAIL'} ({ddgs_detail})")
     
-    all_ok = searx_ok and grok_ok and ddgs_ok
-    search_ok = searx_ok or ddgs_ok  # at least one search backend
-    extract_ok = grok_ok  # only extract backend
-    
-    if all_ok:
-        status_emoji = "🟢"
-        exit_code = 0
-    elif search_ok and extract_ok:
+    if search_ok and extract_ok:
         status_emoji = "🟡"
         exit_code = 1
     else:

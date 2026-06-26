@@ -66,28 +66,32 @@ def _scan_boards():
     for slug, db_path in BOARDS.items():
         if not db_path.is_file():
             continue
-        conn = sqlite3.connect(str(db_path))
-        conn.row_factory = sqlite3.Row
+        try:
+            conn = sqlite3.connect(str(db_path))
+            conn.row_factory = sqlite3.Row
 
-        rows = conn.execute(
-            """
-            SELECT id, title, body, assignee, status, tier, pipeline_stage,
-                   created_at, updated_at, completed_at
-            FROM tasks
-            WHERE status IN ('review', 'running', 'done')
-              AND updated_at >= ?
-            ORDER BY updated_at DESC
-            """,
-            (cutoff,),
-        ).fetchall()
+            rows = conn.execute(
+                """
+                SELECT id, title, body, assignee, status, tier, pipeline_stage,
+                       created_at, updated_at, completed_at
+                FROM tasks
+                WHERE status IN ('review', 'running', 'done')
+                  AND updated_at >= ?
+                ORDER BY updated_at DESC
+                """,
+                (cutoff,),
+            ).fetchall()
 
-        for r in rows:
-            d = dict(r)
-            d["_board_slug"] = slug
-            d["_board_db"] = db_path
-            tasks.append(d)
-
-        conn.close()
+            for r in rows:
+                d = dict(r)
+                d["_board_slug"] = slug
+                d["_board_db"] = db_path
+                tasks.append(d)
+            conn.close()
+        except sqlite3.OperationalError as e:
+            # Schema mismatch on a freshly auto-recreated empty board.
+            # Skip, don't kill the whole scan.
+            print(f"  [skip] {slug}: {e}", file=sys.stderr)
 
     return tasks
 

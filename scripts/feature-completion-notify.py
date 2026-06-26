@@ -17,7 +17,9 @@ to avoid double-closing.
 from __future__ import annotations
 
 import json
+import logging
 import os
+import shutil
 import sqlite3
 import sys
 from datetime import datetime, timezone
@@ -33,6 +35,100 @@ except ImportError:
 
 BOARDS_ROOT = Path(os.path.expanduser("~/.hermes/kanban/boards"))
 STATE_FILE = Path(os.path.expanduser("~/.hermes/data/feature-completion-state.json"))
+
+logger = logging.getLogger("feature-completion-notify")
+if not logger.handlers:
+    _h = logging.StreamHandler()
+    _h.setFormatter(logging.Formatter("%(asctime)s [%(name)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
+    logger.addHandler(_h)
+    logger.setLevel(logging.INFO)
+
+
+def _is_db_corrupt(db_path: Path) -> bool:
+    """Return True if the SQLite file cannot serve the queries we need.
+
+    A bare `SELECT 1` will pass on a schema-corrupt DB (the header page is fine
+    but the schema is gone), so we probe for the specific tables this script
+    reads. Avoids the cost of `PRAGMA integrity_check` on a healthy DB while
+    still catching `database disk image is malformed` and missing-schema cases
+    like `no such table: task_links`.
+    """
+    try:
+        conn = sqlite3.connect(str(db_path), timeout=2.0)
+        try:
+            conn.execute("SELECT 1 FROM task_links LIMIT 0")
+            conn.execute("SELECT 1 FROM tasks LIMIT 0")
+        finally:
+            conn.close()
+        return False
+    except sqlite3.DatabaseError:
+        return True
+    except Exception:
+        # Treat other errors (locked, IO) as transient — don't quarantine on those
+        return False
+
+
+# Stop the auto-recreate loop. When we quarantine a corrupt ops/kanban.db,
+# some other process (kanban CLI, hermes itself) re-creates an empty
+# 4 KB shell DB on the next event. That triggers our corruption handler
+# again, every cron tick. Sentinel file records "we just cleaned this up,
+# don't re-quarantine for N hours" so the loop settles.
+QUARANTINE_SENTINEL_TTL_HOURS = 6
+
+
+def _quarantine_sentinel_path(db_path: Path) -> Path:
+    return db_path.parent / ".quarantine-cooldown"
+
+
+def _quarantine_recent(db_path: Path) -> bool:
+    """Return True if we already quarantined this board within the cooldown window."""
+    sentinel = _quarantine_sentinel_path(db_path)
+    if not sentinel.exists():
+        return False
+    try:
+        age_h = (datetime.now().timestamp() - sentinel.stat().st_mtime) / 3600
+        return age_h < QUARANTINE_SENTINEL_TTL_HOURS
+    except OSError:
+        return False
+
+
+def _mark_quarantined(db_path: Path) -> None:
+    try:
+        sentinel = _quarantine_sentinel_path(db_path)
+        sentinel.touch(exist_ok=True)
+    except OSError:
+        pass
+
+
+def _clear_quarantine_sentinel(db_path: Path) -> None:
+    """Clear the sentinel once we confirm a fresh DB is healthy (e.g. ops was rebuilt)."""
+    try:
+        _quarantine_sentinel_path(db_path).unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _quarantine_corrupt_db(db_path: Path) -> Optional[str]:
+    """Move a corrupt DB out of the boards dir so subsequent runs skip it.
+
+    Returns the quarantine path on success, None on failure. Never raises —
+    a failed quarantine should not crash the cron.
+    """
+    try:
+        date_dir = db_path.parent / f"quarantine-{datetime.now().strftime('%Y-%m-%d')}"
+        date_dir.mkdir(exist_ok=True)
+        stamp = datetime.now().strftime("%H%M%S")
+        dest = date_dir / f"{db_path.name}.corrupt.{stamp}"
+        try:
+            db_path.rename(dest)
+        except OSError:
+            shutil.copy2(str(db_path), str(dest))
+            db_path.unlink()
+        return str(dest)
+    except Exception as exc:
+        logger.warning("Quarantine failed for %s: %s", db_path, exc)
+        return None
+
 
 def get_parents_with_children(db_path: Path) -> dict[str, list[str]]:
     """Return {parent_id: [child_ids]} for all parent-child links."""
@@ -80,52 +176,85 @@ def save_state(state: dict):
     with open(STATE_FILE, "w") as f:
         json.dump(state, f, indent=2)
 
-def main():
-    state = load_state()
-    new_completions = []
 
-    for board_dir in sorted(BOARDS_ROOT.iterdir()):
-        if not board_dir.is_dir():
-            continue
-        db_path = board_dir / "kanban.db"
-        if not db_path.exists():
-            continue
+def process_board(board_dir: Path, state: dict) -> list[str]:
+    """Process a single board. Returns list of new completion strings.
 
+    Isolated so that one corrupt/errored board never aborts the whole cron.
+    """
+    db_path = board_dir / "kanban.db"
+
+    # If the file is missing entirely but the board directory is freshly
+    # nuked (we quarantined it, or it never existed), nothing to do.
+    if not db_path.exists():
+        return []
+
+    # Cooldown check: don't re-quarantine within the TTL. If the file was
+    # re-created as an empty shell, the schema check below will catch that
+    # case, but only ONCE per cooldown — otherwise the cron loops.
+    if _quarantine_recent(db_path):
+        # Re-probe: if the file has actually been rebuilt with a real
+        # schema, clear the sentinel and process normally.
+        if not _is_db_corrupt(db_path):
+            _clear_quarantine_sentinel(db_path)
+            logger.info("Board %s recovered from corruption, resuming processing", board_dir.name)
+        else:
+            return []
+
+    # Pre-flight: is the DB readable? If not, quarantine and skip — never raise.
+    if _is_db_corrupt(db_path):
+        qpath = _quarantine_corrupt_db(db_path)
+        _mark_quarantined(db_path)
+        logger.warning(
+            "Quarantined corrupt kanban DB: %s -> %s (cooldown %sh)",
+            db_path, qpath or "<quarantine failed; leaving in place>",
+            QUARANTINE_SENTINEL_TTL_HOURS,
+        )
+        return []
+
+    try:
         parents = get_parents_with_children(db_path)
-        if not parents:
+    except sqlite3.DatabaseError as exc:
+        # Caught between pre-flight and read (race / partial write) — quarantine and skip
+        qpath = _quarantine_corrupt_db(db_path)
+        _mark_quarantined(db_path)
+        logger.warning(
+            "DB became corrupt mid-read (%s): %s -> %s (cooldown %sh)",
+            exc, db_path, qpath or "<quarantine failed>",
+            QUARANTINE_SENTINEL_TTL_HOURS,
+        )
+        return []
+
+    if not parents:
+        return []
+
+    all_child_ids = [cid for children in parents.values() for cid in children]
+    all_ids = list(parents.keys()) + all_child_ids
+    statuses = get_task_statuses(db_path, all_ids)
+
+    new_completions: list[str] = []
+    terminal = {"done", "archived", "completed"}
+    completable = {"todo", "blocked", "scheduled", "running", "ready"}
+
+    for parent_id, child_ids in parents.items():
+        parent_status = statuses.get(parent_id, "unknown")
+        child_statuses = [statuses.get(cid, "unknown") for cid in child_ids]
+
+        if parent_status in terminal:
+            continue
+        if parent_status not in completable:
+            continue
+        if not all(cs in terminal for cs in child_statuses):
+            continue
+        if not child_ids:
+            continue
+        if parent_id in state:
             continue
 
-        all_child_ids = [cid for children in parents.values() for cid in children]
-        all_ids = list(parents.keys()) + all_child_ids
-        statuses = get_task_statuses(db_path, all_ids)
-
-        for parent_id, child_ids in parents.items():
-            parent_status = statuses.get(parent_id, "unknown")
-            child_statuses = [statuses.get(cid, "unknown") for cid in child_ids]
-
-            # Parent must NOT already be terminal
-            terminal = {"done", "archived", "completed"}
-            if parent_status in terminal:
-                continue
-            # Parent must be in a completable state
-            completable = {"todo", "blocked", "scheduled", "running", "ready"}
-            if parent_status not in completable:
-                continue
-            # All children must be terminal
-            if not all(cs in terminal for cs in child_statuses):
-                continue
-
-            # Safety: must have at least 1 child
-            if not child_ids:
-                continue
-
-            # Already completed in a prior run?
-            if parent_id in state:
-                continue
-
-            # Auto-complete (under cross-process write lock)
-            title = get_task_title(db_path, parent_id) or parent_id
-            conn = sqlite3.connect(str(db_path), timeout=5.0)
+        # Auto-complete (under cross-process write lock)
+        title = get_task_title(db_path, parent_id) or parent_id
+        conn = sqlite3.connect(str(db_path), timeout=5.0)
+        try:
             if write_lock is not None:
                 with write_lock(conn):
                     now_ts = int(datetime.now(timezone.utc).timestamp())
@@ -141,15 +270,41 @@ def main():
                     (now_ts, parent_id)
                 )
                 conn.commit()
+        finally:
             conn.close()
 
-            state[parent_id] = {
-                "completed_at": datetime.now(timezone.utc).isoformat(),
-                "children": child_ids,
-                "title": title,
-                "board": board_dir.name,
-            }
-            new_completions.append(f"{board_dir.name}/{parent_id}: {title}")
+        state[parent_id] = {
+            "completed_at": datetime.now(timezone.utc).isoformat(),
+            "children": child_ids,
+            "title": title,
+            "board": board_dir.name,
+        }
+        new_completions.append(f"{board_dir.name}/{parent_id}: {title}")
+
+    return new_completions
+
+
+def main():
+    state = load_state()
+    new_completions: list[str] = []
+
+    if not BOARDS_ROOT.exists():
+        logger.info("Boards root %s does not exist; nothing to do", BOARDS_ROOT)
+        return
+
+    for board_dir in sorted(BOARDS_ROOT.iterdir()):
+        if not board_dir.is_dir():
+            continue
+        # Skip our own quarantine directories
+        if board_dir.name.startswith("quarantine-"):
+            continue
+        try:
+            new_completions.extend(process_board(board_dir, state))
+        except Exception as exc:
+            # Last-resort guard: even if process_board itself raises (e.g. unexpected
+            # OSError, write_lock deadlock), keep going. The whole point of this
+            # refactor is that one bad board cannot kill the cron.
+            logger.warning("Unexpected error processing %s: %s", board_dir, exc)
 
     save_state(state)
 
