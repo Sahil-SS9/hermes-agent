@@ -1,15 +1,16 @@
-"""Tests for the LLM chain (OpenGo primary + Ollama-Cloud fallback) and the
-topic-leak sanitiser (no raw git commit subjects in topics/titles)."""
+"""Tests for the LLM chain and the topic-leak sanitiser
+(no raw git commit subjects in topics/titles)."""
 import llm_generate as lg
 import topics as tp
 
 
 # ── LLM chain ──────────────────────────────────────────────────────────────
 
-def test_fallback_chain_is_opengo_then_ollama():
+def test_fallback_chain_is_openai_then_opengo_then_ollama():
     bases = [(c["base"], c["model"]) for c in lg._FREE_FALLBACK_CHAIN]
-    assert bases[0] == ("https://opencode.ai/zen/go/v1", "deepseek-v4-flash")
-    assert bases[1] == ("https://ollama.com/v1", "gpt-oss:120b")
+    assert bases[0] == ("https://api.openai.com/v1", "gpt-4o-mini")
+    assert bases[1] == ("https://opencode.ai/zen/go/v1", "deepseek-v4-flash")
+    assert bases[2] == ("https://ollama.com/v1", "gpt-oss:120b")
 
 
 def test_key_for_provider(monkeypatch):
@@ -36,7 +37,8 @@ def test_longform_chain_uses_stronger_models(monkeypatch):
     monkeypatch.delenv("CONTENT_LLM_MODEL", raising=False)
     cfgs = lg._llm_configs(longform=True)
     models = [c["model"] for c in cfgs]
-    assert models[0] == "minimax-m3"          # OpenGo primary for long-form
+    assert models[0] == "gpt-4o"             # OpenAI primary for long-form
+    assert "minimax-m3" in models             # OpenGo fallback
     assert "glm-5.2" in models                # Ollama-Cloud fallback
     # short tier must NOT leak into long-form
     assert "deepseek-v4-flash" not in models
@@ -47,8 +49,8 @@ def test_short_and_longform_differ(monkeypatch):
     monkeypatch.delenv("CONTENT_LLM_MODEL", raising=False)
     short = [c["model"] for c in lg._llm_configs(longform=False)]
     long = [c["model"] for c in lg._llm_configs(longform=True)]
-    assert short[0] == "deepseek-v4-flash"
-    assert long[0] == "minimax-m3"
+    assert short[0] == "gpt-4o-mini"
+    assert long[0] == "gpt-4o"
 
 
 def test_fabricated_numbers_catches_growth_metrics():

@@ -2,6 +2,7 @@
 
 Adds topic_usage_log for recency tracking.
 """
+import json
 import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -34,7 +35,9 @@ CREATE TABLE IF NOT EXISTS drafts (
     ai_enriched_at     TEXT,
     regenerate_count   INTEGER DEFAULT 0,
     slop_score         INTEGER DEFAULT 0,
-    slop_issues        TEXT DEFAULT ''
+    slop_issues        TEXT DEFAULT '',
+    source_provenance  TEXT,
+    editorial_rationale TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_brand ON drafts(brand);
@@ -71,6 +74,8 @@ def init_db() -> None:
         ("rejected_at", "TEXT"),
         ("slop_score", "INTEGER"),
         ("slop_issues", "TEXT"),
+        ("source_provenance", "TEXT"),
+        ("editorial_rationale", "TEXT"),
     ]:
         if col_name not in cols:
             try:
@@ -95,17 +100,21 @@ def insert_draft(
     ai_video_path: Optional[str] = None,
     slop_score: int = 0,
     slop_issues: str = "",
+    source_provenance: Optional[dict] = None,
+    editorial_rationale: str = "",
 ) -> None:
     conn = sqlite3.connect(str(DB_PATH))
     conn.execute(
         """
-        INSERT INTO drafts (id, brand, platform, content_type, pillar, topic, title, body_text, visual_description, visual_path, ai_image_path, ai_video_path, slop_score, slop_issues, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO drafts (id, brand, platform, content_type, pillar, topic, title, body_text, visual_description, visual_path, ai_image_path, ai_video_path, slop_score, slop_issues, source_provenance, editorial_rationale, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             draft_id, brand, platform, content_type, pillar, topic,
             title, body_text, visual_description, visual_path,
             ai_image_path, ai_video_path, slop_score, slop_issues,
+            json.dumps(source_provenance or {}, ensure_ascii=False),
+            editorial_rationale or "",
             datetime.utcnow().isoformat(),
         ),
     )

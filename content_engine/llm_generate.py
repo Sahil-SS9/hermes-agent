@@ -615,9 +615,30 @@ def generate_with_text(
     if not gate_result["passed"]:
         return None
 
-    # Determine content type
+    # Determine content type. Prefer the source-aware router when the topic
+    # carries a real source signal; fall back to the existing static mapping.
     from llm_drafts import _choose_content_type
-    content_type = _choose_content_type(brand, pillar, platform)
+    content_type = None
+    source_provenance = topic.get("source_provenance")
+    editorial_rationale = ""
+    try:
+        from content_router import source_aware_content_type
+        from editorial_router import route_signal
+        signal = _signal_from_topic(topic)
+        # Manual blog queues can opt into source-aware routing by setting
+        # curated/evidence/source_notes/context/source_override.
+        draft_stub = {
+            "brand": brand, "platform": platform, "pillar": pillar,
+            "title": topic_text, "body_text": body_text,
+        }
+        content_type = source_aware_content_type(draft_stub, signal)
+        route = route_signal(signal, candidate_surfaces=[_surface_for_platform(platform)])
+        source_provenance = source_provenance or route.get("source_provenance")
+        editorial_rationale = route.get("rationale", "")
+    except Exception:
+        content_type = None
+    if not content_type:
+        content_type = _choose_content_type(brand, pillar, platform)
 
     visual_descs = {
         "sahil_twitter": "Dark terminal aesthetic. Code overlay, monospace font, build-in-public style.",
@@ -637,6 +658,8 @@ def generate_with_text(
         "content_type": content_type,
         "visual_description": visual_descs.get(brand, ""),
         "slop_audit": gate_result,
+        "source_provenance": source_provenance or {},
+        "editorial_rationale": editorial_rationale,
     }
 
     # For educational topics, derive an art-directed visual scene so the image
@@ -649,6 +672,40 @@ def generate_with_text(
 
     return drafted
 
+
+
+
+def _signal_from_topic(topic: dict) -> dict:
+    """Normalise a topic/activity object into an editorial_router signal."""
+    signal = dict(topic or {})
+    activity = signal.get("activity_data") or {}
+    if activity and not signal.get("signal_type"):
+        signal["signal_type"] = activity.get("signal_type", "")
+        signal["variables"] = activity.get("variables", {})
+        signal["signal_id"] = activity.get("signal_id", "")
+    return signal
+
+
+def _has_source_context(signal: dict) -> bool:
+    """Whether a topic is source-aware enough for editorial skip/routing."""
+    return bool(
+        signal.get("signal_type")
+        or signal.get("source_provenance")
+        or signal.get("source_override")
+        or signal.get("curated") is True
+        or signal.get("evidence")
+        or signal.get("source_notes")
+        or signal.get("context")
+    )
+
+
+def _surface_for_platform(platform: str) -> str:
+    return {
+        "twitter": "x_post",
+        "linkedin": "linkedin_post",
+        "blog": "blog",
+        "article": "article",
+    }.get(platform, "x_post")
 
 # ── Visual subject derivation (art direction) ──────────────────────────
 
@@ -734,6 +791,20 @@ def generate_drafts_llm(
 
     for topic in topics:
         for plat in platforms:
+            # Active editorial routing gate. Source-aware topics can be skipped
+            # before any LLM spend or static fallback. Static app-brand topics
+            # without provenance continue through the legacy path.
+            try:
+                from editorial_router import route_signal
+                signal = _signal_from_topic(topic)
+                if _has_source_context(signal):
+                    route = route_signal(signal, candidate_surfaces=[_surface_for_platform(plat)])
+                    if route.get("decision") == "skip":
+                        print(f"[llm_generate] editorial skip {brand}/{plat}: {route.get('rationale','')}", file=sys.stderr)
+                        continue
+            except Exception as exc:
+                print(f"[llm_generate] editorial routing failed open for {brand}/{plat}: {exc}", file=sys.stderr)
+
             if self_call_body_texts and text_idx < len(self_call_body_texts):
                 body_text = self_call_body_texts[text_idx]
                 text_idx += 1

@@ -155,6 +155,36 @@ def _can_spend(cost):
     return budget.can_spend(cost)
 
 
+def _record_rotation(tracker, draft, model_used="", generation_cost=0.0, ocr_passed=1):
+    """Record an image generation in the rotation tracker.
+
+    Shared helper so both the legacy and transplant paths call the same
+    recording logic. Silent (never raises) — rotation tracking is advisory.
+    """
+    if tracker is None:
+        return
+    try:
+        editorial = draft.get("_editorial", {})
+        tracker.record(
+            article_id=draft.get("id", ""),
+            brand=draft.get("brand", ""),
+            target_surface=draft.get("platform", "social"),
+            studio=editorial.get("studio", ""),
+            intent=editorial.get("intent", ""),
+            narrative=editorial.get("narrative", ""),
+            layout=editorial.get("layout", ""),
+            composition=editorial.get("composition", ""),
+            palette=editorial.get("palette", ""),
+            baoyu_type=editorial.get("baoyu_type", ""),
+            baoyu_style=editorial.get("baoyu_style", ""),
+            model_used=model_used,
+            generation_cost=generation_cost,
+            ocr_passed=ocr_passed,
+        )
+    except Exception as exc:  # noqa: BLE001 — rotation tracking is never a blocker
+        print(f"[draft_media] rotation tracker record failed: {exc}")
+
+
 def generate_post_image(draft, model=None, output_dir=None, scene_prompt=None):
     """Build a baoyu-method prompt, generate via Seedream, OCR-verify the baked-in
     text, regenerate (reseed -> nano-banana) on failure within budget. Returns a
@@ -190,6 +220,14 @@ def generate_post_image(draft, model=None, output_dir=None, scene_prompt=None):
             import imagery_transplant
             _p = imagery_transplant.generate(draft, draft.get("brand"), out_dir=output_dir)
             if _p and os.path.exists(_p):
+                # Record rotation metadata for the transplant path.
+                # Model/cost are the edit defaults since imagery_transplant may
+                # have used either the edit or scene model internally.
+                from config import IMAGERY_EDIT_MODEL, IMAGERY_EDIT_COST_GBP
+                _record_rotation(tracker, draft,
+                                 model_used=IMAGERY_EDIT_MODEL,
+                                 generation_cost=IMAGERY_EDIT_COST_GBP,
+                                 ocr_passed=1)
                 return _p
     except Exception as _exc:  # noqa: BLE001 (never let the new path break generation)
         print(f"[draft_media] transplant path error: {_exc}; using legacy")
@@ -227,28 +265,11 @@ def generate_post_image(draft, model=None, output_dir=None, scene_prompt=None):
             except Exception as exc:
                 print(f"[draft_media] prompt persist failed: {exc}")
 
-            # ── Record in rotation tracker ──
-            if tracker is not None:
-                try:
-                    editorial = draft.get("_editorial", {})
-                    tracker.record(
-                        article_id=draft_id,
-                        brand=draft.get("brand", ""),
-                        target_surface=draft.get("platform", "social"),
-                        studio=editorial.get("studio", ""),
-                        intent=editorial.get("intent", ""),
-                        narrative=editorial.get("narrative", ""),
-                        layout=editorial.get("layout", ""),
-                        composition=editorial.get("composition", ""),
-                        palette=editorial.get("palette", ""),
-                        baoyu_type=editorial.get("baoyu_type", ""),
-                        baoyu_style=editorial.get("baoyu_style", ""),
-                        model_used=m,
-                        generation_cost=cost,
-                        ocr_passed=1,
-                    )
-                except Exception as exc:
-                    print(f"[draft_media] rotation tracker record failed: {exc}")
+            # ── Record in rotation tracker (shared helper) ──
+            _record_rotation(tracker, draft,
+                             model_used=m,
+                             generation_cost=cost,
+                             ocr_passed=1)
 
             print(f"[draft_media] image OK via {m}: {path}")
             return path

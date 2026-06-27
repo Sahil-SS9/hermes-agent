@@ -9,11 +9,11 @@
 # The router dedupes against topic_usage_log keyed "blog_ai" for
 # BLOG_TOPIC_RECENCY_DAYS (45 days). Add new topics below this header.
 
-{"topic_id": "ai-agent-eval-2026-06", "title_hint": "Why most agent evals are measuring the wrong thing", "tags": ["ai-adoption", "agents", "evaluation"], "priority": 8}
-{"topic_id": "ai-context-engineering-2026", "title_hint": "Context engineering is the new prompt engineering", "tags": ["ai-strategy", "llm", "context"], "priority": 7}
-{"topic_id": "ai-mcp-protocol-adoption", "title_hint": "MCP adoption patterns: what's actually working in production", "tags": ["ai-adoption", "agents", "mcp"], "priority": 7}
-{"topic_id": "ai-cost-per-task-collapse", "title_hint": "The cost per AI task is collapsing - what that means for product strategy", "tags": ["ai-strategy", "enterprise-saas"], "priority": 6}
-{"topic_id": "ai-trust-surface-area", "title_hint": "Designing trust surface area in AI-powered products", "tags": ["ai-adoption", "product-management"], "priority": 6}
-{"topic_id": "ai-structured-output-discipline", "title_hint": "Structured output discipline: the unglamorous skill that makes agents reliable", "tags": ["agents", "llm"], "priority": 5}
-{"topic_id": "ai-small-model-resurgence", "title_hint": "Small models are back: when 8B beats 200B", "tags": ["llm", "machine-learning"], "priority": 6}
-{"topic_id": "ai-eval-driven-development", "title_hint": "Eval-driven development for AI features", "tags": ["ai-strategy", "agents"], "priority": 7}
+{"topic_id": "ai-agent-eval-2026-06", "title_hint": "Why most agent evals are measuring the wrong thing", "tags": ["ai-adoption", "agents", "evaluation"], "priority": 8, "curated": true}
+{"topic_id": "ai-context-engineering-2026", "title_hint": "Context engineering is the new prompt engineering", "tags": ["ai-strategy", "llm", "context"], "priority": 7, "curated": true}
+{"topic_id": "ai-mcp-protocol-adoption", "title_hint": "MCP adoption patterns: what's actually working in production", "tags": ["ai-adoption", "agents", "mcp"], "priority": 7, "curated": true}
+{"topic_id": "ai-cost-per-task-collapse", "title_hint": "The cost per AI task is collapsing - what that means for product strategy", "tags": ["ai-strategy", "enterprise-saas"], "priority": 6, "curated": true}
+{"topic_id": "ai-trust-surface-area", "title_hint": "Designing trust surface area in AI-powered products", "tags": ["ai-adoption", "product-management"], "priority": 6, "curated": true}
+{"topic_id": "ai-structured-output-discipline", "title_hint": "Structured output discipline: the unglamorous skill that makes agents reliable", "tags": ["agents", "llm"], "priority": 5, "curated": true}
+{"topic_id": "ai-small-model-resurgence", "title_hint": "Small models are back: when 8B beats 200B", "tags": ["llm", "machine-learning"], "priority": 6, "curated": true}
+{"topic_id": "ai-eval-driven-development", "title_hint": "Eval-driven development for AI features", "tags": ["ai-strategy", "agents"], "priority": 7, "curated": true}

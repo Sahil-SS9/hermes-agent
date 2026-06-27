@@ -76,10 +76,10 @@ def run_stage_1(
         brand_platforms = brand_config.get("platforms", [])
         effective_platform = platform or (brand_platforms[0] if brand_platforms else "twitter")
 
-        # Generate — LLM path for personal brands, and for every brand when a
+        # Generate - LLM path for personal brands, and for every brand when a
         # direct LLM endpoint is configured (CONTENT_LLM_BASE_URL/MODEL).
-        # generate_drafts_llm falls back to static templates per topic on
-        # gate/endpoint failure, so this never produces fewer drafts.
+        # Source-aware editorial skips are honoured before fallback so weak or
+        # unsupported signals do not become static-template filler.
         from llm_generate import _llm_config, generate_drafts_llm
         if use_llm and (brand in LLM_BRANDS or _llm_config()):
             drafts = generate_drafts_llm(brand, topics, platform=effective_platform)
@@ -113,6 +113,8 @@ def run_stage_1(
                     visual_path=d.get("visual_path"),
                     slop_score=audit.get("slop_score", 0),
                     slop_issues="; ".join(audit.get("issues", [])),
+                    source_provenance=d.get("source_provenance"),
+                    editorial_rationale=d.get("editorial_rationale", ""),
                 )
             all_drafts.append(d)
 

@@ -4,8 +4,12 @@ illustrated/photographic image (Track A, krea + overlay).
 Infographic when the post is structured/data-led (comparison, list, framework,
 stats, how-to with steps); otherwise an illustrated scene. An explicit
 draft['format'] always wins.
+
+Source-aware routing (editorial_router) preferred over static mapping when a
+real signal is available.
 """
 from __future__ import annotations
+from typing import Optional
 
 _IG_PILLARS = {"data", "data_driven", "comparison", "framework", "list", "tips", "stats", "howto"}
 _IG_CUES = (" vs ", " vs.", "do and don", "do/don", "don't", "step 1", "steps to",
@@ -69,3 +73,46 @@ def is_infographic(draft: dict) -> bool:
         return True
     text = ((draft.get("title") or "") + " " + (draft.get("body_text") or "")).lower()
     return any(c in text for c in _IG_CUES)
+
+
+def source_aware_content_type(draft: dict, signal: Optional[dict] = None) -> str:
+    """Determine content type with source awareness.
+
+    When a real signal is available (has signal_type), the editorial router
+    determines the content type based on signal properties (screenshot →
+    text+image, build note → text+image, etc). Falls back to the static
+    content_type_for when no signal is available (app brand static topics).
+
+    Args:
+        draft: Draft dict with brand, pillar, format, title, body_text.
+        signal: Optional signal dict from activity_collector / topic source.
+
+    Returns:
+        Content type string: text | text+image | article | blog | scene | ...
+    """
+    has_signal_context = bool(
+        signal and (
+            signal.get("signal_type")
+            or (signal.get("topic_id") and signal.get("title_hint") and (
+                signal.get("curated") is True
+                or signal.get("evidence")
+                or signal.get("source_notes")
+                or signal.get("context")
+                or signal.get("source_override")
+            ))
+        )
+    )
+    if has_signal_context:
+        try:
+            from editorial_router import choose_content_type
+            ctype = choose_content_type(
+                signal,
+                brand=draft.get("brand", ""),
+                pillar=draft.get("pillar", ""),
+                platform=draft.get("platform", "twitter"),
+            )
+            if ctype:
+                return ctype
+        except Exception:
+            pass
+    return content_type_for(draft)
