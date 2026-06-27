@@ -158,8 +158,26 @@ def _can_spend(cost):
 def generate_post_image(draft, model=None, output_dir=None, scene_prompt=None):
     """Build a baoyu-method prompt, generate via Seedream, OCR-verify the baked-in
     text, regenerate (reseed -> nano-banana) on failure within budget. Returns a
-    publish-ready PNG path with text already in the artwork (no overlay)."""
+    publish-ready PNG path with text already in the artwork (no overlay).
+
+    Enriches the draft with editorial metadata from the decision engine and
+    records successful generations in the rotation tracker.
+    """
     import os
+
+    # ── Editorial decision engine ──
+    tracker = None
+    try:
+        from image_router import decide
+        from rotation_tracker import RotationTracker
+
+        tracker = RotationTracker()
+        history = tracker.recent_history(draft.get("brand", ""), 10)
+        editorial = decide(draft, recent_history=history)
+        draft["_editorial"] = editorial
+    except Exception as _exc:  # noqa: BLE001 — never let the decision engine break generation
+        print(f"[draft_media] decision engine error: {_exc}; using defaults")
+        draft["_editorial"] = {}
 
     # Personal brands use the reference-anchored transplant path for
     # infographic-family content (validated 2026-06-16, brand_imagery_standard.md).
@@ -208,6 +226,30 @@ def generate_post_image(draft, model=None, output_dir=None, scene_prompt=None):
                 update_draft_image_prompt(draft_id, prompt)
             except Exception as exc:
                 print(f"[draft_media] prompt persist failed: {exc}")
+
+            # ── Record in rotation tracker ──
+            if tracker is not None:
+                try:
+                    editorial = draft.get("_editorial", {})
+                    tracker.record(
+                        article_id=draft_id,
+                        brand=draft.get("brand", ""),
+                        target_surface=draft.get("platform", "social"),
+                        studio=editorial.get("studio", ""),
+                        intent=editorial.get("intent", ""),
+                        narrative=editorial.get("narrative", ""),
+                        layout=editorial.get("layout", ""),
+                        composition=editorial.get("composition", ""),
+                        palette=editorial.get("palette", ""),
+                        baoyu_type=editorial.get("baoyu_type", ""),
+                        baoyu_style=editorial.get("baoyu_style", ""),
+                        model_used=m,
+                        generation_cost=cost,
+                        ocr_passed=1,
+                    )
+                except Exception as exc:
+                    print(f"[draft_media] rotation tracker record failed: {exc}")
+
             print(f"[draft_media] image OK via {m}: {path}")
             return path
         print(f"[draft_media] {m} text mismatch {missing}; escalating")

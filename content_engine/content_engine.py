@@ -352,6 +352,25 @@ def main() -> int:
     purge.add_argument("--retention", "-r", type=int, default=48, help="Retention in hours (default: 48)")
     purge.add_argument("--brand", "-b", default=None)
 
+    # Editorial decision engine
+    ed = sub.add_parser("decide", help="Run editorial decision engine on a draft or content")
+    ed.add_argument("draft_id", nargs="?", default=None, help="Draft ID to classify (reads from DB)")
+    ed.add_argument("--title", default=None, help="Title (inline mode, no draft_id)")
+    ed.add_argument("--body", default=None, help="Body text (inline mode, no draft_id)")
+    ed.add_argument("--brand", default="sahil_twitter", help="Brand key")
+    ed.add_argument("--platform", default="twitter", help="Platform")
+    ed.add_argument("--pillar", default="", help="Content pillar")
+    ed.add_argument("--category", default="", help="Content category")
+    ed.add_argument("--json", action="store_true", help="Output as JSON")
+
+    # Rotation tracker
+    rt = sub.add_parser("rotation", help="Rotation tracker status")
+    rt.add_argument("--brand", default=None, help="Filter by brand")
+    rt.add_argument("--limit", type=int, default=10, help="Recent history limit")
+    rt.add_argument("--check", nargs="+", default=[], help="Check: studio=<name> layout=<name> palette=<name>")
+    rt.add_argument("--prune", type=int, default=0, help="Prune records older than N days")
+    rt.add_argument("--json", action="store_true", help="Output as JSON")
+
     args = parser.parse_args()
     
     init_db()
@@ -587,6 +606,87 @@ def main() -> int:
             deleted = purge_stale_drafts(retention_hours=retention, brand=args.brand)
             scope = f"brand={args.brand}" if args.brand else "all brands"
             print(f"Purged {deleted} draft(s) older than {retention}h ({scope})")
+        return 0
+
+    elif args.cmd == "decide":
+        from image_router import decide as editorial_decide
+        from rotation_tracker import RotationTracker
+
+        if args.draft_id:
+            d = get_draft(args.draft_id)
+            if not d:
+                print(f"Draft not found: {args.draft_id}")
+                return 1
+            content = d
+        else:
+            content = {
+                "title": args.title or "",
+                "body_text": args.body or "",
+                "brand": args.brand,
+                "platform": args.platform,
+                "pillar": args.pillar,
+                "category": args.category,
+            }
+
+        tracker = RotationTracker()
+        history = tracker.recent_history(content.get("brand", ""), 10)
+        result = editorial_decide(content, recent_history=history)
+
+        if args.json:
+            import json as _json
+            print(_json.dumps(result, indent=2))
+        else:
+            print(f"Intent:      {result['intent']}")
+            print(f"Narrative:   {result['narrative']}")
+            print(f"Layout:      {result['layout']}")
+            print(f"Composition: {result['composition']}")
+            print(f"Studio:      {result['studio']}")
+            print(f"Baoyu type:  {result['baoyu_type']}")
+            print(f"Baoyu style: {result['baoyu_style']}")
+            print(f"Palette:     {result['palette']}")
+            print(f"Mood:        {result['mood']}")
+            print(f"Aspect:      {result['aspect']}")
+        return 0
+
+    elif args.cmd == "rotation":
+        from rotation_tracker import RotationTracker
+        import json as _json
+
+        tracker = RotationTracker()
+
+        if args.prune:
+            deleted = tracker.prune(retention_days=args.prune)
+            print(f"Pruned {deleted} record(s) older than {args.prune} days.")
+            return 0
+
+        if args.check:
+            kwargs = {"brand": args.brand or ""}
+            for c in args.check:
+                if "=" in c:
+                    k, v = c.split("=", 1)
+                    kwargs[k] = v
+            result = tracker.can_use(**kwargs)
+            if args.json:
+                print(_json.dumps(result, indent=2))
+            else:
+                status = "✅ Allowed" if result["allowed"] else "❌ Blocked"
+                print(f"{status}")
+                for r in result["reasons"]:
+                    print(f"  - {r}")
+            return 0
+
+        count = tracker.count(brand=args.brand)
+        scope = f" for brand '{args.brand}'" if args.brand else ""
+        print(f"Total records{scope}: {count}")
+
+        if args.brand:
+            recent = tracker.recent_for_brand(args.brand, args.limit)
+            if args.json:
+                print(_json.dumps(recent, indent=2, default=str))
+            else:
+                print(f"\nRecent {len(recent)} image(s) for '{args.brand}':")
+                for r in recent:
+                    print(f"  {r.get('published_at','')[:19]} | {r.get('studio',''):30s} | {r.get('layout',''):20s} | {r.get('composition',''):20s} | {r.get('palette','')}")
         return 0
 
     else:
