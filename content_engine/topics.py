@@ -357,6 +357,7 @@ def _signal_to_topic(signal: dict, platform: str) -> Dict[str, Any]:
             "evidence": [topic],
             "confidence": "verified",
         },
+        "_routing": signal.get("_routing"),
     }
 
 
@@ -432,6 +433,40 @@ def get_topics(brand: str, count: int = 6, skip_used: bool = True) -> List[Dict]
             signals = []
             state = {"used_signals": []}
 
+        # ── Editorial router: filter signals by platform fit ──
+        if signals:
+            try:
+                from editorial_router import route_signal
+                filtered = []
+                for sig in signals:
+                    routing = route_signal(sig)
+                    if routing["decision"] == "skip":
+                        continue
+                    routed_platform = routing.get("platform", "")
+                    # Accept if platform matches OR routing says a different
+                    # high-fit platform (the signal is useful elsewhere).
+                    # For personal brands, keep signals that route to the
+                    # requested platform.
+                    if routed_platform == platform:
+                        sig["_routing"] = routing
+                        filtered.append(sig)
+                    elif routing["decision"] in ("blog", "article"):
+                        # Long-form eligible — keep with lower priority
+                        sig["priority"] = max(1, sig.get("priority", 5) - 2)
+                        sig["_routing"] = routing
+                        filtered.append(sig)
+                    elif routing["scores"]["x_fit"] < 40 and routing["scores"]["linkedin_fit"] < 40:
+                        # Very low fit overall — skip
+                        continue
+                    else:
+                        # Moderate fit but different platform — keep with lower priority
+                        sig["priority"] = max(1, sig.get("priority", 5) - 1)
+                        sig["_routing"] = routing
+                        filtered.append(sig)
+                signals = filtered
+            except Exception as e:
+                print(f"[topics] editorial_router failed: {e}", file=sys.stderr)
+
         topics: List[Dict] = list(shot_topics)  # screenshots take priority
         slots = max(0, count - len(topics))     # capacity left for activity/static
         used_ids: List[str] = []
@@ -474,6 +509,7 @@ def get_topics(brand: str, count: int = 6, skip_used: bool = True) -> List[Dict]
                     "educational": True,
                     "context": context,
                     "kb_snippets": kb,
+                    "_routing": signal.get("_routing"),
                 })
                 used_ids.append(signal["signal_id"])
 

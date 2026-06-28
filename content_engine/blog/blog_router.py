@@ -97,7 +97,10 @@ def _read_manual_queue(stream: str) -> list[dict]:
             "topic_id": obj.get("topic_id", ""),
             "title_hint": obj.get("title_hint", ""),
             "tags": obj.get("tags", []),
-            "source_override": obj.get("source_override"),  # None = use stream config
+            # Honest source label: manual queue entries have no live source URL.
+            # Explicit source_override may still be set (e.g. "research-paper"
+            # for a paper-linked entry), but null defaults to "manual_queue".
+            "source_override": obj.get("source_override") or "manual_queue",
             "signals": [{
                 "signal_id": obj.get("topic_id", ""),
                 "summary": obj.get("title_hint", ""),

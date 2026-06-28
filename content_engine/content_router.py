@@ -102,7 +102,7 @@ def source_aware_content_type(draft: dict, signal: Optional[dict] = None) -> str
             ))
         )
     )
-    if has_signal_context:
+    if signal and signal.get("signal_type"):
         try:
             from editorial_router import choose_content_type
             ctype = choose_content_type(
@@ -116,3 +116,50 @@ def source_aware_content_type(draft: dict, signal: Optional[dict] = None) -> str
         except Exception:
             pass
     return content_type_for(draft)
+
+
+# ── Claim/provenance gate for app-brand drafts ──
+
+_INVENTED_CLAIM_PATTERNS = [
+    # Test group sizes
+    r"\b\d{2,}\s*(household|test|user|family|families)\b",
+    # Beta tester names (specific people)
+    r"\b(beta tester|maya|lucy)\b",
+    # Fabricated quotes with specific numbers
+    r"(?:saved|save)\s*(?::)?\s*[£]\d+\.\d{2}",
+    r"[£]\d+\.\d{2}\s*(?:saved|save|cheaper|less)",
+    # Specific receipt totals
+    r"[Rr]eceipt\s*says\s*[£]\d+",
+    # Time savings
+    r"\b\d{2,}\s*(minute|hour|second)\s*(?:saved|per|less|down|from)",
+]
+
+
+def gate_claims(draft: dict) -> tuple[bool, list[str]]:
+    """Check a draft body for unsupported/invented claims.
+
+    Returns (passes_gate, issues) where passes_gate is True if no
+    invented claims found, or all claims have source provenance.
+
+    Applies to all brands, but especially app brands (Plenishd,
+    CoachOS, MatchdayMaestro) where invented test groups, fake
+    quotes, and unsupported savings are highest risk.
+    """
+    body = (draft.get("body_text") or draft.get("full_post", "") or "")
+    body_lower = body.lower()
+    topics_data = draft.get("topic", "")
+    issues = []
+
+    import re
+    for pat in _INVENTED_CLAIM_PATTERNS:
+        match = re.search(pat, body_lower)
+        if match:
+            # Check if source provenance exists
+            prov = draft.get("source_provenance") or {}
+            if not prov or prov.get("confidence") in ("manual", ""):
+                issues.append(f"Unsupported claim: '{match.group()[:40]}'"
+                              f" (no source provenance)")
+            # Verified/claimed provenance: flag but don't block
+            # (allows drafts with real source data through review)
+
+    return (len(issues) == 0, issues)

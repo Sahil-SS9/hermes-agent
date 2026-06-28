@@ -869,6 +869,20 @@ def generate_drafts(brand, topics, platform=None, count_per_topic=1):
             draft["topic"] = topic_text
             draft["platform"] = plat
             draft["content_type"] = content_type
+
+            # ── Claim/provenance gate for app brands ──
+            if brand in ("plenishd", "coachos", "matchdaymaestro"):
+                try:
+                    from content_router import gate_claims
+                    passes, issues = gate_claims(draft)
+                    if not passes:
+                        print(f"[llm_drafts] {brand}/{plat}: claim gate blocked ("
+                              f"{' | '.join(issues)})")
+                        continue  # skip this draft — don't save
+                    draft["claim_issues"] = issues
+                except Exception as exc:
+                    print(f"[llm_drafts] claim gate error: {exc}")
+
             drafts.append(draft)
 
     return drafts

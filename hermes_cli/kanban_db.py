@@ -109,6 +109,37 @@ VALID_STATUSES = {
     "decompose", "execute", "pr+qa", "audit", "final_sign_off", "document",
 }
 VALID_INITIAL_STATUSES = {"running", "blocked", "backlog"}
+
+# Typed block reasons. Distinguishes the two fundamentally different things a
+# worker (or human) means by "blocked", so each can be routed differently
+# instead of all landing in one undifferentiated ``blocked`` bucket that a cron
+# unblocks → worker re-blocks → cron unblocks … forever.
+#
+#   * ``dependency``   — can't proceed until another task finishes. Routed to
+#                        ``todo`` (NOT ``blocked``) so the existing
+#                        parent-gating / ``recompute_ready`` machinery promotes
+#                        it automatically once parents are done. No human, no
+#                        cron, no retry storm.
+#   * ``needs_input``  — needs a human decision/answer it cannot derive.
+#   * ``capability``   — hit a hard wall (no access, missing creds, an action no
+#                        AI agent can perform). Genuinely human-only.
+#   * ``transient``    — a flaky/temporary failure that may clear on retry.
+#
+# ``needs_input`` and ``capability`` are "truly blocked": they go to ``blocked``
+# for a human, and the unblock-loop breaker (see ``block_task`` /
+# ``BLOCK_RECURRENCE_LIMIT``) escalates them to ``triage`` if a cron keeps
+# unblocking them only to have the worker re-block for the same reason.
+# ``None`` = legacy/un-typed block (treated as a generic human blocker).
+VALID_BLOCK_KINDS = {"dependency", "needs_input", "capability", "transient"}
+
+# After a task has been blocked, unblocked, and re-blocked this many times for
+# the same (truly-blocked) reason, the unblock-loop breaker stops trusting the
+# unblocker (usually a cron) and routes the task to ``triage`` instead of back
+# to ``blocked`` — breaking the infinite unblock↔re-block loop and forcing a
+# human-in-the-loop decision. Mirrors the dispatcher's ``DEFAULT_FAILURE_LIMIT``
+# spirit (default 2) but counts a different signal: manual unblock recurrences,
+# not dispatcher spawn/crash/timeout failures.
+BLOCK_RECURRENCE_LIMIT = 2
 VALID_WORKSPACE_KINDS = {"scratch", "worktree", "dir"}
 KNOWN_TOOLSET_NAMES = frozenset(name.casefold() for name in get_toolset_names())
 _IS_WINDOWS = sys.platform == "win32"
@@ -5148,6 +5179,7 @@ def block_task(
     task_id: str,
     *,
     reason: Optional[str] = None,
+    kind: Optional[str] = None,
     expected_run_id: Optional[int] = None,
 ) -> bool:
     """Transition ``running/ready/triage -> blocked``."""

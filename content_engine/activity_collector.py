@@ -253,7 +253,22 @@ def collect_hermes_skills(state: dict) -> list[dict]:
 
 
 def _extract_research_digest() -> list[dict]:
-    """Read the latest research digest HTML and extract items."""
+    """Read the latest research digest HTML and extract items with clean metadata.
+
+    Current HTML structure (verified 2026-06-26):
+      <div class="section section-{name}">          # {name} = news | tools | signal
+        <div class="section-header">── {Name} (N) ──</div>
+        <div class="item">
+          <div class="item-title"><a href="URL">Title</a></div>
+          <div class="meta">... <span class="age">N time ago</span></div>
+          <div class="summary">Summary text</div>
+        </div>
+      </div>
+
+    The old code used '<section class="news"' and '<div class="item-summary">'
+    which no longer match the HTML format. The new extraction uses the actual
+    div-based layout.
+    """  # noqa: E501
     items = []
 
     rd_dir = RUNBOOKS_DIR / "research-digest"
@@ -270,40 +285,77 @@ def _extract_research_digest() -> list[dict]:
     except OSError:
         return items
 
-    # Extract item blocks: class="item-title" -> text, class="item-summary" -> text
-    title_matches = re.findall(
-        r'<div class="item-title">(.*?)</div>', html, re.DOTALL
-    )
-    summary_matches = re.findall(
-        r'<div class="item-summary">(.*?)</div>', html, re.DOTALL
-    )
+    # Locate section boundaries.
+    # Two HTML formats seen:
+    #   old (pre-June 27): <div class="section section-news">
+    #   new (June 27+):    <div class="section"> ... <div class="section-header news-h">
+    # Handle both by looking for either pattern.
+    section_positions: list[tuple[int, str]] = []
+    # Pattern 1: <div class="section section-{name}">
+    for m in re.finditer(r'<div class="section section-([^"]+)">', html):
+        section_positions.append((m.start(), m.group(1)))
+    # Pattern 2: <div class="section-header {name}-h"> (extract {name})
+    if not section_positions:
+        for m in re.finditer(
+            r'<div class="section-header\s+(\w+)-h">', html
+        ):
+            section_positions.append((m.start(), m.group(1)))
 
-    # Determine which section each item belongs to
-    # Use <section class= to avoid matching CSS style blocks
-    news_pos = html.find('<section class="news"')
-    tools_pos = html.find('<section class="tools"')
-    signal_pos = html.find('<section class="signal"')
+    # Find each item div and extract data
+    item_start_positions = [
+        m.start() for m in re.finditer(r'<div class="item">', html)
+    ]
 
-    for i, title in enumerate(title_matches):
-        item_html_pos = html.find(title)
-        if item_html_pos == -1:
-            continue
+    for i, start in enumerate(item_start_positions):
+        # Determine end: next item start or file end
+        end = (
+            item_start_positions[i + 1]
+            if i + 1 < len(item_start_positions)
+            else len(html)
+        )
+        item_html = html[start:end]
 
-        # Determine section by proximity
+        # Extract title + URL from <a href="..." inside item-title
+        a_match = re.search(
+            r'<a href="([^"]+)"[^>]*>(.*?)</a>', item_html, re.DOTALL
+        )
+        title = ""
+        url = ""
+        if a_match:
+            url = a_match.group(1).strip()
+            raw_title = a_match.group(2)
+            # Decode common HTML entities
+            raw_title = raw_title.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", '"').replace("&#39;", "'")
+            title = re.sub(r'<[^>]+>', "", raw_title).strip()
+
+        if not title:
+            continue  # skip malformed items
+
+        # Extract summary. Two CSS classes seen:
+        #   old (June 26):   <div class="summary">
+        #   new (June 27+):  <div class="item-summary">
+        summary = ""
+        for summary_class in ("summary", "item-summary"):
+            summary_match = re.search(
+                r'<div class="' + summary_class + r'">(.*?)</div>',
+                item_html, re.DOTALL
+            )
+            if summary_match:
+                summary = re.sub(r'<[^>]+>', "",
+                                 summary_match.group(1)).strip()
+                break
+
+        # Determine section by proximity to the nearest preceding section div
         section = "news"
-        if tools_pos != -1 and item_html_pos > tools_pos:
-            section = "tools"
-        if signal_pos != -1 and item_html_pos > signal_pos:
-            section = "signal"
-
-        summary = summary_matches[i] if i < len(summary_matches) else ""
-        # Strip HTML tags from summary
-        summary = re.sub(r"<[^>]+>", "", summary).strip()
+        for pos, name in section_positions:
+            if start > pos:
+                section = name
 
         items.append({
             "title": title,
             "summary": summary,
             "section": section,
+            "url": url,
         })
 
     return items
@@ -329,21 +381,35 @@ def collect_research_digest(state: dict) -> list[dict]:
         elif section == "signal":
             signal_type = "research_signal"
             pillar = "wry"
+        elif section == "news":
+            # News items: don't skip entirely — they may have product or
+            # industry implications suitable for PM/LinkedIn/blog routing.
+            # Give them lower priority and let the editorial_router decide.
+            signal_type = "research_signal"
+            pillar = "industry_news"
         else:
-            # News items — skip for content purposes (too general)
             continue
 
         target_list = tools if signal_type == "research_tool" else signals
+        priority = 6
+        freshness = 48
+        if signal_type == "research_tool":
+            priority = 6
+        elif signal_type == "research_signal":
+            priority = 5 if pillar == "wry" else 4  # news items: lower prio
+            freshness = 72 if pillar == "industry_news" else 48
+
         target_list.append({
             "signal_id": signal_id,
             "signal_type": signal_type,
             "pillar": pillar,
-            "priority": 6,
-            "freshness_hours": 48,
+            "priority": priority,
+            "freshness_hours": freshness,
             "variables": {
                 "title": item["title"],
                 "summary": item["summary"],
                 "section": section,
+                "url": item.get("url", ""),
             },
         })
 
@@ -437,7 +503,8 @@ def collect_github_radar(state: dict) -> list[dict]:
 def collect_architecture_insights(state: dict) -> list[dict]:
     """Evergreen content about KENSEI architecture and setup.
 
-    These don't use state tracking — they rotate through topics.
+    Rotates through topics on each call using state tracking.
+    Returns one topic per run, cycling through the list.
     """
     topics = [
         {
@@ -478,18 +545,25 @@ def collect_architecture_insights(state: dict) -> list[dict]:
         },
     ]
 
-    # Return one per run, rotating through them
+    # Return one per run, rotating through them using state tracking
+    rotations = state.setdefault("cycle_signals", {})
+    idx = rotations.get("arch_rotation_idx", 0)
+    selected = topics[idx % len(topics)]
+
+    # Advance index for next call
+    rotations["arch_rotation_idx"] = (idx + 1) % len(topics)
+
     return [
         {
-            "signal_id": f"arch:{topics[0]['topic']}",
+            "signal_id": f"arch:{selected['topic']}",
             "signal_type": "architecture",
-            "pillar": topics[0]["pillar"],
+            "pillar": selected["pillar"],
             "priority": 7,
             "freshness_hours": 9999,  # nearly evergreen
             "variables": {
-                "topic_label": topics[0]["label"],
-                "description": topics[0]["description"],
-                "topic": topics[0]["topic"],
+                "topic_label": selected["label"],
+                "description": selected["description"],
+                "topic": selected["topic"],
             },
         }
     ]

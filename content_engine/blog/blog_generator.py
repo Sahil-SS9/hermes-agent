@@ -7,7 +7,9 @@ system prompt. Output is a draft dict with the blog frontmatter fields
 (tier, tags, source, format) set from the stream config.
 """
 from __future__ import annotations
+import os
 import re
+from pathlib import Path
 from typing import Optional
 
 import context_enrich
@@ -86,6 +88,7 @@ _DEPTH_CONTRACT = (
 
 def build_blog_prompt(stream: str, plan: dict, context_blob: str,
                       kb_snippets: list[str],
+                      wiki_entries: Optional[list[dict]] = None,
                       retry_feedback: Optional[str] = None,
                       verification: Optional[dict] = None) -> dict:
     """System + user prompt for the blog LLM call, stream-aware.
@@ -179,12 +182,120 @@ def build_blog_prompt(stream: str, plan: dict, context_blob: str,
         "tool names verbatim where they help)", context_blob or "(none)",
         "",
         "## Author's prior takes (reflect this thinking, do not repeat)", takes,
-        "",
-        "Write the article now.",
     ])
+
+    # Inject LLM-WIKI context as a supporting section when entries found.
+    if wiki_entries:
+        wiki_lines = ["## LLM-WIKI knowledge base context"]
+        wiki_lines.append(
+            "Relevant entries from your internal knowledge base. Adapt and "
+            "tailor this material to the stream voice — do not paste raw."
+        )
+        for w in wiki_entries:
+            wiki_lines.append(f"\n### {w['title']}")
+            wiki_lines.append(f"Source: wiki/{w['page']}")
+            wiki_lines.append(w["excerpt"])
+        user += "\n\n" + "\n".join(wiki_lines)
+
+    user += "\n\nWrite the article now."
     user = "\n".join(line for line in user.splitlines() if line is not None)
 
     return {"system": system, "user": user}
+
+
+WIKI_HOME = Path(os.path.expanduser("~/wiki"))
+
+
+def _wiki_context_for(topic: str, max_results: int = 2) -> list[dict]:
+    """Search the LLM-WIKI for relevant entries and return excerpts.
+
+    Searches concept, comparison, and repo pages by keyword matching on
+    the topic string. Returns up to max_results entries with title, page
+    path, and excerpt (first 2 substantive paragraphs).
+
+    Falls back to empty list silently on any IO error. Does NOT pretend
+    wiki backing exists when no match is found.
+    """
+    if not WIKI_HOME.exists():
+        return []
+    result = []
+    # Search in the most structured wiki subdirs
+    search_dirs = [
+        WIKI_HOME / "concepts",
+        WIKI_HOME / "comparisons",
+        WIKI_HOME / "repos",
+        WIKI_HOME / "raw" / "articles",
+        WIKI_HOME / "raw" / "papers",
+    ]
+    keywords = topic.lower().split()
+    # Filter to substantive words only (5+ chars, not stop words)
+    stop_words = {"their", "there", "about", "which", "that", "this",
+                   "with", "what", "when", "where", "how", "they",
+                   "been", "have", "from", "into", "over", "such",
+                   "than", "then", "them", "these", "those", "would"}
+    keywords = [k for k in keywords if len(k) >= 5 and k not in stop_words][:8]
+
+    if not keywords:
+        return []
+
+    try:
+        for sd in search_dirs:
+            if not sd.exists():
+                continue
+            for md_file in sorted(sd.glob("*.md")):
+                if len(result) >= max_results:
+                    break
+                text = md_file.read_text(encoding="utf-8", errors="replace")
+                text_lower = text.lower()
+
+                # Extract title from first # heading (after YAML frontmatter)
+                yaml_end = text.find("---", 3) if text.startswith("---") else -1
+                body_start = yaml_end + 3 if yaml_end > 0 else 0
+                body = text[body_start:]
+                title = ""
+                for line in body.splitlines():
+                    if line.startswith("# "):
+                        title = line.lstrip("# ").strip().lower()
+                        break
+
+                # Strong concept match: 2+ keyword matches in body AND
+                # at least 1 keyword in the page title (ensures the wiki
+                # page is about the same concept as the topic).
+                kw_in_body = [k for k in keywords if k in text_lower]
+                kw_in_title = [k for k in keywords if k in title]
+
+                if len(kw_in_body) < 2:
+                    continue
+                if not kw_in_title:
+                    continue  # page title must share at least 1 keyword
+
+                # Extract excerpt (skip YAML frontmatter)
+                paragraphs = []
+                for line in body.splitlines():
+                    stripped = line.strip()
+                    if not stripped:
+                        continue
+                    if not line.startswith("#"):
+                        paragraphs.append(stripped)
+                if not title:
+                    title = md_file.stem.replace("-", " ").title()
+
+                excerpt = ""
+                count = 0
+                for p in paragraphs:
+                    if count >= 2:
+                        break
+                    excerpt += p + "\n\n"
+                    count += 1
+
+                result.append({
+                    "title": title[:80],
+                    "page": str(md_file.relative_to(WIKI_HOME)),
+                    "excerpt": excerpt.strip()[:500],
+                })
+        return result
+    except (OSError, IOError):
+        return []
 
 
 def write(plan: dict, stream: str = "ai",
@@ -207,9 +318,15 @@ def write(plan: dict, stream: str = "ai",
     kb = retrieve_kb(plan.get("title_hint", "") or plan["signals"][0].get("summary", ""))
     kb = (kb or [])[:3]
 
+    # LLM-WIKI context: search for relevant wiki entries matching the topic
+    wiki_entries = _wiki_context_for(
+        plan.get("title_hint", "") or plan["signals"][0].get("summary", "")
+    )
+
     last_body: Optional[str] = None
     for attempt in range(max_retries + 1):
         prompts = build_blog_prompt(stream, plan, context_blob, kb,
+                                    wiki_entries=wiki_entries,
                                     retry_feedback=retry_feedback,
                                     verification=verification)
         body = _call_llm_first(prompts["system"], prompts["user"])
