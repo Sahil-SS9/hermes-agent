@@ -2603,6 +2603,14 @@ DEFAULT_CONFIG = {
         "level": "INFO",       # Minimum level for agent.log: DEBUG, INFO, WARNING
         "max_size_mb": 5,      # Max size per log file before rotation
         "backup_count": 3,     # Number of rotated backup files to keep
+        # Long-lived gateways can be OOM-killed before Python writes a
+        # traceback.  Emit a low-frequency RSS/GC time series by default so
+        # crash forensics can distinguish leaks, allocator fragmentation, and
+        # runaway thread/process growth.
+        "memory_monitor": {
+            "enabled": True,
+            "interval_seconds": 300,
+        },
     },
 
     # Remotely-hosted model catalog manifest.  When enabled, the CLI fetches

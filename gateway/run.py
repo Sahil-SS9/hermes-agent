@@ -5799,6 +5799,33 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             self._gateway_loop = None
         logger.info("Session storage: %s", self.config.sessions_dir)
 
+        # Start low-overhead RSS/GC logging early in gateway boot.  This is
+        # deliberately fail-soft: memory forensics must never block messaging
+        # startup, but when a long-lived gateway is OOM-killed or hard-crashes
+        # the preceding [MEMORY] time series is often the only useful evidence.
+        try:
+            from hermes_cli.config import load_config
+            from gateway.memory_monitor import start_memory_monitoring
+
+            _logging_cfg = (load_config() or {}).get("logging", {}) or {}
+            _mem_cfg = _logging_cfg.get("memory_monitor", {}) or {}
+            if isinstance(_mem_cfg, bool):
+                _mem_enabled = _mem_cfg
+                _mem_interval = 300.0
+            elif isinstance(_mem_cfg, dict):
+                _mem_enabled = bool(_mem_cfg.get("enabled", True))
+                try:
+                    _mem_interval = float(_mem_cfg.get("interval_seconds", 300) or 300)
+                except (TypeError, ValueError):
+                    _mem_interval = 300.0
+            else:
+                _mem_enabled = True
+                _mem_interval = 300.0
+            if _mem_enabled:
+                start_memory_monitoring(interval_seconds=max(1.0, _mem_interval))
+        except Exception:
+            logger.debug("gateway memory monitor startup skipped", exc_info=True)
+
         # Sanity-check that systemd's TimeoutStopSec covers our drain
         # window.  When the user upgraded hermes-agent without re-running
         # ``hermes setup``, their unit file may still encode the old
@@ -7398,6 +7425,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     else 0
                 )
                 self._exit_reason = self._exit_reason or "Gateway restart requested"
+
+            # Emit a final [MEMORY] shutdown sample after agent/resource cleanup
+            # but before the terminal gateway status is persisted.  If teardown
+            # itself is leaking or hanging, this gives operators a last known RSS
+            # close to process exit.
+            try:
+                from gateway.memory_monitor import stop_memory_monitoring
+                stop_memory_monitoring()
+            except Exception:
+                logger.debug("gateway memory monitor shutdown skipped", exc_info=True)
 
             self._draining = False
             # Persist the terminal gateway_state. The default is "stopped",
