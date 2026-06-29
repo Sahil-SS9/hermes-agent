@@ -27,6 +27,7 @@ from typing import Optional
 from article_gates import check as _article_check
 from blog.blog_reviewer import review as _blog_review
 from blog.blog_streams import STREAMS
+from blog.source_grounding import _extract_paper_references, _verify_links
 
 
 # Unicode em-dash and en-dash.
@@ -126,10 +127,14 @@ def adhoc_check(draft: dict, stream: str = "ai") -> tuple[str, list[str]]:
     if not _has_required_section(body):
         issues.append("Missing required section: '## What I'd try next' or '## Takeaway'")
 
-    # 6. External link presence (AI/PM streams only; builder exempt).
+    # 6. External link presence + dead-link check (AI/PM only; builder exempt).
     if stream in ("ai", "pm"):
         if not _has_external_link(body):
             issues.append(f"No external link found — {stream} stream posts must cite at least one primary source")
+        else:
+            dead = _verify_links(body)
+            if dead:
+                issues.append(f"Dead links detected ({len(dead)}): " + ", ".join(dead[:3]))
 
     status = "ok" if not issues else "fail"
     return status, issues

@@ -27,6 +27,7 @@ class ReviewUnavailable(RuntimeError):
 
 from blog.blog_streams import STREAMS, tags_for
 from blog.blog_slug import slugify
+from blog.source_grounding import ground_post
 
 
 def enrich_signal(sig: dict) -> str:
@@ -443,6 +444,14 @@ def write_with_gate(plan: dict, stream: str = "ai",
 
     post_title = draft.get("title", "(untitled)")
 
+    # --- Source grounding: inject primary-source links before gating ---
+    grounding = ground_post(draft, stream=stream)
+    draft["body_md"] = grounding["body_md"]
+    if grounding["dead_links"]:
+        _dead_links = grounding["dead_links"]
+    else:
+        _dead_links = []
+
     # --- First attempt: deterministic gate + editorial reviewer ---
     status, gate_issues = gate_check(draft)
     review_result = _review(draft, stream)
@@ -459,6 +468,11 @@ def write_with_gate(plan: dict, stream: str = "ai",
     # Verify any claims the reviewer flagged.
     claim_warnings = _verify_claims(claims)
     all_issues.extend(claim_warnings)
+    # Dead links from source grounding go into retry feedback.
+    if _dead_links:
+        all_issues.append(
+            "Dead links to fix: " + ", ".join(_dead_links[:3])
+        )
     feedback = "; ".join(all_issues) or "rejected by quality gate"
 
     # --- Single retry with combined feedback ---
