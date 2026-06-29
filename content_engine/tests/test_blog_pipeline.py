@@ -55,7 +55,7 @@ def test_run_stream_happy_path(monkeypatch, tmp_path):
     monkeypatch.setattr(bpl, "write_with_gate", lambda p, stream: _DRAFT)
 
     # Mock illustrator.
-    monkeypatch.setattr(bpl, "illustrate", lambda d, out_dir=None, max_sections=None: {"hero_path": None, "section_paths": {}})
+    monkeypatch.setattr(bpl, "illustrate", lambda d, out_dir=None, max_sections=None: {"hero_path": "/tmp/fake_hero.png", "section_paths": {}})
 
     # Mock assembler.
     def fake_assemble(d, imgs, repo=None):
@@ -122,7 +122,7 @@ def test_run_all_runs_all_streams(monkeypatch, tmp_path):
             "signals": [{"signal_id": "t1", "summary": "s"}]}
     monkeypatch.setattr(bpl, "choose", lambda stream: plan)
     monkeypatch.setattr(bpl, "write_with_gate", lambda p, stream: _DRAFT)
-    monkeypatch.setattr(bpl, "illustrate", lambda d, out_dir=None, max_sections=None: {"hero_path": None, "section_paths": {}})
+    monkeypatch.setattr(bpl, "illustrate", lambda d, out_dir=None, max_sections=None: {"hero_path": "/tmp/fake_hero.png", "section_paths": {}})
     def fake_assemble(d, imgs, repo=None):
         p = Path(repo) / "src/content/blog" / f"{d['slug']}.mdx"
         p.parent.mkdir(parents=True, exist_ok=True)
@@ -160,7 +160,7 @@ def test_run_stream_graceful_when_reviewer_degraded(monkeypatch, tmp_path):
     monkeypatch.setattr(bpl, "write_with_gate", lambda p, stream: _DRAFT)
     monkeypatch.setattr(bpl, "illustrate",
                         lambda d, out_dir=None, max_sections=None:
-                        {"hero_path": None, "section_paths": {}})
+                        {"hero_path": "/tmp/fake_hero.png", "section_paths": {}})
     def fake_assemble(d, imgs, repo=None):
         p = Path(repo) / "src/content/blog" / f"{d['slug']}.mdx"
         p.parent.mkdir(parents=True, exist_ok=True)
@@ -173,3 +173,109 @@ def test_run_stream_graceful_when_reviewer_degraded(monkeypatch, tmp_path):
     result = bpl.run_stream("ai", repo=str(repo))
     assert result["status"] == "ok", \
         "daily pipeline must stage draft even when reviewer degrades"
+
+# -- Failed-image handling tests -----------------------------------------------
+
+def test_run_stream_failed_images_status(monkeypatch, tmp_path):
+    """When all images fail (hero AND sections None), status is failed_images."""
+    repo = _setup_tmp_repo(tmp_path)
+    plan = {"topic_id": "t1", "title_hint": "t", "tags": [], "source": "manual",
+            "signals": [{"signal_id": "t1", "summary": "s"}]}
+    monkeypatch.setattr(bpl, "choose", lambda stream: plan)
+    monkeypatch.setattr(bpl, "write_with_gate", lambda p, stream: _DRAFT)
+    # All images fail.
+    monkeypatch.setattr(bpl, "illustrate",
+                        lambda d, out_dir=None, max_sections=None:
+                        {"hero_path": None, "section_paths": {}})
+    # Redirect tracking file to tmp.
+    monkeypatch.setattr(bpl, "FAILED_IMAGES_PATH", tmp_path / "failed_images.jsonl")
+
+    result = bpl.run_stream("ai", repo=str(repo))
+    assert result["status"] == "failed_images"
+    assert result["slug"] == _DRAFT["slug"]
+
+
+def test_run_stream_partial_images_proceeds(monkeypatch, tmp_path):
+    """When hero succeeds but sections fail, pipeline proceeds (partial imagery)."""
+    repo = _setup_tmp_repo(tmp_path)
+    plan = {"topic_id": "t1", "title_hint": "t", "tags": [], "source": "manual",
+            "signals": [{"signal_id": "t1", "summary": "s"}]}
+    monkeypatch.setattr(bpl, "choose", lambda stream: plan)
+    monkeypatch.setattr(bpl, "write_with_gate", lambda p, stream: _DRAFT)
+    # Hero succeeds, sections all fail.
+    monkeypatch.setattr(bpl, "illustrate",
+                        lambda d, out_dir=None, max_sections=None:
+                        {"hero_path": "/tmp/fake_hero.png", "section_paths": {}})
+    def fake_assemble(d, imgs, repo=None):
+        p = Path(repo) / "src/content/blog" / f"{d['slug']}.mdx"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("---\ntitle: \"t\"\n---\nbody")
+        return p
+    monkeypatch.setattr(bpl, "assemble", fake_assemble)
+    monkeypatch.setattr(bpl, "stage_draft", lambda mdx, repo=None: "slug")
+    monkeypatch.setattr(bpl, "record", lambda s, tid, t: None)
+    monkeypatch.setattr(bpl, "FAILED_IMAGES_PATH", tmp_path / "failed_images.jsonl")
+
+    result = bpl.run_stream("ai", repo=str(repo))
+    assert result["status"] == "ok"
+
+
+def test_failed_image_tracking_creates_jsonl(monkeypatch, tmp_path):
+    """_track_failed_image creates the JSONL file and writes a valid entry."""
+    monkeypatch.setattr(bpl, "FAILED_IMAGES_PATH", tmp_path / "failed_images.jsonl")
+    bpl._track_failed_image("test-slug", "ai", "timeout")
+    assert (tmp_path / "failed_images.jsonl").exists()
+    import json
+    entries = [json.loads(l) for l in (tmp_path / "failed_images.jsonl").read_text().splitlines() if l.strip()]
+    assert len(entries) == 1
+    assert entries[0]["slug"] == "test-slug"
+    assert entries[0]["stream"] == "ai"
+    assert entries[0]["last_error"] == "timeout"
+    assert entries[0]["attempts"] == 1
+
+
+def test_failed_image_tracking_increments_attempts(monkeypatch, tmp_path):
+    """_track_failed_image increments attempts for existing slugs."""
+    monkeypatch.setattr(bpl, "FAILED_IMAGES_PATH", tmp_path / "failed_images.jsonl")
+    bpl._track_failed_image("test-slug", "ai", "error1")
+    bpl._track_failed_image("test-slug", "ai", "error2")
+    import json
+    entries = [json.loads(l) for l in (tmp_path / "failed_images.jsonl").read_text().splitlines() if l.strip()]
+    assert len(entries) == 1
+    assert entries[0]["attempts"] == 2
+    assert entries[0]["last_error"] == "error2"
+
+
+def test_remove_from_failed(monkeypatch, tmp_path):
+    """_remove_from_failed removes a slug from the tracking file."""
+    monkeypatch.setattr(bpl, "FAILED_IMAGES_PATH", tmp_path / "failed_images.jsonl")
+    bpl._track_failed_image("slug-a", "ai", "err")
+    bpl._track_failed_image("slug-b", "pm", "err")
+    bpl._remove_from_failed("slug-a")
+    import json
+    entries = [json.loads(l) for l in (tmp_path / "failed_images.jsonl").read_text().splitlines() if l.strip()]
+    assert len(entries) == 1
+    assert entries[0]["slug"] == "slug-b"
+
+
+def test_stale_failed_images_flags_old_entries(monkeypatch, tmp_path):
+    """Entries older than the stale threshold are flagged."""
+    monkeypatch.setattr(bpl, "FAILED_IMAGES_PATH", tmp_path / "failed_images.jsonl")
+    import json
+    from datetime import date, timedelta
+    # Write an old entry (10 days ago).
+    old_date = (date.today() - timedelta(days=10)).isoformat()
+    entry = {"slug": "old-slug", "stream": "ai", "date": old_date,
+             "attempts": 3, "last_error": "err", "first_failure": old_date}
+    (tmp_path / "failed_images.jsonl").write_text(json.dumps(entry) + "\n")
+    # Write a recent entry (1 day ago).
+    recent_date = (date.today() - timedelta(days=1)).isoformat()
+    entry2 = {"slug": "recent-slug", "stream": "pm", "date": recent_date,
+              "attempts": 1, "last_error": "err", "first_failure": recent_date}
+    with open(tmp_path / "failed_images.jsonl", "a") as f:
+        f.write(json.dumps(entry2) + "\n")
+
+    stale = bpl.get_stale_failed_images()
+    assert len(stale) == 1
+    assert stale[0]["slug"] == "old-slug"
+

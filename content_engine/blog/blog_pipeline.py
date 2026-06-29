@@ -4,19 +4,24 @@ Order of operations (mirrors article_pipeline):
   1. blog_router.choose(stream)  -> plan or None (skip)
   2. blog_generator.write_with_gate(plan, stream)  -> draft (or None)
   3. blog_illustrator.illustrate(draft)  -> {hero_path, section_paths}
-  4. blog_assembler.assemble(draft, images, repo)  -> mdx Path
-  5. blog_publisher.stage_draft(mdx_path, repo)  -> slug
-  6. blog_router.record(stream, topic_id, title)  -> (on success only)
+  4. Check for failed images (hero AND all sections None -> set aside)
+  5. blog_assembler.assemble(draft, images, repo)  -> mdx Path
+  6. blog_publisher.stage_draft(mdx_path, repo)  -> slug
+  7. blog_router.record(stream, topic_id, title)  -> (on success only)
 
 Status values:
-  - "skipped_disabled" - BLOG_ENABLED is False
-  - "skipped_router"   - router returned None
-  - "skipped_generator" - generator returned None (LLM dead or gate fail)
-  - "ok"               - draft staged + topic recorded
+  - "skipped_disabled"    - BLOG_ENABLED is False
+  - "skipped_router"      - router returned None
+  - "skipped_generator"   - generator returned None (LLM dead or gate fail)
+  - "ok"                  - draft staged + topic recorded
+  - "failed_images"       - all images failed; post set aside for retry
 """
 from __future__ import annotations
 import argparse
+import json
 import sys
+import time
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -26,6 +31,99 @@ from blog.blog_generator import write_with_gate
 from blog.blog_illustrator import illustrate
 from blog.blog_assembler import assemble
 from blog.blog_publisher import stage_draft
+
+
+# Path for tracking posts with failed images.
+FAILED_IMAGES_PATH = Path(__file__).parent.parent / "blog_topics" / "failed_images.jsonl"
+STALE_THRESHOLD_DAYS = 7
+
+
+def _track_failed_image(slug: str, stream: str, error: str) -> None:
+    """Append a failed-image record to the tracking JSONL file."""
+    FAILED_IMAGES_PATH.parent.mkdir(parents=True, exist_ok=True)
+    entry = {
+        "slug": slug,
+        "stream": stream,
+        "date": date.today().isoformat(),
+        "attempts": 1,
+        "last_error": error,
+        "first_failure": date.today().isoformat(),
+    }
+    # Check if slug already tracked — if so, increment attempts.
+    existing: list[dict] = []
+    if FAILED_IMAGES_PATH.exists():
+        for line in FAILED_IMAGES_PATH.read_text().splitlines():
+            if line.strip():
+                try:
+                    existing.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+    # Find existing entry for this slug.
+    found = False
+    for e in existing:
+        if e.get("slug") == slug:
+            e["attempts"] = e.get("attempts", 0) + 1
+            e["last_error"] = error
+            e["date"] = date.today().isoformat()
+            found = True
+            break
+    if not found:
+        existing.append(entry)
+    # Rewrite the file.
+    with open(FAILED_IMAGES_PATH, "w") as f:
+        for e in existing:
+            f.write(json.dumps(e) + "\n")
+
+
+def _remove_from_failed(slug: str) -> None:
+    """Remove a slug from the failed-images tracking file."""
+    if not FAILED_IMAGES_PATH.exists():
+        return
+    existing: list[dict] = []
+    for line in FAILED_IMAGES_PATH.read_text().splitlines():
+        if line.strip():
+            try:
+                existing.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    existing = [e for e in existing if e.get("slug") != slug]
+    with open(FAILED_IMAGES_PATH, "w") as f:
+        for e in existing:
+            f.write(json.dumps(e) + "\n")
+
+
+def _get_failed_entries() -> list[dict]:
+    """Read all failed-image entries from the tracking file."""
+    if not FAILED_IMAGES_PATH.exists():
+        return []
+    entries = []
+    for line in FAILED_IMAGES_PATH.read_text().splitlines():
+        if line.strip():
+            try:
+                entries.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    return entries
+
+
+def _is_stale(entry: dict, threshold_days: int = STALE_THRESHOLD_DAYS) -> bool:
+    """Check if a failed-image entry is stale (older than threshold_days)."""
+    first = entry.get("first_failure") or entry.get("date", "")
+    if not first:
+        return False
+    try:
+        first_dt = date.fromisoformat(first)
+    except ValueError:
+        return False
+    return (date.today() - first_dt).days > threshold_days
+
+
+def get_stale_failed_images() -> list[dict]:
+    """Return entries that have been in failed_images for > threshold_days.
+
+    Used by the weekly audit cron to flag posts stuck in failed-image state.
+    """
+    return [e for e in _get_failed_entries() if _is_stale(e)]
 
 
 def run_stream(stream: str, repo: Optional[str] = None) -> dict:
@@ -49,13 +147,27 @@ def run_stream(stream: str, repo: Optional[str] = None) -> dict:
     # 3. Illustrator.
     images = illustrate(draft)
 
-    # 4. Assembler.
+    # 4. Failed-image check: if hero AND all sections are None, set aside.
+    hero_ok = images.get("hero_path") is not None
+    sections_ok = bool(images.get("section_paths"))
+    if not hero_ok and not sections_ok:
+        slug = draft.get("slug", "")
+        error = "All image generation attempts failed (hero + sections)"
+        _track_failed_image(slug, stream, error)
+        return {
+            "status": "failed_images", "stream": stream,
+            "slug": slug, "title": draft.get("title", ""),
+            "topic_id": plan.get("topic_id", ""),
+            "error": error,
+        }
+
+    # 5. Assembler (accept partial imagery — hero or some sections succeeded).
     mdx_path = assemble(draft, images, repo=repo_path)
 
-    # 5. Publisher (stage draft, no push).
+    # 6. Publisher (stage draft, no push).
     slug = stage_draft(str(mdx_path), repo=repo_path)
 
-    # 6. Record topic (on success only, record-on-success).
+    # 7. Record topic (on success only, record-on-success).
     record(stream, plan.get("topic_id", ""), draft.get("title", ""))
 
     return {
@@ -63,6 +175,45 @@ def run_stream(stream: str, repo: Optional[str] = None) -> dict:
         "title": draft.get("title", ""), "topic_id": plan.get("topic_id", ""),
         "mdx_path": str(mdx_path),
     }
+
+
+def retry_failed_images(slug: str, stream: str,
+                        repo: Optional[str] = None) -> dict:
+    """Re-attempt image generation for a post in the failed_images tracking.
+
+    Re-runs illustrate with the draft's title/description. On success,
+    re-assembles, re-stages, and removes from the tracking file. On failure,
+    increments the attempt count.
+
+    Returns:
+        {"status": "ok"|"failed_images", ...}
+    """
+    repo_path = repo or str(SAHILBLOG_REPO)
+    entries = _get_failed_entries()
+    entry = next((e for e in entries if e.get("slug") == slug), None)
+    if not entry:
+        return {"status": "not_found", "slug": slug}
+
+    # Reconstruct a minimal draft for illustration.
+    draft = {
+        "title": slug.replace("-", " ").title(),
+        "description": "",
+        "body_md": "",
+        "slug": slug,
+        "stream": stream,
+    }
+
+    images = illustrate(draft)
+    hero_ok = images.get("hero_path") is not None
+    sections_ok = bool(images.get("section_paths"))
+
+    if not hero_ok and not sections_ok:
+        _track_failed_image(slug, stream, "Retry: all images still failing")
+        return {"status": "failed_images", "slug": slug}
+
+    # Success — remove from tracking.
+    _remove_from_failed(slug)
+    return {"status": "ok", "slug": slug, "hero_path": images.get("hero_path")}
 
 
 def run_all(streams: tuple = BLOG_STREAMS, repo: Optional[str] = None) -> dict:
