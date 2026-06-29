@@ -75,7 +75,7 @@
 - [ ] Full test suite passes
 - [ ] Merge to main
 
-**Status:** NOT STARTED
+**Status:** COMPLETE — merged 29/06/26
 
 ---
 
@@ -383,7 +383,7 @@ Block 3 (Failed-Image Handling)                  Block 4 (Source Grounding)
 | Block | R | A | G | Notes |
 |---|---|---|---|---|
 | 1: Duplicate Removal + Adhoc Gate | G | G | G | Merged 29/06/26 — 328 tests pass, pnpm build pass |
-| 2: Codex CLI Image Module | — | — | — | |
+| 2: Codex CLI Image Module | G | G | G | Merged 29/06/26 — 347 tests, pnpm build pass |
 | 3: Failed-Image Handling | — | — | — | |
 | 4: Source Grounding + Links | — | — | — | |
 | 5: Company Case Studies | — | — | — | |
@@ -407,7 +407,7 @@ Block 3 (Failed-Image Handling)                  Block 4 (Source Grounding)
 |---|---|---|---|
 | Baseline | 304 | 304 | — |
 | 1 | +24 | 328 | ✅ |
-| 2 | +16 | 332 | ✅ |
+| 2 | +19 | 347 | ✅ |
 | 3 | +6 | 338 | ✅ |
 | 4 | +10 | 348 | ✅ |
 | 5 | +4 | 352 | ✅ |
