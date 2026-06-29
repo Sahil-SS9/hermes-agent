@@ -297,10 +297,11 @@ def _update_index(new_pages: list[dict]) -> None:
             # Append the section + entry at the end
             content = content.rstrip() + f"\n\n{section}\n{entry}\n"
 
-    # Bump date in index
+    # Bump date in index (use lambda to avoid backreference clash with day digits >= 10)
+    _new_date = datetime.now(timezone.utc).strftime('%d/%m/%y')
     content = re.sub(
         r"(Last updated: )\d{2}/\d{2}/\d{2}",
-        rf"\1{datetime.now(timezone.utc).strftime('%d/%m/%y')}",
+        lambda m: m.group(1) + _new_date,
         content,
     )
 

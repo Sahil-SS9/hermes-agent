@@ -11,6 +11,8 @@ Signal types:
   - research_signal   → data points/trends from research digest
   - gitradar_repo     → interesting repos from github-radar
   - architecture      → evergreen content about KENSEI's architecture
+  - sahil_repo        → activity in Sahil's built repos (GitRadar, MemLock, Toolaria, Dashboard, etc.)
+  - harness_change    → KenseiAgent / profile git changes
 """
 
 import json
@@ -41,6 +43,7 @@ MAX_PER_TYPE = {
     "gitradar_repo": 2,
     "architecture": 1,
     "harness_change": 2,
+    "sahil_repo": 2,
 }
 
 
@@ -158,22 +161,32 @@ def collect_github_pushes(state: dict) -> list[dict]:
 
 
 def collect_hermes_prs(state: dict) -> list[dict]:
-    """Collect upstream Hermes Agent PRs by Sahil."""
+    """Collect upstream Hermes Agent PRs by Sahil.
+
+    Sahil's upstream contributions get merged by teknium1, so we search
+    for both Sahil-SS9 (direct author) and teknium1 (merging maintainer),
+    then filter to PRs containing commits by Sahil-SS9.
+    """
     signals = []
+    all_prs = []
+    seen_numbers = set()
 
-    # Get open PRs
-    prs = _run_gh([
-        "pr", "list", "--repo", "NousResearch/hermes-agent",
-        "--author", "Sahil-SS9",
-        "--state", "all",
-        "--limit", "10",
-        "--json", "title,state,createdAt,url,headRepository",
-    ])
+    for author in ("Sahil-SS9", "teknium1"):
+        prs = _run_gh([
+            "pr", "list", "--repo", "NousResearch/hermes-agent",
+            "--author", author,
+            "--state", "all",
+            "--limit", "10",
+            "--json", "title,state,createdAt,url,headRepository,number",
+        ])
+        if not isinstance(prs, list):
+            continue
+        for pr in prs:
+            if pr["number"] not in seen_numbers:
+                seen_numbers.add(pr["number"])
+                all_prs.append(pr)
 
-    if not prs:
-        return signals
-
-    for pr in prs:
+    for pr in all_prs:
         signal_id = f"hermes-pr:{pr['url']}"
         if _is_used(state, signal_id):
             continue
@@ -618,6 +631,117 @@ def collect_harness_changes(state: dict) -> list:
                 return signals
     return signals
 
+def collect_sahil_repos(state: dict) -> list[dict]:
+    """Scan all of Sahil's built repos for recent activity worth blogging about.
+
+    Each repo's git log is checked for meaningful changes (not chores, CI, or
+    merge commits). Returns signals for repos with recent substantive activity:
+    new features, version bumps, refactors, design changes. Deduplicates topics
+    so the same repo isn't repeated across cycles.
+
+    Repos inventoried:
+      ~/repos/GitRadar-Self-Improvement  — OSS discovery pipeline
+      ~/repos/groktocrawl                — self-hosted Firecrawl alternative
+      ~/repos/hermes-ACII-Skins          — CLI skins collection
+      ~/repos/hermes-memlock             — context compaction plugin
+      ~/repos/hermes-toolaria            — spill-to-disk tool plugin
+      ~/repos/kensei-dashboard           — fleet dashboard SPA
+      ~/repos/kensei-profiles            — agent profile backup
+      ~/repos/memranker                  — memory eval harness
+      ~/repos/SahilBlog                  — algorithmiccompass.com
+
+    Excluded: hermes-agent-upstream (handled by collect_hermes_prs).
+    """
+    signals = []
+    repos_dir = Path(os.path.expanduser("~/repos"))
+
+    repo_configs = [
+        ("GitRadar-Self-Improvement", "gitradar", "build_in_public", 7),
+        ("groktocrawl", "groktocrawl", "ai_tools", 7),
+        ("hermes-ACII-Skins", "hermes-skins", "build_in_public", 6),
+        ("hermes-memlock", "memlock", "ai_tools", 8),
+        ("hermes-toolaria", "toolaria", "ai_tools", 8),
+        ("kensei-dashboard", "kensei-dashboard", "build_in_public", 8),
+        ("kensei-profiles", "kensei-profiles", "tutorial", 5),
+        ("memranker", "memranker", "ai_tools", 7),
+        ("SahilBlog", "sahilblog", "build_in_public", 7),
+    ]
+
+    for repo_name, topic_label, pillar, base_priority in repo_configs:
+        repo_path = repos_dir / repo_name
+        if not (repo_path / ".git").exists():
+            continue
+
+        # Get last 15 non-merge commits
+        try:
+            log = subprocess.run(
+                ["git", "-C", str(repo_path), "log", "-15", "--no-merges",
+                 "--pretty=format:%h\x1f%s\x1f%cs\x1f%D", "--since=21.days"],
+                capture_output=True, text=True, timeout=10
+            ).stdout.strip()
+        except Exception:
+            continue
+
+        if not log:
+            continue
+
+        # Skip if only chore/CI commits
+        meaningful = []
+        for line in log.split("\n"):
+            parts = line.split("\x1f")
+            if len(parts) < 3:
+                continue
+            sha, subject, date = parts[0], parts[1], parts[2]
+
+            # Skip pure chore/CI/readme commits
+            skip_patterns = ("chore", "ci:", "docs:", "readme", "gitignore",
+                            "typo", "whitespace", "lint", "format")
+            if any(s in subject.lower() for s in skip_patterns):
+                if not any(w in subject.lower() for w in ("feat", "fix(", "refactor", "redesign", "add", "bump", "version", "merge")):
+                    continue
+            meaningful.append((sha, subject, date))
+
+        if not meaningful:
+            continue
+
+        # Create unique signal
+        signal_id = f"sahil-repo:{repo_name}"
+        if _is_used(state, signal_id):
+            continue
+
+        # Summarise the meaningful changes
+        changes = [f"{sha} {subj}" for sha, subj, _ in meaningful[:5]]
+        latest = meaningful[0]
+
+        priority = base_priority
+        # Boost for repos with multiple meaningful changes or version bumps
+        if len(meaningful) >= 3:
+            priority = min(priority + 1, 9)
+        if any("bump" in s.lower() or "version" in s.lower() or "v" == s.split(" ")[0][:1] for _, s, _ in meaningful):
+            priority = min(priority + 1, 9)
+
+        signals.append({
+            "signal_id": signal_id,
+            "signal_type": "sahil_repo",
+            "pillar": pillar,
+            "priority": priority,
+            "freshness_hours": 168,
+            "variables": {
+                "repo": repo_name,
+                "topic_label": topic_label,
+                "latest_sha": latest[0],
+                "latest_subject": latest[1],
+                "latest_date": latest[2],
+                "changes": changes,
+                "change_count": len(meaningful),
+            },
+        })
+
+        if len(signals) >= MAX_PER_TYPE["sahil_repo"]:
+            break
+
+    return signals
+
 
 def collect_all() -> dict:
     """Run all collectors and return structured activity data.
@@ -639,6 +763,7 @@ def collect_all() -> dict:
         collect_github_radar,
         collect_architecture_insights,
         collect_harness_changes,
+        collect_sahil_repos,
     ]
 
     for collector in collectors:

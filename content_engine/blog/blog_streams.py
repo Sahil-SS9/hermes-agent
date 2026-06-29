@@ -92,7 +92,7 @@ STREAMS: dict[str, dict] = {
         ),
         "word_target": 1400,
         "section_target": 5,
-        "sources": ["paper_synthesis", "github_repos", "kensei_app", "tool_exploration"],
+        "sources": ["paper_synthesis", "github_repos", "kensei_app", "tool_exploration", "sahil_repos"],
         "image_palette_brand": "sahil_twitter",
     },
 }

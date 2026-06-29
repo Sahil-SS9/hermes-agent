@@ -22,21 +22,21 @@
 
 ### Checklist
 
-- [ ] Delete `the-data-moat-logic-why-a.mdx` and its image directory `public/blog/the-data-moat-logic-why-a/`
-- [ ] Create `blog/blog_gate.py` with `adhoc_check(draft, stream) -> (status, issues)`
-  - [ ] `article_gates.check` integration (slop, em-dash, length, secrets)
-  - [ ] `blog_reviewer.review` integration (voice, accuracy, hype, structure)
-  - [ ] Em-dash Unicode scan (U+2014, U+2013)
-  - [ ] Minimum word count check per stream target
-  - [ ] Required section check ("What I'd try next" or "Takeaway")
-  - [ ] External link presence check (AI/PM streams only)
-- [ ] Add `_check_semantic_duplicate()` to `blog_assembler.py` (fuzzy title match, threshold 0.85)
-- [ ] Add `stage_adhoc()` to `blog_publisher.py` (runs adhoc_check before staging)
-- [ ] Create `tests/test_blog_gate.py` (12 tests)
-- [ ] Extend `tests/test_blog_assembler.py` (semantic duplicate tests)
-- [ ] Run regression: all 38 existing posts pass `adhoc_check`
-- [ ] `pnpm build` passes after any changes
-- [ ] Merge to main
+- [x] Delete `the-data-moat-logic-why-a.mdx` and its image directory `public/blog/the-data-moat-logic-why-a/`
+- [x] Create `blog/blog_gate.py` with `adhoc_check(draft, stream) -> (status, issues)`
+  - [x] `article_gates.check` integration (slop, em-dash, length, secrets)
+  - [x] `blog_reviewer.review` integration (voice, accuracy, hype, structure)
+  - [x] Em-dash Unicode scan (U+2014, U+2013)
+  - [x] Minimum word count check per stream target
+  - [x] Required section check ("What I'd try next" or "Takeaway")
+  - [x] External link presence check (AI/PM streams only)
+- [x] Add `_check_semantic_duplicate()` to `blog_assembler.py` (fuzzy title match, threshold 0.85)
+- [x] Add `stage_adhoc()` to `blog_publisher.py` (runs adhoc_check before staging)
+- [x] Create `tests/test_blog_gate.py` (12 tests)
+- [x] Extend `tests/test_blog_assembler.py` (semantic duplicate tests)
+- [x] Run regression: all 38 existing posts pass `adhoc_check`
+- [x] `pnpm build` passes after any changes
+- [x] Merge to main
 
 **Status:** COMPLETE — merged 29/06/26
 
@@ -48,32 +48,32 @@
 
 ### Checklist
 
-- [ ] Create `blog/codex_image_gen.py`
-  - [ ] `_find_latest_codex_image()` — find newest PNG in `~/.codex/generated_images/`
-  - [ ] `_build_image_prompt(title, description, heading, palette)` — self-contained text prompt
-  - [ ] `_run_codex(prompt, timeout)` — core executor with retry
-    - [ ] 300s default timeout, 360s retry timeout
-    - [ ] Records timestamp before run, finds image after run
-    - [ ] Copies image from Codex session dir to target path
-    - [ ] Returns path on success, None on failure
-  - [ ] `generate_hero(title, description, out_path, timeout)` — public API
-  - [ ] `generate_section(title, heading, out_path, timeout)` — public API
-- [ ] Rewrite `blog_illustrator.py`
-  - [ ] Remove all FAL imports (`fal_client`, `imagery_transplant`, `gemini_vision`)
-  - [ ] Remove all budget gating (`budget.can_spend`, `BLOG_IMAGE_COST_GBP`)
-  - [ ] Replace `imagery_transplant.generate()` calls with `codex_image_gen.generate_hero/section`
-  - [ ] Maintain H2 heading extraction for section images
-  - [ ] Maintain locked-palette concept via prompt text (not anchor images)
-  - [ ] Update config: `BLOG_IMAGE_MODEL` is no longer referenced
-- [ ] Update `blog_pipeline.py` — remove any FAL/budget references
-- [ ] Update `config.py` — add comment `BLOG_IMAGE_MODEL` is deprecated for blog path
-- [ ] Create `tests/test_codex_image_gen.py` (12 tests)
-- [ ] Extend `tests/test_blog_illustrator.py` (Codex integration tests)
-- [ ] Verify zero FAL imports in blog image path (automated grep)
-- [ ] Verify zero budget calls in blog image path (automated grep)
-- [ ] Live test: run pipeline end-to-end with real Codex CLI image generation
-- [ ] Full test suite passes
-- [ ] Merge to main
+- [x] Create `blog/codex_image_gen.py`
+  - [x] `_find_latest_codex_image()` — find newest PNG in `~/.codex/generated_images/`
+  - [x] `_build_image_prompt(title, description, heading, palette)` — self-contained text prompt
+  - [x] `_run_codex(prompt, timeout)` — core executor with retry
+    - [x] 300s default timeout, 360s retry timeout
+    - [x] Records timestamp before run, finds image after run
+    - [x] Copies image from Codex session dir to target path
+    - [x] Returns path on success, None on failure
+  - [x] `generate_hero(title, description, out_path, timeout)` — public API
+  - [x] `generate_section(title, heading, out_path, timeout)` — public API
+- [x] Rewrite `blog_illustrator.py`
+  - [x] Remove all FAL imports (`fal_client`, `imagery_transplant`, `gemini_vision`)
+  - [x] Remove all budget gating (`budget.can_spend`, `BLOG_IMAGE_COST_GBP`)
+  - [x] Replace `imagery_transplant.generate()` calls with `codex_image_gen.generate_hero/section`
+  - [x] Maintain H2 heading extraction for section images
+  - [x] Maintain locked-palette concept via prompt text (not anchor images)
+  - [x] Update config: `BLOG_IMAGE_MODEL` is no longer referenced
+- [x] Update `blog_pipeline.py` — remove any FAL/budget references
+- [x] Update `config.py` — add comment `BLOG_IMAGE_MODEL` is deprecated for blog path
+- [x] Create `tests/test_codex_image_gen.py` (12 tests)
+- [x] Extend `tests/test_blog_illustrator.py` (Codex integration tests)
+- [x] Verify zero FAL imports in blog image path (automated grep)
+- [x] Verify zero budget calls in blog image path (automated grep)
+- [x] Live test: run pipeline end-to-end with real Codex CLI image generation
+- [x] Full test suite passes
+- [x] Merge to main
 
 **Status:** COMPLETE — merged 29/06/26
 
@@ -85,21 +85,21 @@
 
 ### Checklist
 
-- [ ] Add failed-image status to `blog_pipeline.py`:
-  - [ ] After `illustrate()`, check if hero AND all sections are None
-  - [ ] If all failed: return `{"status": "failed_images", ...}`, do NOT assemble or stage
-  - [ ] If hero succeeded or partial sections: proceed (accept partial imagery)
-- [ ] Create tracking file `blog_topics/failed_images.jsonl`
-  - [ ] JSONL format: `{"slug", "stream", "date", "attempts", "last_error"}`
-- [ ] Create `retry_failed_images(slug, stream, repo)` function
-  - [ ] Reads staged MDX (if any) or re-reads from failed_images.jsonl
-  - [ ] Re-runs illustrate with the draft title/description
-  - [ ] On success: re-assembles, re-stages, removes from tracking file
-  - [ ] On failure: increments attempt count, updates tracking file
-- [ ] Add 7-day stale flag: posts in failed_images for >7 days flagged in audit
-- [ ] Extend `tests/test_blog_pipeline.py` (6 tests for failed-image handling)
-- [ ] Full test suite passes
-- [ ] Merge to main
+- [x] Add failed-image status to `blog_pipeline.py`:
+  - [x] After `illustrate()`, check if hero AND all sections are None
+  - [x] If all failed: return `{"status": "failed_images", ...}`, do NOT assemble or stage
+  - [x] If hero succeeded or partial sections: proceed (accept partial imagery)
+- [x] Create tracking file `blog_topics/failed_images.jsonl`
+  - [x] JSONL format: `{"slug", "stream", "date", "attempts", "last_error"}`
+- [x] Create `retry_failed_images(slug, stream, repo)` function
+  - [x] Reads staged MDX (if any) or re-reads from failed_images.jsonl
+  - [x] Re-runs illustrate with the draft title/description
+  - [x] On success: re-assembles, re-stages, removes from tracking file
+  - [x] On failure: increments attempt count, updates tracking file
+- [x] Add 7-day stale flag: posts in failed_images for >7 days flagged in audit
+- [x] Extend `tests/test_blog_pipeline.py` (6 tests for failed-image handling)
+- [x] Full test suite passes
+- [x] Merge to main
 
 **Status:** COMPLETE — merged 29/06/26
 
@@ -111,22 +111,22 @@
 
 ### Checklist
 
-- [ ] Create `blog/source_grounding.py`
-  - [ ] `_extract_paper_references(body_md)` — named papers, benchmarks, datasets
-  - [ ] `_search_arxiv(title)` — arXiv API search for matching papers
-  - [ ] `_inject_links(body_md, links)` — markdown link injection
-  - [ ] `_verify_links(body_md)` — HEAD request for each URL, return dead links
-  - [ ] `ground_post(draft)` — orchestrator: extract → search → inject → verify
-- [ ] Wire into `blog_generator.py`:
-  - [ ] Insert `ground_post` between `write()` and `gate_check()` in `write_with_gate`
-  - [ ] Dead links go into `retry_feedback` for the LLM to fix
-- [ ] Wire into `blog_gate.py`:
-  - [ ] Add zero-link check for AI/PM streams
-  - [ ] Builder stream exempt
-  - [ ] Opinion posts (no factual claims) exempt
-- [ ] Create `tests/test_source_grounding.py` (10 tests)
-- [ ] Full test suite passes
-- [ ] Merge to main
+- [x] Create `blog/source_grounding.py`
+  - [x] `_extract_paper_references(body_md)` — named papers, benchmarks, datasets
+  - [x] `_search_arxiv(title)` — arXiv API search for matching papers
+  - [x] `_inject_links(body_md, links)` — markdown link injection
+  - [x] `_verify_links(body_md)` — HEAD request for each URL, return dead links
+  - [x] `ground_post(draft)` — orchestrator: extract → search → inject → verify
+- [x] Wire into `blog_generator.py`:
+  - [x] Insert `ground_post` between `write()` and `gate_check()` in `write_with_gate`
+  - [x] Dead links go into `retry_feedback` for the LLM to fix
+- [x] Wire into `blog_gate.py`:
+  - [x] Add zero-link check for AI/PM streams
+  - [x] Builder stream exempt
+  - [x] Opinion posts (no factual claims) exempt
+- [x] Create `tests/test_source_grounding.py` (10 tests)
+- [x] Full test suite passes
+- [x] Merge to main
 
 **Status:** COMPLETE — merged 29/06/26
 
@@ -138,16 +138,16 @@
 
 ### Checklist
 
-- [ ] Add `case_study_check()` to `blog/blog_gate.py`:
-  - [ ] Regex scan for named companies (known company list + generic capitalised names)
-  - [ ] Regex scan for specific numbers (digits, $, %, £)
-  - [ ] AI stream: soft block if missing both
-  - [ ] PM/builder: warning only, not a hard block
-  - [ ] Opinion/exempt posts: skip check
-- [ ] Wire into `write_with_gate` retry feedback
-- [ ] Extend `tests/test_blog_gate.py` (case study tests)
-- [ ] Full test suite passes
-- [ ] Merge to main
+- [x] Add `case_study_check()` to `blog/blog_gate.py`:
+  - [x] Regex scan for named companies (known company list + generic capitalised names)
+  - [x] Regex scan for specific numbers (digits, $, %, £)
+  - [x] AI stream: soft block if missing both
+  - [x] PM/builder: warning only, not a hard block
+  - [x] Opinion/exempt posts: skip check
+- [x] Wire into `write_with_gate` retry feedback
+- [x] Extend `tests/test_blog_gate.py` (case study tests)
+- [x] Full test suite passes
+- [x] Merge to main
 
 **Status:** COMPLETE — merged 29/06/26
 
@@ -159,26 +159,26 @@
 
 ### Checklist
 
-- [ ] SahilBlog: Add `"blueprint"` to `content.config.ts` schema
-- [ ] SahilBlog: Add `astro-mermaid` integration to `astro.config.mjs`
-- [ ] `blog_streams.py`: Add `format: "blueprint"` as an option for AI stream
-  - [ ] Rotate between `essay` and `blueprint` based on topic type (analysis vs architectural)
-- [ ] `blog_generator.py`:
-  - [ ] `build_blueprint_prompt()` — instructs: primitive mapping table, Mermaid diagram, step-by-step sequence
-  - [ ] Route blueprint topics through the new prompt builder
-- [ ] `blog_illustrator.py`:
-  - [ ] `_extract_diagram_spec(draft)` — asks Codex CLI for Mermaid syntax
-  - [ ] Returns Mermaid code block string or None
-- [ ] `blog_assembler.py`:
-  - [ ] Handle `format: blueprint` — insert Mermaid code block after diagram description section
-  - [ ] Ensure frontmatter has correct format value
-- [ ] Create `blog_topics/blueprint_seeds.jsonl` — initial topic queue for blueprints
-- [ ] Extend tests:
-  - [ ] `test_blog_generator.py` — blueprint prompt, Mermaid output
-  - [ ] `test_blog_assembler.py` — blueprint frontmatter, diagram insertion
-- [ ] `pnpm build` passes with blueprint posts + Mermaid integration
-- [ ] Full test suite passes
-- [ ] Merge to main
+- [x] SahilBlog: Add `"blueprint"` to `content.config.ts` schema
+- [x] SahilBlog: Add `astro-mermaid` integration to `astro.config.mjs`
+- [x] `blog_streams.py`: Add `format: "blueprint"` as an option for AI stream
+  - [x] Rotate between `essay` and `blueprint` based on topic type (analysis vs architectural)
+- [x] `blog_generator.py`:
+  - [x] `build_blueprint_prompt()` — instructs: primitive mapping table, Mermaid diagram, step-by-step sequence
+  - [x] Route blueprint topics through the new prompt builder
+- [x] `blog_illustrator.py`:
+  - [x] `_extract_diagram_spec(draft)` — asks Codex CLI for Mermaid syntax
+  - [x] Returns Mermaid code block string or None
+- [x] `blog_assembler.py`:
+  - [x] Handle `format: blueprint` — insert Mermaid code block after diagram description section
+  - [x] Ensure frontmatter has correct format value
+- [x] Create `blog_topics/blueprint_seeds.jsonl` — initial topic queue for blueprints
+- [x] Extend tests:
+  - [x] `test_blog_generator.py` — blueprint prompt, Mermaid output
+  - [x] `test_blog_assembler.py` — blueprint frontmatter, diagram insertion
+- [x] `pnpm build` passes with blueprint posts + Mermaid integration
+- [x] Full test suite passes
+- [x] Merge to main
 
 **Status:** COMPLETE — merged 29/06/26
 
@@ -190,17 +190,17 @@
 
 ### Checklist
 
-- [ ] Create `blog_topics/frameworks.jsonl` with 6-12 framework seed concepts
-  - [ ] Each seed: `{"topic_id", "title_hint", "tags", "priority", "domain"}`
-  - [ ] Domain: evaluation, architecture, economics, product, infrastructure
-- [ ] `blog_generator.py`:
-  - [ ] `_framework_prompt_builder()` — instructs: name (2-4 words), 3-5 levels, identification criteria, actionable guidance, diagram description
-  - [ ] Route framework seeds through the framework prompt builder
-- [ ] Route output through `format: blueprint` path (reuses Block 6 infrastructure)
-- [ ] Router: make framework topics highest priority when available
-- [ ] Extend tests: framework prompt produces valid output
-- [ ] Full test suite passes
-- [ ] Merge to main
+- [x] Create `blog_topics/frameworks.jsonl` with 6-12 framework seed concepts
+  - [x] Each seed: `{"topic_id", "title_hint", "tags", "priority", "domain"}`
+  - [x] Domain: evaluation, architecture, economics, product, infrastructure
+- [x] `blog_generator.py`:
+  - [x] `_framework_prompt_builder()` — instructs: name (2-4 words), 3-5 levels, identification criteria, actionable guidance, diagram description
+  - [x] Route framework seeds through the framework prompt builder
+- [x] Route output through `format: blueprint` path (reuses Block 6 infrastructure)
+- [x] Router: make framework topics highest priority when available
+- [x] Extend tests: framework prompt produces valid output
+- [x] Full test suite passes
+- [x] Merge to main
 
 **Status:** COMPLETE — merged 29/06/26
 
@@ -212,22 +212,22 @@
 
 ### Checklist
 
-- [ ] `blog_generator.py`:
-  - [ ] After retry (line ~477), check `review_result2.get("score", 5)`
-  - [ ] If score < 6 and no concrete issues: log warning with post title and score
-  - [ ] If strict_review is True: return None (reject on degraded retry)
-  - [ ] If strict_review is False: accept with warning (current behaviour, just adds logging)
-- [ ] `blog_router.py`:
-  - [ ] Add `quality_score` parameter to `record()`
-  - [ ] Store in `db.log_topic_usage` via new column or metadata field
-  - [ ] `choose()` can optionally sort by quality_score when priority is equal
-- [ ] `database.py`:
-  - [ ] Add quality_score column to topic_usage_log (nullable, integer 0-10)
-- [ ] Extend tests:
-  - [ ] `test_blog_generator.py` — retry threshold, warning message format
-  - [ ] `test_blog_router.py` — quality_score storage and sorting
-- [ ] Full test suite passes
-- [ ] Merge to main
+- [x] `blog_generator.py`:
+  - [x] After retry (line ~477), check `review_result2.get("score", 5)`
+  - [x] If score < 6 and no concrete issues: log warning with post title and score
+  - [x] If strict_review is True: return None (reject on degraded retry)
+  - [x] If strict_review is False: accept with warning (current behaviour, just adds logging)
+- [x] `blog_router.py`:
+  - [x] Add `quality_score` parameter to `record()`
+  - [x] Store in `db.log_topic_usage` via new column or metadata field
+  - [x] `choose()` can optionally sort by quality_score when priority is equal
+- [x] `database.py`:
+  - [x] Add quality_score column to topic_usage_log (nullable, integer 0-10)
+- [x] Extend tests:
+  - [x] `test_blog_generator.py` — retry threshold, warning message format
+  - [x] `test_blog_router.py` — quality_score storage and sorting
+- [x] Full test suite passes
+- [x] Merge to main
 
 **Status:** COMPLETE — merged 29/06/26
 
@@ -239,16 +239,16 @@
 
 ### Checklist
 
-- [ ] `blog/codex_image_gen.py`:
-  - [ ] After successful image generation, call Gemini vision with post title and description
-  - [ ] Score 0-10: "Does this image match the topic '{title}'?"
-  - [ ] If score < `IMAGERY_QA_MIN_SCORE` (6): regenerate once with QA feedback appended
-  - [ ] If Gemini unavailable: degrade to accept (no block)
-  - [ ] Bounded: max 1 retry, no infinite loops
-- [ ] Wire into `generate_hero()` flow
-- [ ] Extend `tests/test_codex_image_gen.py` (Gemini vision QA tests with mocked responses)
-- [ ] Full test suite passes
-- [ ] Merge to main
+- [x] `blog/codex_image_gen.py`:
+  - [x] After successful image generation, call Gemini vision with post title and description
+  - [x] Score 0-10: "Does this image match the topic '{title}'?"
+  - [x] If score < `IMAGERY_QA_MIN_SCORE` (6): regenerate once with QA feedback appended
+  - [x] If Gemini unavailable: degrade to accept (no block)
+  - [x] Bounded: max 1 retry, no infinite loops
+- [x] Wire into `generate_hero()` flow
+- [x] Extend `tests/test_codex_image_gen.py` (Gemini vision QA tests with mocked responses)
+- [x] Full test suite passes
+- [x] Merge to main
 
 **Status:** COMPLETE — merged 29/06/26
 
@@ -260,15 +260,15 @@
 
 ### Checklist
 
-- [ ] `blog/codex_image_gen.py`:
-  - [ ] After section image generation, call `text_integrity.verify_text()` with H2 heading text
-  - [ ] If text is illegible: log warning, continue (do not regen)
-  - [ ] If hero is textless, run `has_significant_text()` — flag if unexpected text found
-- [ ] `blog_pipeline.py`:
-  - [ ] If OCR failures are systemic (>50% of images), flag the whole post for review
-- [ ] Extend `tests/test_codex_image_gen.py` (OCR text check tests)
-- [ ] Full test suite passes
-- [ ] Merge to main
+- [x] `blog/codex_image_gen.py`:
+  - [x] After section image generation, call `text_integrity.verify_text()` with H2 heading text
+  - [x] If text is illegible: log warning, continue (do not regen)
+  - [x] If hero is textless, run `has_significant_text()` — flag if unexpected text found
+- [x] `blog_pipeline.py`:
+  - [x] If OCR failures are systemic (>50% of images), flag the whole post for review
+- [x] Extend `tests/test_codex_image_gen.py` (OCR text check tests)
+- [x] Full test suite passes
+- [x] Merge to main
 
 **Status:** COMPLETE — merged 29/06/26
 
@@ -280,15 +280,15 @@
 
 ### Checklist
 
-- [ ] Create `tools/audit_source_labels.py`
-  - [ ] Scan `src/content/blog/*.mdx`
-  - [ ] For `source: research-paper`: check for arxiv.org link, DOI, or named paper title in body
-  - [ ] For `source: manual`: check for paper references — flag for upgrade
-  - [ ] Report: JSON output with per-post status, total mismatches, failed_images count
-- [ ] Create Hermes cron job: weekly, deliver to `#governance`
-- [ ] Create `tests/test_audit_source_labels.py` (6 tests)
-- [ ] Full test suite passes
-- [ ] Merge to main
+- [x] Create `tools/audit_source_labels.py`
+  - [x] Scan `src/content/blog/*.mdx`
+  - [x] For `source: research-paper`: check for arxiv.org link, DOI, or named paper title in body
+  - [x] For `source: manual`: check for paper references — flag for upgrade
+  - [x] Report: JSON output with per-post status, total mismatches, failed_images count
+- [x] Create Hermes cron job: weekly, deliver to `#governance`
+- [x] Create `tests/test_audit_source_labels.py` (6 tests)
+- [x] Full test suite passes
+- [x] Merge to main
 
 **Status:** COMPLETE — merged 29/06/26
 
@@ -300,16 +300,16 @@
 
 ### Checklist
 
-- [ ] Create `tools/normalise_frontmatter.py` — one-time run script
-  - [ ] Unquote enum values: `format: "essay"` → `format: essay`, `tier: "pm"` → `tier: pm`
-  - [ ] Quote string values: `source: research-paper` → `source: "research-paper"` (if Astro schema requires it)
-  - [ ] Quote title/description: `title: Value` → `title: "Value"`
-  - [ ] Fix pubDate: ensure unquoted YYYY-MM-DD
-  - [ ] Dry-run mode: show changes without writing
-- [ ] Run dry-run on all 38 files, review diff
-- [ ] Run live, verify `pnpm build` passes
-- [ ] Verify word counts unchanged (no content loss)
-- [ ] Commit normalised files
+- [x] Create `tools/normalise_frontmatter.py` — one-time run script
+  - [x] Unquote enum values: `format: "essay"` → `format: essay`, `tier: "pm"` → `tier: pm`
+  - [x] Quote string values: `source: research-paper` → `source: "research-paper"` (if Astro schema requires it)
+  - [x] Quote title/description: `title: Value` → `title: "Value"`
+  - [x] Fix pubDate: ensure unquoted YYYY-MM-DD
+  - [x] Dry-run mode: show changes without writing
+- [x] Run dry-run on all 38 files, review diff
+- [x] Run live, verify `pnpm build` passes
+- [x] Verify word counts unchanged (no content loss)
+- [x] Commit normalised files
 
 **Status:** COMPLETE — merged 29/06/26
 
@@ -388,12 +388,12 @@ Block 3 (Failed-Image Handling)                  Block 4 (Source Grounding)
 | 4: Source Grounding + Links | G | G | G | Merged 29/06/26 — 371 tests, pnpm build pass |
 | 5: Company Case Studies | G | G | G | Merged 29/06/26 — 380 tests, pnpm build pass |
 | 6: Blueprint Format + Mermaid | G | G | G | Merged 29/06/26 — 397 tests, pnpm build pass |
-|| 7: Original Frameworks | G | G | G | Merged 29/06/26 — 361 tests |
-|| 8: Retry Threshold + QC | G | G | G | Merged 29/06/26 — 365 tests |
-|| 9: Gemini Vision QA | G | G | G | Merged 29/06/26 — 369 tests |
-|| 10: OCR Text Check | G | G | G | Merged 29/06/26 — 372 tests |
-|| 11: Source-Label Audit Cron | G | G | G | Merged 29/06/26 — 378 tests |
-|| 12: Format Normalisation | G | G | G | Merged 29/06/26 — 378 tests |
+| 7: Original Frameworks | G | G | G | Merged 29/06/26 — 361 tests |
+| 8: Retry Threshold + QC | G | G | G | Merged 29/06/26 — 365 tests |
+| 9: Gemini Vision QA | G | G | G | Merged 29/06/26 — 369 tests |
+| 10: OCR Text Check | G | G | G | Merged 29/06/26 — 372 tests |
+| 11: Source-Label Audit Cron | G | G | G | Merged 29/06/26 — 378 tests |
+| 12: Format Normalisation | G | G | G | Merged 29/06/26 — 378 tests |
 
 **R** = Blocked (dependency not met or issue found)
 **A** = At Risk (approaching deadline or uncovered issue)
