@@ -126,6 +126,27 @@ def get_stale_failed_images() -> list[dict]:
     return [e for e in _get_failed_entries() if _is_stale(e)]
 
 
+def _maybe_request_approval(draft: dict, stream: str, slug: str) -> None:
+    """Request Discord approval for a successfully staged draft (Process 1).
+
+    Non-blocking: logs error on failure but never crashes the pipeline.
+    Approval is optional — posts proceed as drafts regardless.
+    """
+    try:
+        from blog.blog_approval import request as req_approval
+        req_approval(
+            slug=slug,
+            title=draft.get("title", ""),
+            stream=stream,
+            tier=draft.get("tier", ""),
+            mdx_path="",
+        )
+    except Exception as exc:
+        import logging
+        logging.getLogger("blog_pipeline").warning(
+            "Approval request failed for %s (non-blocking): %s", slug, exc)
+
+
 def run_stream(stream: str, repo: Optional[str] = None) -> dict:
     """Drive one blog post through the pipeline for a single stream."""
     if not BLOG_ENABLED:
@@ -169,6 +190,11 @@ def run_stream(stream: str, repo: Optional[str] = None) -> dict:
 
     # 7. Record topic (on success only, record-on-success).
     record(stream, plan.get("topic_id", ""), draft.get("title", ""))
+
+    # 8. Optionally request Discord approval (Process 1).
+    # This doesn't change the publish flow — approval is tracked separately
+    # and handled by the approval-requester cron.
+    _maybe_request_approval(draft, stream, slug)
 
     return {
         "status": "ok", "stream": stream, "slug": slug,

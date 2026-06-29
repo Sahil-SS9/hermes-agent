@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Optional
 
 from config import SAHILBLOG_REPO
+from blog.blog_approval import request as request_approval
 
 
 def _git(repo: str, *args) -> subprocess.CompletedProcess:
@@ -173,3 +174,33 @@ def approve(slug: str, repo: Optional[str] = None) -> dict:
     # 4. Push.
     push_rc = _git_push(repo_path)
     return {"status": "ok", "slug": slug, "push_rc": push_rc}
+
+
+def publish_flow(slug: str, title: str, stream: str, tier: str = "",
+                 mdx_path: str = "", repo: Optional[str] = None) -> dict:
+    """Stage a draft AND request Discord approval in one call.
+
+    Steps:
+      1. git add + commit the MDX and images (stage_draft)
+      2. Register for Discord approval (blog_approval.request)
+      3. Returns approval_id so a cron posts the summary to Discord
+
+    Publishing only happens when !approve <slug> is received on Discord.
+    """
+    repo_path = str(repo) if repo else str(SAHILBLOG_REPO)
+    # Stage the draft (git add + commit, no push).
+    slug = stage_draft(mdx_path, repo=repo_path)
+    # Register for Discord approval.
+    approval_id = request_approval(slug, title, stream, tier, mdx_path)
+    return {
+        "status": "staged_and_awaiting_approval",
+        "slug": slug,
+        "approval_id": approval_id,
+        "title": title,
+        "stream": stream,
+        "mdx_path": mdx_path,
+        "message": (
+            f"Draft **'{title}'** staged (`{slug}`) and awaiting Discord approval.\n"
+            f"Use `!approve {slug}` on Discord to build + push to production."
+        ),
+    }
