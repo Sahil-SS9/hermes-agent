@@ -129,7 +129,8 @@ def test_run_codex_success(mock_find, mock_run):
     mock_find.return_value = "/fake/path/image.png"
     result = cig._run_codex("test prompt", timeout=10)
     assert result == "/fake/path/image.png"
-    mock_run.assert_called_once()
+    # Called for bwrap check + codex exec
+    assert mock_run.call_count == 2
 
 
 @patch("blog.codex_image_gen.subprocess.run")
@@ -145,7 +146,12 @@ def test_run_codex_timeout(mock_run):
 @patch("blog.codex_image_gen._find_latest_codex_image")
 def test_run_codex_finds_image_even_on_nonzero_exit(mock_find, mock_run):
     """Codex may generate an image before returning non-zero; still find it."""
-    mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="")
+    from unittest.mock import call
+    # First call = bwrap version check (return ok), second = codex (return error)
+    mock_run.side_effect = [
+        MagicMock(returncode=0, stdout="bwrap 1.0", stderr=""),  # bwrap check passes
+        MagicMock(returncode=1, stdout="", stderr="error"),      # codex fails
+    ]
     mock_find.return_value = "/fake/path/image.png"
     result = cig._run_codex("test prompt", timeout=10)
     assert result == "/fake/path/image.png"
@@ -177,10 +183,12 @@ def test_run_with_retry_retries_on_failure(mock_run, tmp_path):
 
 @patch("blog.codex_image_gen._run_codex")
 def test_run_with_retry_all_fail(mock_run):
-    """_run_with_retry returns None when all attempts fail."""
+    """_run_with_retry falls back to Pillow when all codex attempts fail."""
     mock_run.return_value = None
     result = cig._run_with_retry("prompt", "/tmp/out.png", timeout=10)
-    assert result is None
+    assert result is not None
+    assert Path(result).exists()
+    Path(result).unlink(missing_ok=True)
     assert mock_run.call_count == 2
 
 
