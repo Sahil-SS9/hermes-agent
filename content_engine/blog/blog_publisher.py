@@ -5,6 +5,7 @@ approved:true in the MDX frontmatter, pnpm build (verify exit 0), commit,
 git push. Do NOT auto-publish.
 
   stage_draft(mdx_path, repo) -> slug (git add + commit "draft: <title>", no push)
+  stage_adhoc(mdx_path, stream, repo) -> {status, slug|issues} (adhoc gate + stage)
   approve(slug, repo) -> {status, ...} (flip approved, build, commit, push)
 """
 from __future__ import annotations
@@ -83,6 +84,65 @@ def _flip_approved(mdx_path: Path) -> bool:
         return False  # nothing to flip (already approved or no field)
     mdx_path.write_text(new)
     return True
+
+
+def stage_adhoc(mdx_path: str, stream: str = "ai",
+                 repo: Optional[str] = None) -> dict:
+    """Run adhoc_check on a manually-written post, then stage if it passes.
+
+    This is the gate for adhoc/manual posts that bypass the pipeline.
+    Reads the MDX, parses it into a draft dict, runs blog_gate.adhoc_check,
+    and only calls stage_draft if the gate passes.
+
+    Returns:
+        {"status": "staged", "slug": slug} on pass
+        {"status": "rejected", "issues": [...]} on fail
+    """
+    from blog.blog_gate import adhoc_check
+
+    repo_path = str(repo) if repo else str(SAHILBLOG_REPO)
+    p = Path(mdx_path)
+    text = p.read_text(encoding="utf-8", errors="replace")
+
+    # Parse frontmatter into a draft dict.
+    fm_match = re.match(r"^---\n(.*?)\n---\n(.*)$", text, re.DOTALL)
+    if not fm_match:
+        return {"status": "rejected", "issues": ["Could not parse MDX frontmatter"]}
+
+    fm_text = fm_match.group(1)
+    body_md = fm_match.group(2).strip()
+
+    def _extract_fm_value(key: str) -> str:
+        m = re.search(rf'^{key}:\s*(.+?)$', fm_text, re.MULTILINE)
+        if not m:
+            return ""
+        val = m.group(1).strip()
+        if val.startswith('"') and val.endswith('"'):
+            val = val[1:-1]
+        return val
+
+    draft = {
+        "title": _extract_fm_value("title"),
+        "description": _extract_fm_value("description"),
+        "body_md": body_md,
+        "slug": p.stem,
+        "tier": _extract_fm_value("tier") or "pm",
+        "format": _extract_fm_value("format") or "essay",
+        "source": _extract_fm_value("source") or "manual",
+        "stream": stream,
+    }
+
+    status, issues = adhoc_check(draft, stream)
+    if status != "ok":
+        return {"status": "rejected", "issues": issues}
+
+    # Write the (possibly redacted) body back to the MDX.
+    if draft["body_md"] != body_md:
+        new_text = f"---\n{fm_text}\n---\n\n{draft['body_md']}"
+        p.write_text(new_text, encoding="utf-8")
+
+    slug = stage_draft(str(p), repo=repo_path)
+    return {"status": "staged", "slug": slug}
 
 
 def approve(slug: str, repo: Optional[str] = None) -> dict:

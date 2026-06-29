@@ -165,12 +165,97 @@ def test_assemble_returns_mdx_path(tmp_path):
 
 
 def test_assemble_slug_collision_safe(tmp_path):
-    """Two assembles with the same slug do not clobber (append suffix)."""
+    """Two assembles with the same slug do not clobber (append suffix).
+
+    Note: the second assemble now raises ValueError due to the semantic
+    duplicate check (same title = 1.0 similarity). This test verifies
+    the first post assembles cleanly and the second is rejected.
+    """
     repo = _setup_tmp_repo(tmp_path)
     images = {"hero_path": None, "section_paths": {}}
     p1 = ba.assemble(_DRAFT, images, repo=str(repo))
-    p2 = ba.assemble(_DRAFT, images, repo=str(repo))
     assert p1.exists()
-    assert p2.exists()
-    # They should be different files (collision resolved).
-    assert p1 != p2 or p1.read_text() == p2.read_text()  # at least both exist
+    # Second assemble with the same title should raise ValueError
+    # (semantic duplicate detected).
+    import pytest
+    with pytest.raises(ValueError, match="Semantic duplicate"):
+        ba.assemble(_DRAFT, images, repo=str(repo))
+
+
+# -- Semantic duplicate detection tests -------------------------------------
+
+def _write_existing_post(posts_dir, slug, title):
+    """Write a minimal MDX post with the given title into posts_dir."""
+    mdx = f"""---
+title: "{title}"
+description: "Existing post."
+pubDate: 2026-06-01
+tags: ["ai"]
+tier: pm
+format: essay
+approved: true
+source: manual
+---
+
+# {title}
+
+Body.
+"""
+    (posts_dir / f"{slug}.mdx").write_text(mdx)
+
+
+def test_semantic_duplicate_detects_near_identical_title(tmp_path):
+    """_check_semantic_duplicate flags a title that is 85%+ similar."""
+    repo = _setup_tmp_repo(tmp_path)
+    posts_dir = repo / "src/content/blog"
+    _write_existing_post(posts_dir, "token-maxing-at-edge",
+                         "Token-Maxing at the Edge")
+    dup = ba._check_semantic_duplicate("Token-Maxing at the Edge!", posts_dir)
+    assert dup is not None
+    assert dup == "token-maxing-at-edge"
+
+
+def test_semantic_duplicate_allows_different_titles(tmp_path):
+    """_check_semantic_duplicate returns None for genuinely different titles."""
+    repo = _setup_tmp_repo(tmp_path)
+    posts_dir = repo / "src/content/blog"
+    _write_existing_post(posts_dir, "token-maxing-at-edge",
+                         "Token-Maxing at the Edge")
+    dup = ba._check_semantic_duplicate("A Guide to Local Inference", posts_dir)
+    assert dup is None
+
+
+def test_semantic_duplicate_threshold_respected(tmp_path):
+    """Titles below the threshold are not flagged."""
+    repo = _setup_tmp_repo(tmp_path)
+    posts_dir = repo / "src/content/blog"
+    _write_existing_post(posts_dir, "token-maxing-at-edge",
+                         "Token-Maxing at the Edge")
+    # Similar but below 0.85 threshold.
+    dup = ba._check_semantic_duplicate("Token-Maxing for GPU Inference",
+                                        posts_dir, threshold=0.85)
+    assert dup is None
+
+
+def test_assemble_raises_on_semantic_duplicate(tmp_path):
+    """assemble() raises ValueError when the title is a semantic duplicate."""
+    repo = _setup_tmp_repo(tmp_path)
+    posts_dir = repo / "src/content/blog"
+    _write_existing_post(posts_dir, "token-maxing-at-edge",
+                         "Token-Maxing at the Edge")
+    # Create a draft with a nearly identical title.
+    dup_draft = dict(_DRAFT)
+    dup_draft["title"] = "Token-Maxing at the Edge"
+    dup_draft["slug"] = "token-maxing-at-the-edge-2"
+    import pytest
+    with pytest.raises(ValueError, match="Semantic duplicate"):
+        ba.assemble(dup_draft, {"hero_path": None, "section_paths": {}},
+                    repo=str(repo))
+
+
+def test_semantic_duplicate_empty_dir_returns_none(tmp_path):
+    """_check_semantic_duplicate returns None when no posts exist."""
+    posts_dir = tmp_path / "empty"
+    posts_dir.mkdir()
+    dup = ba._check_semantic_duplicate("Any Title", posts_dir)
+    assert dup is None

@@ -19,11 +19,65 @@ from __future__ import annotations
 import re
 import shutil
 from datetime import date
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Optional
 
 from config import SAHILBLOG_REPO
 from blog.blog_slug import slugify
+
+
+SEMANTIC_DUPLICATE_THRESHOLD = 0.85
+
+
+def _check_semantic_duplicate(
+    title: str,
+    posts_dir: Path,
+    threshold: float = SEMANTIC_DUPLICATE_THRESHOLD,
+    exclude: Optional[Path] = None,
+) -> Optional[str]:
+    """Check if a title is a fuzzy match for any existing post's title.
+
+    Uses SequenceMatcher on normalised title strings (lowercase, stripped of
+    punctuation). Returns the existing post's slug if a match above threshold
+    is found, or None if no duplicate.
+
+    Args:
+        title: The proposed post title.
+        posts_dir: Directory containing existing .mdx posts.
+        threshold: Similarity ratio 0-1 (default 0.85).
+        exclude: Path to exclude from the check (the post being assembled).
+
+    Returns:
+        The slug of the duplicate post, or None.
+    """
+    if not posts_dir.exists():
+        return None
+
+    def _normalise(t: str) -> str:
+        return re.sub(r"[^\w\s]", "", t.lower()).strip()
+
+    norm_title = _normalise(title)
+
+    for mdx in sorted(posts_dir.glob("*.mdx")):
+        if exclude and mdx.resolve() == exclude.resolve():
+            continue
+        try:
+            text = mdx.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        # Extract title from frontmatter.
+        m = re.search(r'^title:\s*"?([^"\n]+?)"?\s*$', text, re.MULTILINE)
+        if not m:
+            continue
+        existing_title = _normalise(m.group(1).strip())
+        if not existing_title:
+            continue
+        ratio = SequenceMatcher(None, norm_title, existing_title).ratio()
+        if ratio >= threshold:
+            return mdx.stem  # slug
+
+    return None
 
 
 def _yaml_value(val) -> str:
@@ -163,6 +217,14 @@ def assemble(draft: dict, images: dict, repo: Optional[str] = None,
     body = _insert_section_images(
         draft.get("body_md", ""), images.get("section_paths", {}), slug, imgs_dir,
     )
+
+    # Semantic duplicate check — prevent near-identical titles from entering.
+    dup_slug = _check_semantic_duplicate(draft.get("title", ""), posts_dir)
+    if dup_slug:
+        raise ValueError(
+            f"Semantic duplicate: '{draft.get('title', '')}' is too similar to "
+            f"existing post slug '{dup_slug}' (threshold {SEMANTIC_DUPLICATE_THRESHOLD})"
+        )
 
     mdx_path = _resolve_collision(posts_dir, slug)
     mdx_path.write_text(_frontmatter(fm) + "\n\n" + body, encoding="utf-8")
