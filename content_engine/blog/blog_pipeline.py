@@ -159,6 +159,9 @@ def run_stream(stream: str, repo: Optional[str] = None) -> dict:
     if not plan:
         return {"status": "skipped_router", "stream": stream}
 
+    # Mark the topic as used immediately so other streams don't pick it.
+    record(stream, plan.get("topic_id", ""), plan.get("title_hint", ""))
+
     # 2. Generator (with gate + retry).
     draft = write_with_gate(plan, stream=stream)
     if not draft:

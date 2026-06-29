@@ -74,13 +74,12 @@ def test_run_stream_happy_path(monkeypatch, tmp_path):
 
     result = bpl.run_stream("ai", repo=str(repo))
     assert result["status"] == "ok"
-    # Verify order: assemble -> stage -> record.
+    # Now record is called pre-emptively (before assemble) and also on success.
     op_names = [c[0] for c in calls]
+    assert "record" in op_names  # called pre-emptively after choose()
     assert "assemble" in op_names
     assert "stage" in op_names
-    assert "record" in op_names
     assert op_names.index("assemble") < op_names.index("stage")
-    assert op_names.index("stage") < op_names.index("record")
 
 
 def test_run_stream_skips_when_router_returns_none(monkeypatch, tmp_path):
@@ -112,7 +111,9 @@ def test_run_stream_does_not_record_on_generator_failure(monkeypatch, tmp_path):
     record_called = []
     monkeypatch.setattr(bpl, "record", lambda s, tid, t: record_called.append(tid))
     bpl.run_stream("ai", repo=str(repo))
-    assert record_called == []  # not recorded on failure
+    # record is still called pre-emptively (right after choose) even if
+    # the generator later fails — prevents duplicate topic selection.
+    assert record_called == ["t1"]
 
 
 def test_run_all_runs_all_streams(monkeypatch, tmp_path):
