@@ -110,3 +110,16 @@ def illustrate(
             result["section_paths"][heading] = img
 
     return result
+
+def _extract_diagram_spec(draft: dict) -> str | None:
+    """Extract Mermaid diagram code from a blueprint-format draft.
+
+    Searches the body_md for a ```mermaid code block. Returns the code
+    block content (without the fences) or None if not found.
+    """
+    import re as _re
+    body = draft.get("body_md", "") or ""
+    m = _re.search(r"```mermaid\n(.*?)```", body, _re.DOTALL)
+    if m:
+        return m.group(1).strip()
+    return None

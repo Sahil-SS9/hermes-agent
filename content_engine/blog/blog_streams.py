@@ -44,6 +44,9 @@ STREAMS: dict[str, dict] = {
         "section_target": 6,
         "sources": ["paper_synthesis", "ai_news", "ai_labs", "harness_cli", "compute_economics"],
         "image_palette_brand": "sahil_twitter",
+        # Blueprint format: architectural analysis with primitive mapping tables
+        # and Mermaid diagrams. Rotate based on topic type.
+        "formats": ["essay", "blueprint"],
     },
     "pm": {
         "tier": "pm",

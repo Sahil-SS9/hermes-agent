@@ -131,6 +131,36 @@ def _frontmatter(fm: dict) -> str:
     return "\n".join(lines)
 
 
+
+def _has_mermaid_diagram(body_md: str) -> bool:
+    """Check if the body contains a Mermaid code block."""
+    import re as _re
+    return bool(_re.search(r"```mermaid\n", body_md))
+
+
+def _has_mapping_table(body_md: str) -> bool:
+    """Check if the body contains a markdown table (primitive mapping table)."""
+    # Markdown tables have | header | header | and |---|---| separator rows.
+    import re as _re
+    return bool(_re.search(r"\|.*\|.*\n\|[-:|\s]+\|", body_md))
+
+
+def validate_blueprint(draft: dict) -> tuple[str, list[str]]:
+    """Validate a blueprint-format draft has required elements.
+
+    Returns (status, issues):
+      status: "ok" | "fail"
+      issues: list of missing-element strings
+    """
+    body = draft.get("body_md", "") or ""
+    issues: list[str] = []
+    if not _has_mermaid_diagram(body):
+        issues.append("Blueprint post missing Mermaid diagram")
+    if not _has_mapping_table(body):
+        issues.append("Blueprint post missing primitive mapping table")
+    return ("ok" if not issues else "fail", issues)
+
+
 def _insert_section_images(body_md: str, section_paths: dict, slug: str,
                            imgs_dir: Path) -> str:
     """Copy section images and insert inline refs after their H2 headings.

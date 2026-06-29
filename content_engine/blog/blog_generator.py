@@ -205,6 +205,78 @@ def build_blog_prompt(stream: str, plan: dict, context_blob: str,
     return {"system": system, "user": user}
 
 
+def build_blueprint_prompt(stream: str, plan: dict, context_blob: str,
+                               kb_snippets: list[str],
+                               wiki_entries: Optional[list[dict]] = None,
+                               retry_feedback: Optional[str] = None,
+                               verification: Optional[dict] = None) -> dict:
+    """System + user prompt for blueprint-format blog posts.
+
+    Blueprint posts differ from essays:
+      - Include a primitive mapping table (concept -> implementation mapping)
+      - Include a Mermaid architecture diagram (code block)
+      - Step-by-step sequence instead of narrative prose
+      - More structured, less editorial
+    """
+    s = STREAMS[stream]
+    voice = s["voice"]
+    word_target = s["word_target"]
+    title_hint = (plan.get("title_hint") or "").strip()
+    signal_lines = "\n".join(
+        f"- {sig.get('summary', '')}"
+        for sig in plan.get("signals", [])
+    ) or "(no signals)"
+    takes = "\n".join(f"- {t}" for t in (kb_snippets or [])) or "(none on file)"
+
+    rules = [
+        f"- Length: ~{word_target} words. Full article, not a long post.",
+        "- British English. No em-dashes.",
+        "- No AI-isms. No 'Let's dive in' / 'In today's world'.",
+        "- No invented statistics.",
+        "- Format: BLUEPRINT (architectural analysis, not essay).",
+        "- MUST include a primitive mapping table in markdown:",
+        "  | Concept | Implementation | Trade-off |",
+        "  |--------|---------------|-----------|",
+        "- MUST include a Mermaid architecture diagram in a ```mermaid code block.",
+        "- Step-by-step sequence: numbered steps for implementation.",
+        "- Structure: 5+ `## H2` sections. The illustrator keys off headings.",
+        "- One `# Title` (specific, not clickbait).",
+        "- One `## What I'd try next` section at the end.",
+    ]
+    if retry_feedback:
+        rules.append(f"- Previous attempt rejected: {retry_feedback}")
+
+    system = "\n".join([
+        f"You are writing a blueprint-format blog essay for SahilBlog, stream '{stream}'.",
+        "",
+        "## Brand voice (use exactly)", voice,
+        "",
+        "## Blueprint format rules",
+        "Blueprint posts are architectural analysis pieces. They include:",
+        "1. A primitive mapping table mapping concepts to implementations and trade-offs.",
+        "2. A Mermaid diagram showing the architecture (flowchart or sequence diagram).",
+        "3. Numbered step-by-step implementation sequence.",
+        "4. Less narrative, more structured than essays.",
+        "",
+        _DEPTH_CONTRACT,
+        "",
+        "## Rules", *rules,
+    ])
+
+    user = "\n".join([
+        f"Title hint: {title_hint}" if title_hint else "",
+        "## Chosen signals", signal_lines,
+        "",
+        "## Real context", context_blob or "(none)",
+        "",
+        "## Author's prior takes", takes,
+        "",
+        "Write the blueprint article now. Include the mapping table and Mermaid diagram.",
+    ])
+
+    return {"system": system, "user": user}
+
+
 WIKI_HOME = Path(os.path.expanduser("~/wiki"))
 
 
