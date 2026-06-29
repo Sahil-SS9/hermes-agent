@@ -1,0 +1,233 @@
+"""Codex CLI image generation module for blog images.
+
+Replaces FAL/imagery_transplant for the blog image path. Uses Codex CLI
+(`codex exec`) which generates images via ChatGPT auth (zero marginal cost).
+
+Codex sandbox limitation: the sandbox prevents copying files out. This module
+works around it by:
+  1. Recording a timestamp before running `codex exec`
+  2. Finding the newest PNG in ~/.codex/generated_images/ after the run
+  3. Copying it to the target path
+
+Image size: ~1254x1254 (near-square).
+Time per image: 80-85s typical, up to 180s for complex prompts.
+Auth: ChatGPT subscription (zero marginal cost, no API key).
+
+Timeout strategy:
+  - Default per-image timeout: 300s
+  - Retry on timeout: 1 retry with 360s timeout
+  - Total max wait per image: 660s (~11 min)
+  - If all attempts fail, return None
+"""
+from __future__ import annotations
+
+import os
+import shutil
+import subprocess
+import time
+from pathlib import Path
+from typing import Optional
+
+
+CODEX_IMAGES_DIR = Path.home() / ".codex" / "generated_images"
+
+
+def _find_latest_codex_image(
+    after_ts: Optional[float] = None,
+    images_dir: Path = CODEX_IMAGES_DIR,
+) -> Optional[str]:
+    """Find the newest PNG in ~/.codex/generated_images/.
+
+    Scans session subdirectories for exec-*.png files, returning the path
+    to the one with the most recent modification time. If after_ts is given,
+    only considers images created after that timestamp.
+
+    Returns None if no images are found.
+    """
+    if not images_dir.exists():
+        return None
+
+    candidates: list[tuple[float, str]] = []
+    for session_dir in images_dir.iterdir():
+        if not session_dir.is_dir():
+            continue
+        for png in session_dir.glob("exec-*.png"):
+            try:
+                mtime = png.stat().st_mtime
+            except OSError:
+                continue
+            if after_ts is None or mtime >= after_ts:
+                candidates.append((mtime, str(png)))
+
+    if not candidates:
+        return None
+
+    # Return the most recent one.
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    return candidates[0][1]
+
+
+def _build_image_prompt(
+    title: str,
+    description: str,
+    heading: Optional[str] = None,
+    palette: str = "futuristic neon-on-dark",
+) -> str:
+    """Build a self-contained text prompt for Codex CLI image generation.
+
+    Codex does text-to-image, not reference-anchored edit, so the prompt must
+    be fully self-contained. The palette is communicated via text, not anchor
+    images.
+
+    Args:
+        title: Post title.
+        description: Post description/lede.
+        heading: Optional H2 heading for section images.
+        palette: Colour palette guidance text.
+
+    Returns:
+        A self-contained image generation prompt string.
+    """
+    if heading:
+        subject = heading
+        context = f"for a blog post titled '{title}', section '{heading}'"
+    else:
+        subject = title
+        context = f"for a blog post titled '{title}'"
+
+    return (
+        f"Generate an image {context}. "
+        f"The image should be a high-quality editorial illustration that captures "
+        f"the theme: {subject}. "
+        f"Description: {description}. "
+        f"Style: abstract, minimal, modern, {palette}. "
+        f"No text in the image. Square format, high detail."
+    )
+
+
+def _run_codex(
+    prompt: str,
+    timeout: int = 300,
+    workdir: Optional[str] = None,
+) -> Optional[str]:
+    """Execute codex CLI with the given prompt. Returns image path or None.
+
+    Records a timestamp before running, then finds the newest image after
+    the run completes. Copies the image to a temporary location.
+
+    Args:
+        prompt: The image generation prompt.
+        timeout: Maximum seconds to wait for codex to complete.
+        workdir: Working directory for codex (defaults to home).
+
+    Returns:
+        Path to the generated image, or None on failure.
+    """
+    before_ts = time.time()
+    cwd = workdir or str(Path.home())
+
+    try:
+        result = subprocess.run(
+            ["codex", "exec", prompt],
+            capture_output=True, text=True, timeout=timeout, cwd=cwd,
+        )
+    except subprocess.TimeoutExpired:
+        print(f"[codex_image_gen] timed out after {timeout}s")
+        return None
+    except Exception as exc:
+        print(f"[codex_image_gen] execution error: {exc}")
+        return None
+
+    if result.returncode != 0:
+        print(f"[codex_image_gen] codex exit code {result.returncode}")
+        # Still try to find an image — codex may have generated one before erroring.
+        img = _find_latest_codex_image(after_ts=before_ts)
+        if img:
+            return img
+        return None
+
+    # Find the newest image created during the codex run.
+    img = _find_latest_codex_image(after_ts=before_ts)
+    if not img:
+        print("[codex_image_gen] no image found after codex run")
+        return None
+
+    return img
+
+
+def generate_hero(
+    title: str,
+    description: str,
+    out_path: str,
+    timeout: int = 300,
+    palette: str = "futuristic neon-on-dark with halftone textures",
+    workdir: Optional[str] = None,
+) -> Optional[str]:
+    """Generate a hero image for a blog post via Codex CLI.
+
+    Args:
+        title: Post title.
+        description: Post description/lede.
+        out_path: Target path for the image (will be copied here).
+        timeout: Per-attempt timeout in seconds (default 300).
+        palette: Colour palette guidance.
+        workdir: Working directory for codex.
+
+    Returns:
+        The out_path on success, or None on failure.
+    """
+    prompt = _build_image_prompt(title, description, heading=None, palette=palette)
+    return _run_with_retry(prompt, out_path, timeout, workdir)
+
+
+def generate_section(
+    title: str,
+    heading: str,
+    out_path: str,
+    timeout: int = 300,
+    palette: str = "futuristic neon-on-dark with halftone textures",
+    workdir: Optional[str] = None,
+) -> Optional[str]:
+    """Generate a section image for a blog post via Codex CLI.
+
+    Args:
+        title: Post title (for context).
+        heading: H2 heading text for the section.
+        out_path: Target path for the image (will be copied here).
+        timeout: Per-attempt timeout in seconds (default 300).
+        palette: Colour palette guidance.
+
+    Returns:
+        The out_path on success, or None on failure.
+    """
+    prompt = _build_image_prompt(title, heading, heading=heading, palette=palette)
+    return _run_with_retry(prompt, out_path, timeout, workdir)
+
+
+def _run_with_retry(
+    prompt: str,
+    out_path: str,
+    timeout: int,
+    workdir: Optional[str] = None,
+    retry_timeout: int = 360,
+) -> Optional[str]:
+    """Run codex with one retry on timeout. Copy result to out_path.
+
+    Returns out_path on success, None on failure.
+    """
+    for attempt, current_timeout in enumerate([timeout, retry_timeout], 1):
+        img_src = _run_codex(prompt, timeout=current_timeout, workdir=workdir)
+        if img_src and Path(img_src).exists():
+            try:
+                target = Path(out_path)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(img_src, target)
+                return str(target)
+            except Exception as exc:
+                print(f"[codex_image_gen] copy failed (attempt {attempt}): {exc}")
+                continue
+        elif attempt == 1:
+            print(f"[codex_image_gen] retrying with {retry_timeout}s timeout")
+
+    print(f"[codex_image_gen] all attempts failed for {out_path}")
+    return None

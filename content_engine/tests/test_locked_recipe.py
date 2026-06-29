@@ -50,29 +50,38 @@ def test_generate_accepts_recipe_override(monkeypatch, tmp_path):
 
 
 def test_illustrate_locks_palette(monkeypatch, tmp_path):
-    """One palette across hero + all sections."""
-    import blog.blog_illustrator as bi
-    seen = []
+    """One palette string across hero + all sections (Codex CLI path).
 
-    def fake_generate(draft, brand, out_dir=None, recipe=None, **k):
-        seen.append(recipe["palette"])
-        p = tmp_path / f"{len(seen)}.png"
+    The new Codex CLI illustrator does not use recipe-based palette locking.
+    Instead, palette guidance is passed as text in the prompt. This test
+    verifies the same palette string is passed to every generate call.
+    """
+    import blog.blog_illustrator as bi
+    seen_palettes = []
+
+    def fake_hero(title, description, out_path, **kw):
+        seen_palettes.append(kw.get("palette", ""))
+        p = tmp_path / f"hero_{len(seen_palettes)}.png"
         p.write_text("x")
         return str(p)
 
-    monkeypatch.setattr(bi, "generate", fake_generate)
-    monkeypatch.setattr(bi.budget, "can_spend", lambda c, **k: True)
+    def fake_section(title, heading, out_path, **kw):
+        seen_palettes.append(kw.get("palette", ""))
+        p = tmp_path / f"sec_{len(seen_palettes)}.png"
+        p.write_text("x")
+        return str(p)
+
+    monkeypatch.setattr(bi, "generate_hero", fake_hero)
+    monkeypatch.setattr(bi, "generate_section", fake_section)
     monkeypatch.setattr(bi.config, "BLOG_MAX_SECTION_IMAGES", 2)
-    monkeypatch.setattr(bi.config, "BLOG_IMAGE_MODEL", "fal-ai/nano-banana-2/edit")
-    monkeypatch.setattr(bi.config, "BLOG_IMAGE_COST_GBP", 0.06)
 
     draft = {
         "title": "Test post",
-        "description": "a test description with enough text for a recipe",
+        "description": "a test description",
         "stream": "ai",
         "body_md": "## One\nx\n\n## Two\ny\n\n## Three\nz",
     }
     bi.illustrate(draft, out_dir=tmp_path, max_sections=2)
-    # hero + 2 sections = 3 images, all same palette
-    assert len(set(seen)) == 1, f"expected 1 palette, got {seen}"
-    assert len(seen) == 3, f"expected 3 images, got {len(seen)}"
+    # hero + 2 sections = 3 images, all same palette string
+    assert len(set(seen_palettes)) == 1, f"expected 1 palette, got {seen_palettes}"
+    assert len(seen_palettes) == 3, f"expected 3 images, got {len(seen_palettes)}"

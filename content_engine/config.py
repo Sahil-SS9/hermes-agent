@@ -351,8 +351,12 @@ BLOG_MAX_SECTION_IMAGES = int(os.getenv("BLOG_MAX_SECTION_IMAGES", "0"))
 BLOG_TOPIC_RECENCY_DAYS = int(os.getenv("BLOG_TOPIC_RECENCY_DAYS", "45"))
 
 # ── Blog back-population image model ──────────────────────────────────────
-# Model = fal-ai/nano-banana-2/edit (confirmed Task 0: $0.08/img ≈ £0.064).
-# Cost confirmed by probing the FAL endpoint on 2026-06-17.
+# DEPRECATED for blog image path: BLOG_IMAGE_MODEL and BLOG_IMAGE_COST_GBP
+# are no longer used by blog_illustrator.py, which now uses Codex CLI
+# (codex_image_gen.py) with ChatGPT auth (zero marginal cost per image).
+# These config vars remain for backward compatibility with the social content
+# pipeline (Stage 2 in content_engine.py) which still uses FAL for product
+# brand images (Plenishd/CoachOS/MatchdayMaestro).
 BLOG_IMAGE_MODEL = os.getenv("BLOG_IMAGE_MODEL", "fal-ai/nano-banana-2/edit").strip()
 BLOG_IMAGE_COST_GBP = float(os.getenv("BLOG_IMAGE_COST_GBP", "0.064"))
 # One-off back-population envelope, separate from MONTHLY_BUDGET_GBP.
