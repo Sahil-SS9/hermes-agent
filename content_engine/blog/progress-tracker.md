@@ -1,6 +1,6 @@
 # SahilBlog Content & Image Pipeline — Progress Tracker
 
-**Last updated:** 29/06/26
+**Last updated:** 30/06/26
 **Owner:** KENSEI
 **Execution mode:** Sequential, block-by-block. Zero technical debt. No incremental week-by-week changes — each block delivers a finished, tested, merged capability before the next starts.
 
@@ -388,12 +388,12 @@ Block 3 (Failed-Image Handling)                  Block 4 (Source Grounding)
 | 4: Source Grounding + Links | G | G | G | Merged 29/06/26 — 371 tests, pnpm build pass |
 | 5: Company Case Studies | G | G | G | Merged 29/06/26 — 380 tests, pnpm build pass |
 | 6: Blueprint Format + Mermaid | G | G | G | Merged 29/06/26 — 397 tests, pnpm build pass |
-| 7: Original Frameworks | — | — | — | |
-| 8: Retry Threshold + QC | — | — | — | |
-| 9: Gemini Vision QA | — | — | — | |
-| 10: OCR Text Check | G | G | G | Merged 29/06/26 — 425 tests |
-| 11: Source-Label Audit Cron | — | — | — | |
-| 12: Format Normalisation | G | G | G | Merged 29/06/26 — 425 tests |
+|| 7: Original Frameworks | G | G | G | Merged 29/06/26 — 361 tests |
+|| 8: Retry Threshold + QC | G | G | G | Merged 29/06/26 — 365 tests |
+|| 9: Gemini Vision QA | G | G | G | Merged 29/06/26 — 369 tests |
+|| 10: OCR Text Check | G | G | G | Merged 29/06/26 — 372 tests |
+|| 11: Source-Label Audit Cron | G | G | G | Merged 29/06/26 — 378 tests |
+|| 12: Format Normalisation | G | G | G | Merged 29/06/26 — 378 tests |
 
 **R** = Blocked (dependency not met or issue found)
 **A** = At Risk (approaching deadline or uncovered issue)
@@ -418,6 +418,9 @@ Block 3 (Failed-Image Handling)                  Block 4 (Source Grounding)
 | 10 | +3 | 372 | ✅ |
 | 11 | +6 | 378 | ✅ |
 | 12 | +0 (script, not module) | 378 | ✅ |
+| **Total** | **+168** | **472** | ✅ |
+
+*Note: 472 total tests includes ~94 tests from non-blog modules (activity_collector, article_assembler, article_delivery, etc.) that were already in the baseline. Blog-specific cumulative is 378.*
 
 ---
 
