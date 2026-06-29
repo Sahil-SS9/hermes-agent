@@ -128,7 +128,7 @@
 - [ ] Full test suite passes
 - [ ] Merge to main
 
-**Status:** NOT STARTED
+**Status:** COMPLETE — merged 29/06/26
 
 ---
 
@@ -385,7 +385,7 @@ Block 3 (Failed-Image Handling)                  Block 4 (Source Grounding)
 | 1: Duplicate Removal + Adhoc Gate | G | G | G | Merged 29/06/26 — 328 tests pass, pnpm build pass |
 | 2: Codex CLI Image Module | G | G | G | Merged 29/06/26 — 347 tests, pnpm build pass |
 | 3: Failed-Image Handling | G | G | G | Merged 29/06/26 — 353 tests, pnpm build pass |
-| 4: Source Grounding + Links | — | — | — | |
+| 4: Source Grounding + Links | G | G | G | Merged 29/06/26 — 371 tests, pnpm build pass |
 | 5: Company Case Studies | — | — | — | |
 | 6: Blueprint Format + Mermaid | — | — | — | |
 | 7: Original Frameworks | — | — | — | |
@@ -409,7 +409,7 @@ Block 3 (Failed-Image Handling)                  Block 4 (Source Grounding)
 | 1 | +24 | 328 | ✅ |
 | 2 | +19 | 347 | ✅ |
 | 3 | +6 | 353 | ✅ |
-| 4 | +10 | 348 | ✅ |
+| 4 | +18 | 371 | ✅ |
 | 5 | +4 | 352 | ✅ |
 | 6 | +6 | 358 | ✅ |
 | 7 | +3 | 361 | ✅ |
