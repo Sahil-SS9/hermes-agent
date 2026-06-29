@@ -25,6 +25,7 @@ import os
 import shutil
 import subprocess
 import time
+from config import IMAGERY_QA_MIN_SCORE
 from pathlib import Path
 from typing import Optional
 
@@ -165,19 +166,26 @@ def generate_hero(
 ) -> Optional[str]:
     """Generate a hero image for a blog post via Codex CLI.
 
-    Args:
-        title: Post title.
-        description: Post description/lede.
-        out_path: Target path for the image (will be copied here).
-        timeout: Per-attempt timeout in seconds (default 300).
-        palette: Colour palette guidance.
-        workdir: Working directory for codex.
-
-    Returns:
-        The out_path on success, or None on failure.
+    After generation, runs Gemini vision QA (Block 9) to verify the image
+    matches the topic. Regenerates once if score < IMAGERY_QA_MIN_SCORE.
     """
     prompt = _build_image_prompt(title, description, heading=None, palette=palette)
-    return _run_with_retry(prompt, out_path, timeout, workdir)
+    result = _run_with_retry(prompt, out_path, timeout, workdir)
+    if result is None:
+        return None
+
+    # Block 9: Gemini Vision QA — score 0-10, regenerate once if low.
+    if Path(out_path).exists():
+        score = _qa_retry_if_low(out_path, title, description,
+                                 min_score=IMAGERY_QA_MIN_SCORE)
+        if score != -1 and score < IMAGERY_QA_MIN_SCORE:
+            prompt += (
+                f"\n\nQA feedback: The previous image scored {score}/10 "
+                f"on relevance to the topic. Ensure the image directly "
+                f"illustrates '{title}'."
+            )
+            result = _run_with_retry(prompt, out_path, timeout, workdir)
+    return result
 
 
 def generate_section(
@@ -190,18 +198,31 @@ def generate_section(
 ) -> Optional[str]:
     """Generate a section image for a blog post via Codex CLI.
 
-    Args:
-        title: Post title (for context).
-        heading: H2 heading text for the section.
-        out_path: Target path for the image (will be copied here).
-        timeout: Per-attempt timeout in seconds (default 300).
-        palette: Colour palette guidance.
-
-    Returns:
-        The out_path on success, or None on failure.
+    After generation, runs OCR text-legibility check (Block 10)
+    to verify the H2 heading text is readable.
     """
     prompt = _build_image_prompt(title, heading, heading=heading, palette=palette)
-    return _run_with_retry(prompt, out_path, timeout, workdir)
+    result = _run_with_retry(prompt, out_path, timeout, workdir)
+    if result is None:
+        return None
+
+    # Block 10: OCR text-legibility check.
+    if Path(out_path).exists():
+        ocr_result = _ocr_text_check(out_path, expected_text=heading)
+        if not ocr_result["legible"]:
+            # Log warning and continue (no regen — Codex is too slow).
+            import logging
+            logging.getLogger("codex_image_gen").warning(
+                "OCR text illegible: title='%s', heading='%s', found='%s'",
+                title, heading, ocr_result.get("found_text", "")[:80],
+            )
+        elif not ocr_result["matches_expected"]:
+            import logging
+            logging.getLogger("codex_image_gen").warning(
+                "OCR text mismatch: title='%s', expected='%s', found='%s'",
+                title, heading, ocr_result.get("found_text", "")[:80],
+            )
+    return result
 
 
 def _run_with_retry(

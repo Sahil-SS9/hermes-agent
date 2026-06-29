@@ -177,6 +177,31 @@ def run_stream(stream: str, repo: Optional[str] = None) -> dict:
     }
 
 
+def _check_systemic_ocr_failures(draft: dict, images: dict) -> None:
+    """Check if >50% of section images had OCR text issues and flag the post."""
+    import logging
+    section_paths = images.get("section_paths", [])
+    if isinstance(section_paths, list) and len(section_paths) > 0:
+        total = len(section_paths)
+        # Check each section image by re-running OCR (quick stats check).
+        ocr_failures = 0
+        for img_path in section_paths:
+            try:
+                from blog.codex_image_gen import _ocr_text_check
+                result = _ocr_text_check(str(img_path))
+                if not result["legible"]:
+                    ocr_failures += 1
+            except Exception:
+                ocr_failures += 1
+        failure_pct = ocr_failures / total * 100
+        if failure_pct > 50:
+            logging.getLogger("blog_pipeline").warning(
+                "Systemic OCR failure: title='%s', %d/%d images illegible (%.0f%%). "
+                "Flagging post for review.",
+                draft.get("title", ""), ocr_failures, total, failure_pct,
+            )
+
+
 def retry_failed_images(slug: str, stream: str,
                         repo: Optional[str] = None) -> dict:
     """Re-attempt image generation for a post in the failed_images tracking.

@@ -46,11 +46,12 @@ CREATE INDEX IF NOT EXISTS idx_created ON drafts(created_at);
 CREATE INDEX IF NOT EXISTS idx_content_type ON drafts(content_type);
 
 CREATE TABLE IF NOT EXISTS topic_usage_log (
-    topic_id   TEXT PRIMARY KEY,
-    brand      TEXT NOT NULL,
-    topic_text TEXT NOT NULL,
-    used_at    TEXT NOT NULL,
-    platform   TEXT
+    topic_id      TEXT PRIMARY KEY,
+    brand         TEXT NOT NULL,
+    topic_text    TEXT NOT NULL,
+    used_at       TEXT NOT NULL,
+    platform      TEXT,
+    quality_score INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_usage_brand ON topic_usage_log(brand);
@@ -62,6 +63,13 @@ def init_db() -> None:
     conn = sqlite3.connect(str(DB_PATH))
     conn.executescript(SCHEMA)
     # Migrate existing DB: add missing columns
+    # Add quality_score to topic_usage_log
+    usage_cols = {row[1] for row in conn.execute("PRAGMA table_info(topic_usage_log)").fetchall()}
+    if "quality_score" not in usage_cols:
+        try:
+            conn.execute("ALTER TABLE topic_usage_log ADD COLUMN quality_score INTEGER")
+        except sqlite3.OperationalError:
+            pass
     cols = {row[1] for row in conn.execute("PRAGMA table_info(drafts)").fetchall()}
     for col_name, col_type in [
         ("ai_enriched_at", "TEXT"),
@@ -123,16 +131,29 @@ def insert_draft(
 
 # ── Topic usage tracking ──
 
-def log_topic_usage(topic_id: str, brand: str, topic_text: str, platform: str = "") -> None:
-    """Record that a topic was used for draft generation."""
+def log_topic_usage(topic_id: str, brand: str, topic_text: str, platform: str = "",
+                     quality_score: Optional[int] = None) -> None:
+    """Record that a topic was used for draft generation.
+
+    quality_score (0-10, nullable) stored for routing feedback.
+    """
     conn = sqlite3.connect(str(DB_PATH))
-    conn.execute(
-        """
-        INSERT OR REPLACE INTO topic_usage_log (topic_id, brand, topic_text, used_at, platform)
-        VALUES (?, ?, ?, ?, ?)
-        """,
-        (topic_id, brand, topic_text, datetime.utcnow().isoformat(), platform),
-    )
+    if quality_score is not None:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO topic_usage_log (topic_id, brand, topic_text, used_at, platform, quality_score)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (topic_id, brand, topic_text, datetime.utcnow().isoformat(), platform, quality_score),
+        )
+    else:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO topic_usage_log (topic_id, brand, topic_text, used_at, platform)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (topic_id, brand, topic_text, datetime.utcnow().isoformat(), platform),
+        )
     conn.commit()
     conn.close()
 
@@ -146,6 +167,18 @@ def get_recently_used_topics(brand: str, days: int = 30) -> List[str]:
     ).fetchall()
     conn.close()
     return [r[0] for r in rows]
+
+def get_quality_scores(brand: str) -> list[dict]:
+    """Return topic_ids and their quality_score for a brand, filtering non-null scores."""
+    conn = sqlite3.connect(str(DB_PATH))
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        "SELECT topic_id, quality_score FROM topic_usage_log WHERE brand = ? AND quality_score IS NOT NULL",
+        (brand,),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
 
 def is_topic_recently_used(topic_id: str, days: int = 30) -> bool:
     """Check if a specific topic_id was used within the last N days."""

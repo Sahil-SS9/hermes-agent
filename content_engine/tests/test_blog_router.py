@@ -80,10 +80,15 @@ def test_record_writes_to_db_with_blog_brand(monkeypatch):
     """record() calls database.log_topic_usage with brand=f'blog_{stream}'."""
     calls = []
     monkeypatch.setattr(br.db, "log_topic_usage",
-                        lambda topic_id, brand, topic_text, platform="": calls.append(
+                        lambda topic_id, brand, topic_text, platform="", **kw: calls.append(
                             (topic_id, brand, topic_text, platform)))
     br.record("builder", "tid1", "title text")
+    # quality_score=None is passed as 5th arg.
     assert ("tid1", "blog_builder", "title text", "blog") in calls
+    # The call tuple format is (topic_id, brand, topic_text, platform, quality_score)
+    # Check that it has the right first 4 even when quality_score is passed.
+    match = [c for c in calls if c[0] == "tid1" and c[1] == "blog_builder"]
+    assert match, "Expected tid1 call not found"
 
 
 def test_record_is_defensive_on_db_error(monkeypatch):
@@ -108,8 +113,12 @@ def test_gather_candidates_builder_uses_activity_collector(monkeypatch):
                      "pillar": "agent_build_notes"}],
     })
     cands = br._gather_candidates("builder")
-    assert len(cands) == 1
-    assert cands[0]["topic_id"] == "gh1"
+    # Framework seeds (10) are now injected alongside the signal
+    # and come first due to highest priority.
+    assert len(cands) == 11, f"Expected 10 framework + 1 signal = 11, got {len(cands)}"
+    assert cands[0]["topic_id"].startswith("fw-"), "Framework seeds should be first"
+    # The signal should still be present (last, lower priority).
+    assert any(c["topic_id"] == "gh1" for c in cands), "Signal should still be present"
 
 
 def test_gather_candidates_unknown_stream_returns_empty(monkeypatch):

@@ -1,20 +1,7 @@
-"""Blog topic router - per-stream topic selection + cross-run dedup.
-
-Mirrors article_pipeline._recent_article_topic_ids / _record_article_topics
-but keys under brand=f"blog_{stream}" so each stream has its own dedup window.
-
-  choose(stream)  -> {topic_id, title_hint, tags, source, signals} or None
-  record(stream, topic_id, title)  -> writes back AFTER a successful publish
-
-Candidate gathering:
-  - builder: activity_collector.collect_all() signals (gitradar + harness).
-  - ai/pm:   manual topic queue file (sources that are not yet wired as
-              standalone collectors fall back to the queue; paper_synthesis is
-              wired when available). This keeps the router functional today
-              without blocking on unbuilt collectors.
-"""
 from __future__ import annotations
+from pathlib import Path
 from typing import Optional
+import json
 
 import activity_collector as ac
 import database as db
@@ -23,10 +10,7 @@ from blog.blog_streams import STREAMS, tags_for
 
 
 def _recent_used(stream: str) -> list[str]:
-    """Topic ids used for this stream within the recency window.
-
-    Read-only and defensive: a DB hiccup must never block today's article.
-    """
+    """Topic ids used for this stream within the recency window."""
     try:
         return db.get_recently_used_topics(
             f"blog_{stream}", days=BLOG_TOPIC_RECENCY_DAYS,
@@ -35,15 +19,62 @@ def _recent_used(stream: str) -> list[str]:
         return []
 
 
+def _read_jsonl(path: Path) -> list[dict]:
+    """Read a JSONL file, skipping blank/comment lines. Returns list of parsed dicts."""
+    if not path.exists():
+        return []
+    out = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        out.append(obj)
+    return out
+
+
+def _gather_framework_candidates() -> list[dict]:
+    """Read framework seeds from blog_topics/frameworks.jsonl.
+
+    Framework seeds get priority 8-9 so they're picked ahead of regular topics.
+    """
+    p = Path(__file__).resolve().parent.parent / "blog_topics" / "frameworks.jsonl"
+    objs = _read_jsonl(p)
+    cands = []
+    for obj in objs:
+        priority = obj.get("priority", 8)
+        cands.append({
+            "topic_id": obj.get("topic_id", ""),
+            "title_hint": obj.get("title_hint", ""),
+            "tags": obj.get("tags", []),
+            "source_override": "manual_queue",
+            "signals": [{
+                "signal_id": obj.get("topic_id", ""),
+                "summary": obj.get("title_hint", ""),
+                "priority": priority,
+            }],
+            "priority": priority,
+            "domain": obj.get("domain", ""),
+        })
+    return cands
+
+
 def _gather_candidates(stream: str) -> list[dict]:
     """Gather candidate topics for a stream.
 
-    Builder stream uses activity_collector (gitradar + harness signals).
-    AI/PM streams use a manual topic queue file (forward-compatible: when
-    paper_synthesis / pm_frameworks collectors land, they plug in here).
+    All streams: framework seeds injected at highest priority.
+    Builder: also uses activity_collector signals.
+    AI/PM: also uses manual topic queue file.
     """
     if stream not in STREAMS:
         return []
+
+    # Framework seeds are injected for ALL streams at highest priority.
+    framework_cands = _gather_framework_candidates()
+
     if stream == "builder":
         try:
             result = ac.collect_all()
@@ -56,50 +87,32 @@ def _gather_candidates(stream: str) -> list[dict]:
                 "topic_id": sig.get("signal_id", ""),
                 "title_hint": sig.get("summary", ""),
                 "tags": [],
-                "source_override": None,  # use stream config source
+                "source_override": None,
                 "signals": [sig],
                 "priority": sig.get("priority", 0),
             })
-        return cands
+        return framework_cands + cands
 
     # AI / PM: read from the manual topic queue if it exists.
     cands = _read_manual_queue(stream)
-    return cands
+    return framework_cands + cands
 
 
 def _manual_queue_path(stream: str):
     """Path to the manual topic queue for a stream."""
-    from pathlib import Path
     return Path(__file__).resolve().parent.parent / "blog_topics" / f"{stream}.jsonl"
 
 
 def _read_manual_queue(stream: str) -> list[dict]:
-    """Read queued topics from blog_topics/<stream>.jsonl (one JSON object per line).
-
-    Each line: {"topic_id", "title_hint", "tags", "priority", "source_override?"}
-    Missing file = no candidates (the stream skips that day).
-    """
-    from pathlib import Path
-    import json
+    """Read queued topics from blog_topics/<stream>.jsonl (one JSON object per line)."""
     p = _manual_queue_path(stream)
-    if not p.exists():
-        return []
+    objs = _read_jsonl(p)
     out = []
-    for line in p.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        try:
-            obj = json.loads(line)
-        except json.JSONDecodeError:
-            continue
+    for obj in objs:
         out.append({
             "topic_id": obj.get("topic_id", ""),
             "title_hint": obj.get("title_hint", ""),
             "tags": obj.get("tags", []),
-            # Honest source label: manual queue entries have no live source URL.
-            # Explicit source_override may still be set (e.g. "research-paper"
-            # for a paper-linked entry), but null defaults to "manual_queue".
             "source_override": obj.get("source_override") or "manual_queue",
             "signals": [{
                 "signal_id": obj.get("topic_id", ""),
@@ -111,12 +124,26 @@ def _read_manual_queue(stream: str) -> list[dict]:
     return out
 
 
+def _get_quality_scores(stream: str) -> dict[str, int]:
+    """Fetch historical quality scores for framework topics from DB.
+
+    Returns dict of {topic_id: quality_score}.
+    """
+    try:
+        brand = f"blog_{stream}"
+        scores_raw = db.get_quality_scores(brand)
+        return {r["topic_id"]: r["quality_score"] for r in scores_raw}
+    except Exception:
+        return {}
+
+
 def choose(stream: str) -> Optional[dict]:
     """Pick the highest-priority unused topic for a stream.
 
-    Returns a topic dict:
-      {topic_id, title_hint, tags, source, signals}
-    or None when no candidates remain.
+    Framework topics (priority 8-9) are chosen first. Within equal priority,
+    historical quality_score is used as tiebreaker (higher = preferred).
+
+    Returns a topic dict or None when no candidates remain.
     """
     if stream not in STREAMS:
         return None
@@ -125,30 +152,43 @@ def choose(stream: str) -> Optional[dict]:
              if c.get("topic_id") and c["topic_id"] not in used]
     if not cands:
         return None
-    cands.sort(key=lambda c: (-c.get("priority", 0), c.get("topic_id", "")))
+
+    # Fetch quality scores for tiebreaking.
+    qs = _get_quality_scores(stream)
+
+    # Sort: descending priority, then descending quality_score, then topic_id.
+    cands.sort(key=lambda c: (
+        -c.get("priority", 0),
+        -(qs.get(c.get("topic_id", "")) or 0),
+        c.get("topic_id", ""),
+    ))
     top = cands[0]
-    # Source comes from the stream config (the verified contract), not the
-    # candidate, unless the candidate explicitly overrides via source_override.
     source = top.get("source_override") or STREAMS[stream]["source"]
+    # Mark framework domain so the writer can route to blueprint format.
+    domain = top.get("domain", "")
     return {
         "topic_id": top["topic_id"],
         "title_hint": top.get("title_hint", ""),
         "tags": tags_for(stream, top.get("tags", [])),
         "source": source,
         "signals": top.get("signals", []),
+        "domain": domain,
+        "format": "blueprint" if domain else "essay",
     }
 
 
-def record(stream: str, topic_id: str, title: str) -> None:
+def record(stream: str, topic_id: str, title: str,
+           quality_score: Optional[int] = None) -> None:
     """Persist the chosen topic id so future runs cannot re-pick it.
 
-    Called only after a successful publish (record-on-success), mirroring
-    the article track. Defensive: a DB hiccup must never crash the pipeline.
+    Called only after a successful publish (record-on-success).
+    Stores quality_score when provided for routing feedback.
     """
     try:
         db.log_topic_usage(
             topic_id=topic_id, brand=f"blog_{stream}",
             topic_text=(title or "")[:200], platform="blog",
+            quality_score=quality_score,
         )
     except Exception:
         pass
