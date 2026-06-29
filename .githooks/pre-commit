@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# Pre-commit hook for KenseiAgent.
+# Blocks commits when HERMES_PROFILE indicates you should be in the upstream repo.
+# FILE: /home/kensei/repos/KenseiAgent/.githooks/pre-commit
+
+set -euo pipefail
+
+# Read current profile
+PROFILE="${HERMES_PROFILE:-}"
+if [[ -z "$PROFILE" && -f /home/kensei/.hermes/profile ]]; then
+    PROFILE=$(cat /home/kensei/.hermes/profile)
+fi
+
+# Profiles that mean "you should be in upstream, not KenseiAgent"
+FORBIDDEN_PROFILES=("moss" "upstream")
+
+for fp in "${FORBIDDEN_PROFILES[@]}"; do
+    if [[ "$PROFILE" == "$fp" ]]; then
+        cat >&2 <<-EOF
+❌ COMMIT BLOCKED: Profile '$PROFILE' is active.
+   You are in /home/kensei/repos/KenseiAgent (custom fork)
+   But profile $PROFILE means you're working on upstream PRs.
+
+   Switch to the correct profile or set HERMES_PROFILE=default:
+
+     echo "default" > /home/kensei/.hermes/profile
+     # or: export HERMES_PROFILE=default
+
+   If this commit IS meant for KenseiAgent, override with:
+     git commit --no-verify
+EOF
+        exit 1
+    fi
+done
+
+# Also check direct: is there an upstream venv entry in path that shouldn't be?
+exit 0

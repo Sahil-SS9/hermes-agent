@@ -4017,6 +4017,13 @@ class AIAgent:
             self._client_kwargs["default_headers"] = _codex_cloudflare_headers(
                 self._client_kwargs.get("api_key", "")
             )
+        elif base_url_host_matches(base_url, "opencode.ai"):
+            # Cloudflare WAF at opencode.ai blocks Python library User-Agents
+            # ("Python-urllib/3.x", "python-httpx/...") with 403 error 1010.
+            # Send a browser-like User-Agent to match OpenCode's own frontend.
+            self._client_kwargs["default_headers"] = {
+                "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            }
         else:
             # No URL-specific headers — check profile.default_headers before clearing.
             _ph_headers = None

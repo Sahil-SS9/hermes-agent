@@ -135,6 +135,9 @@ async def new_tor_ip(timeout=15.0) -> bool:
 
 async def tunnel(client_r, client_w, target_host, target_port, use_tor):
     remote = await (socks5_connect(target_host, target_port) if use_tor else direct_connect(target_host, target_port))
+    if remote is None and use_tor:
+        log.warning("Tor unavailable for %s:%s — falling back to direct", target_host, target_port)
+        remote = await direct_connect(target_host, target_port)
     if remote is None:
         client_w.write(b"HTTP/1.1 502 Bad Gateway\r\n\r\n"); await client_w.drain(); return
     remote_r, remote_w = remote
@@ -158,6 +161,9 @@ async def tunnel(client_r, client_w, target_host, target_port, use_tor):
 
 async def handle_http(client_r, client_w, method, path, headers, target_host, target_port, use_tor):
     remote = await (socks5_connect(target_host, target_port) if use_tor else direct_connect(target_host, target_port))
+    if remote is None and use_tor:
+        log.warning("Tor unavailable for %s:%s — falling back to direct", target_host, target_port)
+        remote = await direct_connect(target_host, target_port)
     if remote is None:
         client_w.write(b"HTTP/1.1 502 Bad Gateway\r\n\r\n"); await client_w.drain(); return
     remote_r, remote_w = remote
