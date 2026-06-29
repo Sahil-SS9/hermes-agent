@@ -495,6 +495,9 @@ def _call_llm(system: str, user: str, cfg: dict, timeout: int = 90,
     except ImportError:
         return None
     headers = {"Content-Type": "application/json"}
+    # OpenCode.ai and some other providers use Cloudflare which blocks
+    # Python's default User-Agent. Use a browser-like UA to avoid 403/1010.
+    headers["User-Agent"] = "Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
     if cfg.get("key"):
         headers["Authorization"] = f"Bearer {cfg['key']}"
     # run_daily.sh sources ~/.hermes/.env with `set -a`, which exports a Privoxy
@@ -524,6 +527,10 @@ def _call_llm(system: str, user: str, cfg: dict, timeout: int = 90,
             print(f"[llm_generate] LLM HTTP {r.status_code}: {r.text[:160]}", file=sys.stderr)
             return None
         text = (r.json().get("choices") or [{}])[0].get("message", {}).get("content", "") or ""
+        # Reasoning models (deepseek-v4-flash etc.) put the answer in
+        # `reasoning_content` when `content` is empty. Fallback to that.
+        if not text.strip():
+            text = (r.json().get("choices") or [{}])[0].get("message", {}).get("reasoning_content", "") or ""
         # Some models inline their reasoning as <think> blocks in content.
         text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
         return text.strip() or None
