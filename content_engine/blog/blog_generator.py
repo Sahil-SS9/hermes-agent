@@ -277,6 +277,74 @@ def build_blueprint_prompt(stream: str, plan: dict, context_blob: str,
     return {"system": system, "user": user}
 
 
+def _framework_prompt_builder(stream: str, plan: dict, context_blob: str,
+                                    kb_snippets: list[str],
+                                    wiki_entries: Optional[list[dict]] = None,
+                                    retry_feedback: Optional[str] = None) -> dict:
+    """System + user prompt for original framework generation.
+
+    Framework posts are a specialized form of blueprint posts that introduce
+    a named, reusable analytical construct:
+      - Name (2-4 words)
+      - 3-5 levels/stages
+      - Identification criteria for each level
+      - Actionable guidance per level
+      - Mermaid diagram showing the levels
+    """
+    s = STREAMS[stream]
+    voice = s["voice"]
+    word_target = s["word_target"]
+    title_hint = (plan.get("title_hint") or "").strip()
+    signal_lines = "\n".join(
+        f"- {sig.get('summary', '')}"
+        for sig in plan.get("signals", [])
+    ) or "(no signals)"
+
+    rules = [
+        f"- Length: ~{word_target} words.",
+        "- British English. No em-dashes.",
+        "- No AI-isms.",
+        "- Format: FRAMEWORK (original analytical construct).",
+        "- MUST give the framework a memorable 2-4 word NAME.",
+        "- MUST define 3-5 levels/stages of the framework.",
+        "- For each level: identification criteria + actionable guidance.",
+        "- MUST include a Mermaid diagram showing the levels (flowchart TD).",
+        "- MUST include a primitive mapping table: | Level | Criteria | Action |.",
+        "- One `# Title` that includes the framework name.",
+        "- One `## What I'd try next` section at the end.",
+    ]
+    if retry_feedback:
+        rules.append(f"- Previous attempt rejected: {retry_feedback}")
+
+    system = "\n".join([
+        f"You are writing an original framework-generation post for SahilBlog, stream '{stream}'.",
+        "",
+        "## Brand voice", voice,
+        "",
+        "## Framework format rules",
+        "An original framework post introduces a reusable analytical construct.",
+        "It must be:",
+        "1. Named (2-4 word name, memorable).",
+        "2. Structured into 3-5 levels/stages.",
+        "3. Each level has identification criteria and actionable guidance.",
+        "4. Include a Mermaid diagram.",
+        "5. Include a mapping table.",
+        "",
+        _DEPTH_CONTRACT,
+        "",
+        "## Rules", *rules,
+    ])
+
+    user = "\n".join([
+        f"Framework seed: {title_hint}" if title_hint else "",
+        "## Context", context_blob or "(none)",
+        "",
+        "Write the framework post. Name it, define the levels, include the diagram.",
+    ])
+
+    return {"system": system, "user": user}
+
+
 WIKI_HOME = Path(os.path.expanduser("~/wiki"))
 
 
@@ -579,8 +647,18 @@ def write_with_gate(plan: dict, stream: str = "ai",
     # here we handle the case where the retry genuinely passed the deterministic
     # gate but the reviewer LLM returned a second negative verdict.
     if status2 == "ok" and not review_result2["issues"]:
-        # Reviewer returned a score below threshold but no concrete issues;
-        # accept the deterministic gate's verdict.
+        # Reviewer returned a score below threshold but no concrete issues.
+        # Check score: if < 6, log warning (strict mode rejects).
+        retry_score = review_result2.get("score", 5)
+        if retry_score < 6:
+            import logging
+            logging.getLogger("blog_generator").warning(
+                "Retry accepted with low reviewer score %s for '%s' "
+                "(no concrete issues, strict=%s)",
+                retry_score, post_title, strict_review,
+            )
+            if strict_review:
+                return None
         _redact_draft(draft2)
         return draft2
 

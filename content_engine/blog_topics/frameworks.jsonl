@@ -1,0 +1,10 @@
+{"topic_id": "fw-001", "title_hint": "Token-Efficiency Frontier Framework", "tags": ["ai", "evals"], "priority": 9, "domain": "evaluation"}
+{"topic_id": "fw-002", "title_hint": "Context-to-Action Mapping Framework", "tags": ["ai", "context-engineering"], "priority": 8, "domain": "architecture"}
+{"topic_id": "fw-003", "title_hint": "Inference Economics Calculator Framework", "tags": ["ai", "economics"], "priority": 9, "domain": "economics"}
+{"topic_id": "fw-004", "title_hint": "Agent Maturity Model Framework", "tags": ["ai", "agents"], "priority": 8, "domain": "product"}
+{"topic_id": "fw-005", "title_hint": "Retrieval-Augmented Generation Quality Framework", "tags": ["ai", "rag"], "priority": 7, "domain": "evaluation"}
+{"topic_id": "fw-006", "title_hint": "Model Routing Decision Framework", "tags": ["ai", "model-routing"], "priority": 8, "domain": "architecture"}
+{"topic_id": "fw-007", "title_hint": "Prompt Versioning Framework", "tags": ["ai", "prompt-engineering"], "priority": 7, "domain": "product"}
+{"topic_id": "fw-008", "title_hint": "Agent Memory Architecture Framework", "tags": ["ai", "agent-memory"], "priority": 9, "domain": "infrastructure"}
+{"topic_id": "fw-009", "title_hint": "LLM Cost-Per-Token Breakdown Framework", "tags": ["ai", "economics"], "priority": 8, "domain": "economics"}
+{"topic_id": "fw-010", "title_hint": "Evaluation Harness Design Framework", "tags": ["ai", "evals"], "priority": 7, "domain": "evaluation"}

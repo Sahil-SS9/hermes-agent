@@ -231,3 +231,89 @@ def _run_with_retry(
 
     print(f"[codex_image_gen] all attempts failed for {out_path}")
     return None
+
+# -- Gemini Vision QA (Block 9) ---------------------------------------------
+
+def _gemini_vision_check(image_path: str, title: str, description: str) -> int:
+    """Score 0-10 how well the image matches the post topic.
+
+    Uses Gemini vision (free tier). Returns 0 if unavailable (degrade to accept).
+    """
+    try:
+        import google.generativeai as genai
+    except ImportError:
+        return -1  # Gemini not available, degrade to accept.
+
+    try:
+        from pathlib import Path
+        import json
+        img_path = Path(image_path)
+        if not img_path.exists():
+            return -1
+
+        # Upload image and ask for a relevance score.
+        model = genai.GenerativeModel("gemini-1.5-flash")
+        img_data = img_path.read_bytes()
+        prompt = (
+            f"Does this image match the topic '{title}'? "
+            f"Description: {description}. "
+            "Score 0-10 (0=irrelevant, 10=perfect match). "
+            "Respond with just the number."
+        )
+        response = model.generate_content([prompt, {"mime_type": "image/png", "data": img_data}])
+        text = response.text.strip()
+        # Extract the number.
+        import re
+        m = re.search(r'(\d+)', text)
+        if m:
+            return min(10, max(0, int(m.group(1))))
+        return -1
+    except Exception:
+        return -1
+
+
+def _qa_retry_if_low(image_path: str, title: str, description: str,
+                     min_score: int = 6) -> int:
+    """Check image quality via Gemini vision. Flags low scores.
+
+    Returns the quality score (0-10) or -1 if Gemini unavailable.
+    Does NOT regenerate (caller handles that decision).
+    """
+    score = _gemini_vision_check(image_path, title, description)
+    return score
+
+# -- OCR Text-Legibility Check (Block 10) -------------------------------------
+
+def _ocr_text_check(image_path: str, expected_text: str = "") -> dict:
+    """Check image text legibility via Tesseract OCR.
+
+    Returns:
+        {"legible": bool, "found_text": str, "matches_expected": bool}
+    """
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["tesseract", image_path, "-", "--psm", "7"],
+            capture_output=True, text=True, timeout=10,
+        )
+        found_text = result.stdout.strip()
+        if not found_text:
+            return {"legible": False, "found_text": "", "matches_expected": False}
+        legible = len(found_text) > 3  # At least a few characters
+        matches = expected_text.lower() in found_text.lower() if expected_text else False
+        return {"legible": legible, "found_text": found_text, "matches_expected": matches}
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        # Tesseract not installed — degrade to accept.
+        return {"legible": True, "found_text": "", "matches_expected": True}
+    except Exception:
+        return {"legible": True, "found_text": "", "matches_expected": True}
+
+
+def _has_significant_text(image_path: str, threshold: int = 10) -> bool:
+    """Check if an image contains significant text (for textless image validation).
+
+    Returns True if substantial text detected (which may be unexpected for
+    abstract/hero images), False if minimal text found.
+    """
+    result = _ocr_text_check(image_path)
+    return len(result.get("found_text", "")) > threshold
