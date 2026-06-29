@@ -180,7 +180,7 @@
 - [ ] Full test suite passes
 - [ ] Merge to main
 
-**Status:** NOT STARTED
+**Status:** COMPLETE — merged 29/06/26
 
 ---
 
@@ -387,7 +387,7 @@ Block 3 (Failed-Image Handling)                  Block 4 (Source Grounding)
 | 3: Failed-Image Handling | G | G | G | Merged 29/06/26 — 353 tests, pnpm build pass |
 | 4: Source Grounding + Links | G | G | G | Merged 29/06/26 — 371 tests, pnpm build pass |
 | 5: Company Case Studies | G | G | G | Merged 29/06/26 — 380 tests, pnpm build pass |
-| 6: Blueprint Format + Mermaid | — | — | — | |
+| 6: Blueprint Format + Mermaid | G | G | G | Merged 29/06/26 — 397 tests, pnpm build pass |
 | 7: Original Frameworks | — | — | — | |
 | 8: Retry Threshold + QC | — | — | — | |
 | 9: Gemini Vision QA | — | — | — | |
