@@ -138,3 +138,69 @@ def adhoc_check(draft: dict, stream: str = "ai") -> tuple[str, list[str]]:
 
     status = "ok" if not issues else "fail"
     return status, issues
+
+# -- Company case study gate (Block 5) ----------------------------------------
+
+# Known AI/tech company names for regex matching.
+_KNOWN_COMPANIES = (
+    "OpenAI", "Anthropic", "Google", "DeepMind", "Meta", "Microsoft",
+    "Nvidia", "Mistral", "Hugging Face", "Stability AI", "Cohere",
+    "Apple", "Amazon", "AWS", "ByteDance", "Alibaba", "Tencent",
+    "Baidu", "Inflection", "Adept", "Character.AI", "Perplexity",
+    "Databricks", "Scale AI", "Replicate", "Together AI", "Anyscale",
+    "Weights & Biases", "HuggingFace", "EleutherAI", "Meta AI",
+    "ai[ -]?21", "AI21", "Llama", "GPT", "Claude", "Gemini",
+    "Mistral", "Mixtral",
+)
+
+# Pattern for known company names (word-boundary, case-sensitive).
+_COMPANY_RE = re.compile(
+    r"\b(?:" + "|".join(_KNOWN_COMPANIES) + r")\b"
+)
+
+# Pattern for specific numbers: digits, $, %, GPU counts, parameter counts.
+_NUMBER_RE = re.compile(
+    r"(?:"
+    r"\$\s?\d[\d,.]*\s?(?:million|billion|trillion|M|B|K)?"
+    r"|£\s?\d[\d,.]*\s?(?:million|billion|M|K)?"
+    r"|\d+\.\d+\s?(?:million|billion|trillion|thousand)"
+    r"|\d+\s?(?:million|billion|trillion|thousand)"
+    r"|\d+(?:\.\d+)?\s?(?:%|percent)"
+    r"|\d+\s?(?:GPU|TPU|hour|day|node|parameter|param|token)\w*"
+    r")"
+)
+
+
+def case_study_check(body: str, stream: str = "ai",
+                     is_opinion: bool = False) -> tuple[str, list[str]]:
+    """Check that AI posts include a named company/product with a specific number.
+
+    - AI stream: soft block (hard fail) if missing company AND/OR number.
+    - PM/builder: warning only (status ok, issues returned).
+    - Opinion/exempt posts: skip entirely.
+
+    Returns (status, issues):
+      status: "ok" | "fail"  (PM/builder always "ok" with warnings)
+      issues: list of failure/warning strings
+    """
+    if is_opinion:
+        return "ok", []
+
+    has_company = bool(_COMPANY_RE.search(body))
+    has_number = bool(_NUMBER_RE.search(body))
+
+    issues: list[str] = []
+
+    if not has_company:
+        issues.append("No named company/product found")
+    if not has_number:
+        issues.append("No specific number found (e.g. $63M, 1.8T params, 47%)")
+
+    if stream == "ai":
+        # Hard gate: both must be present.
+        status = "ok" if not issues else "fail"
+    else:
+        # PM/builder: warning only, never block.
+        status = "ok"
+
+    return status, issues

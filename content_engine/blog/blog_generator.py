@@ -28,6 +28,7 @@ class ReviewUnavailable(RuntimeError):
 from blog.blog_streams import STREAMS, tags_for
 from blog.blog_slug import slugify
 from blog.source_grounding import ground_post
+from blog.blog_gate import case_study_check as _case_study_check
 
 
 def enrich_signal(sig: dict) -> str:
@@ -454,6 +455,14 @@ def write_with_gate(plan: dict, stream: str = "ai",
 
     # --- First attempt: deterministic gate + editorial reviewer ---
     status, gate_issues = gate_check(draft)
+    # Case study gate: AI stream must have named company + number.
+    cs_status, cs_issues = _case_study_check(
+        draft.get("body_md", ""), stream=stream
+    )
+    if cs_issues:
+        gate_issues.extend(cs_issues)
+        if cs_status == "fail":
+            status = "fail"
     review_result = _review(draft, stream)
     _check_strict(review_result, post_title)
     review_issues = review_result["issues"] if not review_result["passed"] else []
