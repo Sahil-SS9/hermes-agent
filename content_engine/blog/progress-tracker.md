@@ -202,7 +202,7 @@
 - [ ] Full test suite passes
 - [ ] Merge to main
 
-**Status:** NOT STARTED
+**Status:** COMPLETE — merged 29/06/26
 
 ---
 
@@ -229,7 +229,7 @@
 - [ ] Full test suite passes
 - [ ] Merge to main
 
-**Status:** NOT STARTED
+**Status:** COMPLETE — merged 29/06/26
 
 ---
 
@@ -250,7 +250,7 @@
 - [ ] Full test suite passes
 - [ ] Merge to main
 
-**Status:** NOT STARTED
+**Status:** COMPLETE — merged 29/06/26
 
 ---
 
@@ -270,7 +270,7 @@
 - [ ] Full test suite passes
 - [ ] Merge to main
 
-**Status:** NOT STARTED
+**Status:** COMPLETE — merged 29/06/26
 
 ---
 
@@ -290,7 +290,7 @@
 - [ ] Full test suite passes
 - [ ] Merge to main
 
-**Status:** NOT STARTED
+**Status:** COMPLETE — merged 29/06/26
 
 ---
 
@@ -311,7 +311,7 @@
 - [ ] Verify word counts unchanged (no content loss)
 - [ ] Commit normalised files
 
-**Status:** NOT STARTED
+**Status:** COMPLETE — merged 29/06/26
 
 ---
 
@@ -391,9 +391,9 @@ Block 3 (Failed-Image Handling)                  Block 4 (Source Grounding)
 | 7: Original Frameworks | — | — | — | |
 | 8: Retry Threshold + QC | — | — | — | |
 | 9: Gemini Vision QA | — | — | — | |
-| 10: OCR Text Check | — | — | — | |
+| 10: OCR Text Check | G | G | G | Merged 29/06/26 — 425 tests |
 | 11: Source-Label Audit Cron | — | — | — | |
-| 12: Format Normalisation | — | — | — | |
+| 12: Format Normalisation | G | G | G | Merged 29/06/26 — 425 tests |
 
 **R** = Blocked (dependency not met or issue found)
 **A** = At Risk (approaching deadline or uncovered issue)
