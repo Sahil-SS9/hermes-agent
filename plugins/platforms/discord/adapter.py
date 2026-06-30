@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import struct
 import subprocess
 import tempfile
@@ -1194,6 +1195,17 @@ class DiscordAdapter(BasePlatformAdapter):
                 )
 
             @self._client.event
+            async def on_interaction(interaction: discord.Interaction):
+                custom_id = ""
+                try:
+                    data = getattr(interaction, "data", None) or {}
+                    custom_id = str(data.get("custom_id") or "")
+                except Exception:
+                    custom_id = ""
+                if custom_id.startswith("blog_approval:"):
+                    await adapter_self._handle_blog_approval_component(interaction, custom_id)
+
+            @self._client.event
             async def on_message(message: DiscordMessage):
                 # Block until _resolve_allowed_usernames has swapped
                 # any raw usernames in DISCORD_ALLOWED_USERS for numeric
@@ -1902,6 +1914,83 @@ class DiscordAdapter(BasePlatformAdapter):
             elif outcome == ProcessingOutcome.FAILURE:
                 await self._add_reaction(message, "❌")
 
+    @staticmethod
+    def _resolve_blog_approval_action_blocking(slug: str, action: str) -> dict:
+        import sys
+        engine = _Path(os.getenv(
+            "BLOG_CONTENT_ENGINE_DIR",
+            "/home/kensei/repos/KenseiAgent/content_engine",
+        ))
+        if str(engine) not in sys.path:
+            sys.path.insert(0, str(engine))
+        from blog.blog_approval import handle_discord_command
+        return handle_discord_command(f"!{action} {slug}")
+
+    async def _handle_blog_approval_component(
+        self, interaction: discord.Interaction, custom_id: str,
+    ) -> None:
+        """Handle persistent raw Discord blog approval components from cron sends."""
+        parts = custom_id.split(":", 2)
+        if len(parts) != 3:
+            await interaction.response.send_message("Malformed blog approval action.", ephemeral=True)
+            return
+        _, action, slug = parts
+        if action not in {"approve", "amend", "reject"} or not slug:
+            await interaction.response.send_message("Unknown blog approval action.", ephemeral=True)
+            return
+        if not _component_check_auth(interaction, self._allowed_user_ids, self._allowed_role_ids):
+            await interaction.response.send_message(
+                "You're not authorised to answer this prompt~", ephemeral=True,
+            )
+            return
+
+        label = {"approve": "Approved", "amend": "Amend requested", "reject": "Rejected"}[action]
+        color = {
+            "approve": discord.Color.green(),
+            "amend": discord.Color.blue(),
+            "reject": discord.Color.red(),
+        }[action]
+        embed = interaction.message.embeds[0] if interaction.message and interaction.message.embeds else None
+        if embed:
+            embed.color = color
+            embed.set_footer(text=f"{label} by {interaction.user.display_name}")
+        try:
+            await interaction.response.edit_message(embed=embed, view=None)
+        except Exception:
+            try:
+                await interaction.response.defer(ephemeral=True)
+            except Exception:
+                pass
+
+        try:
+            result = await asyncio.to_thread(
+                self._resolve_blog_approval_action_blocking, slug, action,
+            )
+        except Exception as exc:
+            logger.error("blog approval component failed: %s", exc, exc_info=True)
+            await interaction.followup.send(f"Blog approval `{action}` failed: {exc}", ephemeral=True)
+            return
+        await interaction.followup.send(result.get("message") or f"{label}: `{slug}`")
+
+    def _blog_approval_view_from_content(self, content: str):
+        """Return a BlogApprovalView when a sent message is a SahilBlog approval card."""
+        if not DISCORD_AVAILABLE or "[Blog Approval Request]" not in str(content or ""):
+            return None
+        slug_match = re.search(r"\*\*Slug:\*\*\s*`([^`]+)`", content)
+        if not slug_match:
+            return None
+        slug = slug_match.group(1).strip()
+        if not slug:
+            return None
+        try:
+            return BlogApprovalView(
+                slug=slug,
+                allowed_user_ids=self._allowed_user_ids,
+                allowed_role_ids=self._allowed_role_ids,
+            )
+        except NameError:
+            return None
+
     async def send(
         self,
         chat_id: str,
@@ -1949,6 +2038,7 @@ class DiscordAdapter(BasePlatformAdapter):
             # Format and split message if needed
             formatted = self.format_message(content)
             chunks = self.truncate_message(formatted, self.MAX_MESSAGE_LENGTH)
+            blog_approval_view = self._blog_approval_view_from_content(content)
 
             message_ids = []
             reference = None
@@ -1968,11 +2058,16 @@ class DiscordAdapter(BasePlatformAdapter):
                     chunk_reference = reference
                 else:  # "first" (default) or "off"
                     chunk_reference = reference if i == 0 else None
+                view = blog_approval_view if i == 0 else None
                 try:
                     msg = await channel.send(
                         content=chunk,
                         reference=chunk_reference,
+                        view=view,
+                        allowed_mentions=discord.AllowedMentions.none() if view else None,
                     )
+                    if view:
+                        view._message = msg
                 except Exception as e:
                     err_text = str(e)
                     if (
@@ -1994,7 +2089,11 @@ class DiscordAdapter(BasePlatformAdapter):
                         msg = await channel.send(
                             content=chunk,
                             reference=None,
+                            view=view,
+                            allowed_mentions=discord.AllowedMentions.none() if view else None,
                         )
+                        if view:
+                            view._message = msg
                     else:
                         raise
                 message_ids.append(str(msg.id))
@@ -4166,6 +4265,23 @@ class DiscordAdapter(BasePlatformAdapter):
         ):
             await self._handle_blog_topic_slash(interaction, topic, stream)
 
+        @tree.command(name="blog-idea", description="Queue a blog idea and trigger an immediate detached blog run")
+        @discord.app_commands.describe(
+            idea="Blog idea, source link, or prompt. Leave empty to pull recent chat history",
+            stream="Target stream: ai, pm, or builder (default: ai)",
+        )
+        @discord.app_commands.choices(stream=[
+            discord.app_commands.Choice(name="ai", value="ai"),
+            discord.app_commands.Choice(name="pm", value="pm"),
+            discord.app_commands.Choice(name="builder", value="builder"),
+        ])
+        async def slash_blog_idea(
+            interaction: discord.Interaction,
+            idea: str = "",
+            stream: str = "ai",
+        ):
+            await self._handle_blog_idea_slash(interaction, idea, stream)
+
         # ── Auto-register any gateway-available commands not yet on the tree ──
         # This ensures new commands added to COMMAND_REGISTRY in
         # hermes_cli/commands.py automatically appear as Discord slash
@@ -4659,7 +4775,93 @@ class DiscordAdapter(BasePlatformAdapter):
             logger.debug("[Discord] channel history pull for blog-topic failed: %s", e)
             return ""
 
-    def _write_blog_topic(self, stream: str, topic: str, interaction: discord.Interaction) -> bool:
+    async def _handle_blog_idea_slash(
+        self,
+        interaction: discord.Interaction,
+        idea: str,
+        stream: str,
+    ) -> None:
+        """Handle /blog-idea: queue an idea and launch one detached stream run."""
+        if not await self._check_slash_authorization(interaction, "/blog-idea"):
+            return
+        await interaction.response.defer(ephemeral=True)
+
+        try:
+            if not idea.strip():
+                idea = await self._collect_channel_topic_text(interaction)
+                if not idea:
+                    await interaction.edit_original_response(
+                        content="No idea provided and no recent channel history found."
+                    )
+                    return
+
+            written = self._write_blog_topic(stream, idea, interaction, priority=10)
+            if not written:
+                await interaction.edit_original_response(
+                    content=f"Failed to write idea to the {stream} queue. Check logs."
+                )
+                return
+
+            launch = self._launch_blog_idea_run(stream)
+            preview = idea[:200] + ("..." if len(idea) > 200 else "")
+            if launch.get("ok"):
+                await interaction.edit_original_response(
+                    content=(
+                        f"Blog idea queued for stream `{stream}` and generation started.\n"
+                        f"Log: `{launch.get('log')}`\n"
+                        f"```\n{preview}\n```"
+                    )
+                )
+            else:
+                await interaction.edit_original_response(
+                    content=(
+                        f"Blog idea queued for stream `{stream}`, but launch failed: "
+                        f"{launch.get('error')}\n```\n{preview}\n```"
+                    )
+                )
+        except Exception as e:
+            logger.warning("[Discord] /blog-idea handler error: %s", e, exc_info=True)
+            try:
+                await interaction.edit_original_response(
+                    content=f"Blog idea failed: {e}"
+                )
+            except Exception:
+                pass
+
+    def _launch_blog_idea_run(self, stream: str) -> dict:
+        """Start a detached one-stream blog pipeline run and return log info."""
+        from pathlib import Path
+        import subprocess
+        import time
+
+        root = Path(os.getenv(
+            "BLOG_CONTENT_ENGINE_DIR",
+            "/home/kensei/repos/KenseiAgent/content_engine",
+        ))
+        if stream not in {"ai", "pm", "builder"}:
+            stream = "ai"
+        log_dir = root / "output" / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = log_dir / f"blog-idea-{stream}-{time.strftime('%Y%m%d-%H%M%S')}.log"
+        cmd = (
+            "set -a; . ~/.hermes/.env 2>/dev/null || true; set +a; "
+            f"cd {shlex.quote(str(root))} && "
+            f"PYTHONPATH=. ../.venv/bin/python -m blog.blog_pipeline --stream {shlex.quote(stream)}"
+        )
+        try:
+            with open(log_path, "ab") as log_fh:
+                proc = subprocess.Popen(
+                    ["bash", "-lc", cmd],
+                    stdout=log_fh,
+                    stderr=subprocess.STDOUT,
+                    stdin=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+            return {"ok": True, "pid": proc.pid, "log": str(log_path)}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc), "log": str(log_path)}
+
+    def _write_blog_topic(self, stream: str, topic: str, interaction: discord.Interaction, priority: int = 8) -> bool:
         """Append a topic to the content engine's manual queue file.
 
         Returns True on success, False on failure. The topic is written as a
@@ -4686,7 +4888,7 @@ class DiscordAdapter(BasePlatformAdapter):
                 "topic_id": topic_id,
                 "title_hint": topic.strip()[:200],
                 "tags": [],
-                "priority": 8,
+                "priority": int(priority),
             }
             with open(queue_path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(obj) + "\n")
@@ -6499,7 +6701,7 @@ def _define_discord_view_classes() -> None:
     undefined, causing NameError on the first button interaction.
     """
     global ExecApprovalView, SlashConfirmView, UpdatePromptView, ModelPickerView, ClarifyChoiceView
-    global ProfileGateView
+    global ProfileGateView, BlogApprovalView
 
     class ExecApprovalView(discord.ui.View):
         """
@@ -6723,6 +6925,108 @@ def _define_discord_view_classes() -> None:
                     if embed:
                         embed.color = discord.Color.greyple()
                         embed.set_footer(text="⏱ Prompt expired — no action taken")
+                    await msg.edit(embed=embed, view=self)
+                except Exception:
+                    pass
+
+    class BlogApprovalView(discord.ui.View):
+        """Approve / Amend / Reject buttons for SahilBlog approval cards."""
+
+        def __init__(
+            self,
+            slug: str,
+            allowed_user_ids: set,
+            allowed_role_ids: Optional[set] = None,
+        ):
+            super().__init__(timeout=86400)
+            self.slug = slug
+            self.allowed_user_ids = allowed_user_ids
+            self.allowed_role_ids = allowed_role_ids or set()
+            self.resolved = False
+
+        def _check_auth(self, interaction: discord.Interaction) -> bool:
+            return _component_check_auth(
+                interaction, self.allowed_user_ids, self.allowed_role_ids,
+            )
+
+        @staticmethod
+        def _resolve_blocking(slug: str, action: str) -> dict:
+            import os
+            import sys
+            from pathlib import Path
+
+            engine = Path(os.getenv(
+                "BLOG_CONTENT_ENGINE_DIR",
+                "/home/kensei/repos/KenseiAgent/content_engine",
+            ))
+            if str(engine) not in sys.path:
+                sys.path.insert(0, str(engine))
+            from blog.blog_approval import handle_discord_command
+            return handle_discord_command(f"!{action} {slug}")
+
+        async def _resolve(
+            self, interaction: discord.Interaction, action: str,
+            color: discord.Color, label: str,
+        ):
+            if self.resolved:
+                await interaction.response.send_message(
+                    "This blog approval has already been resolved~", ephemeral=True,
+                )
+                return
+            if not self._check_auth(interaction):
+                await interaction.response.send_message(
+                    "You're not authorised to answer this prompt~", ephemeral=True,
+                )
+                return
+
+            self.resolved = True
+            for child in self.children:
+                child.disabled = True
+            embed = interaction.message.embeds[0] if interaction.message.embeds else None
+            if embed:
+                embed.color = color
+                embed.set_footer(text=f"{label} by {interaction.user.display_name}")
+            await interaction.response.edit_message(embed=embed, view=self)
+
+            try:
+                result = await asyncio.to_thread(self._resolve_blocking, self.slug, action)
+            except Exception as exc:
+                logger.error("blog approval button failed: %s", exc, exc_info=True)
+                await interaction.followup.send(f"Blog approval `{action}` failed: {exc}")
+                return
+
+            await interaction.followup.send(result.get("message") or f"{label}: `{self.slug}`")
+
+        @discord.ui.button(label="Approve", style=discord.ButtonStyle.green, emoji="✅")
+        async def approve(
+            self, interaction: discord.Interaction, button: discord.ui.Button,
+        ):
+            await self._resolve(interaction, "approve", discord.Color.green(), "Approved")
+
+        @discord.ui.button(label="Amend", style=discord.ButtonStyle.grey, emoji="✏️")
+        async def amend(
+            self, interaction: discord.Interaction, button: discord.ui.Button,
+        ):
+            await self._resolve(interaction, "amend", discord.Color.blue(), "Amend requested")
+
+        @discord.ui.button(label="Reject", style=discord.ButtonStyle.red, emoji="❌")
+        async def reject(
+            self, interaction: discord.Interaction, button: discord.ui.Button,
+        ):
+            await self._resolve(interaction, "reject", discord.Color.red(), "Rejected")
+
+        async def on_timeout(self):
+            for child in self.children:
+                child.disabled = True
+            msg = getattr(self, "_message", None)
+            if msg:
+                try:
+                    embed = msg.embeds[0] if msg.embeds else None
+                    if embed:
+                        embed.color = discord.Color.greyple()
+                        embed.set_footer(
+                            text="⏱ Prompt expired; use !approve/!amend/!reject if still needed"
+                        )
                     await msg.edit(embed=embed, view=self)
                 except Exception:
                     pass
@@ -7521,6 +7825,31 @@ def _probe_is_forum_cached(chat_id: str) -> Optional[bool]:
     return _DISCORD_CHANNEL_TYPE_PROBE_CACHE.get(str(chat_id))
 
 
+def _blog_approval_slug_from_message(message: str) -> Optional[str]:
+    if "[Blog Approval Request]" not in str(message or ""):
+        return None
+    m = re.search(r"\*\*Slug:\*\*\s*`([^`]+)`", message)
+    if not m:
+        return None
+    slug = m.group(1).strip()
+    return slug or None
+
+
+def _blog_approval_components_for_message(message: str) -> Optional[list]:
+    slug = _blog_approval_slug_from_message(message)
+    if not slug:
+        return None
+    safe_slug = slug[:80]
+    return [{
+        "type": 1,
+        "components": [
+            {"type": 2, "style": 3, "label": "Approve", "emoji": {"name": "✅"}, "custom_id": f"blog_approval:approve:{safe_slug}"},
+            {"type": 2, "style": 2, "label": "Amend", "emoji": {"name": "✏️"}, "custom_id": f"blog_approval:amend:{safe_slug}"},
+            {"type": 2, "style": 4, "label": "Reject", "emoji": {"name": "❌"}, "custom_id": f"blog_approval:reject:{safe_slug}"},
+        ],
+    }]
+
+
 def _derive_forum_thread_name(message: str) -> str:
     """Derive a thread name from the first line of the message, capped at 100 chars."""
     first_line = message.strip().split("\n", 1)[0].strip()
@@ -7653,6 +7982,9 @@ async def _standalone_send(
                             for idx, path in enumerate(valid_media)
                         ]
                         starter_message = {"content": message, "attachments": attachments_meta}
+                        blog_components = _blog_approval_components_for_message(message)
+                        if blog_components:
+                            starter_message["components"] = blog_components
                         payload_json = json.dumps({"name": thread_name, "message": starter_message})
 
                         form = aiohttp.FormData()
@@ -7681,7 +8013,10 @@ async def _standalone_send(
                             headers=json_headers,
                             json={
                                 "name": thread_name,
-                                "message": {"content": message},
+                                "message": {
+                                    "content": message,
+                                    **({"components": _blog_approval_components_for_message(message)} if _blog_approval_components_for_message(message) else {}),
+                                },
                             },
                             **_req_kw,
                         ) as resp:
@@ -7708,7 +8043,11 @@ async def _standalone_send(
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30), **_sess_kw) as session:
             # Send text message (skip if empty and media is present)
             if message.strip() or not media_files:
-                async with session.post(url, headers=json_headers, json={"content": message}, **_req_kw) as resp:
+                payload = {"content": message}
+                blog_components = _blog_approval_components_for_message(message)
+                if blog_components:
+                    payload["components"] = blog_components
+                async with session.post(url, headers=json_headers, json=payload, **_req_kw) as resp:
                     if resp.status not in {200, 201}:
                         body = await resp.text()
                         return {"error": f"Discord API error ({resp.status}): {body}"}
