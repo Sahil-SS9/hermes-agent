@@ -1,0 +1,13 @@
+# Builder's Log topic backlog — Sahil's own systems, told as practitioner concept + takeaway.
+# Voice: lead with the useful idea/problem, explain what it solves, guard the secret sauce
+# (share the concept, never the proprietary internals). One JSON object per line.
+{"topic_id": "builder-four-layer-memory-stack", "title_hint": "The four-layer memory stack: why one store was never enough (Mnemosyne, GitNexus, GBrain, LLM-WIKI)", "tags": ["agent-memory", "architecture", "kensei"], "priority": 9}
+{"topic_id": "builder-agent-profiles-lead-sub", "title_hint": "Lead and sub-team agent profiles: structuring an agent org that delegates without losing the plot", "tags": ["agents", "orchestration", "kensei"], "priority": 9}
+{"topic_id": "builder-cloud-to-local-rig", "title_hint": "From cloud API to a local rig: the cost, fine-tuning and long-term-investment case for owning your inference", "tags": ["local-models", "fine-tuning", "cost"], "priority": 9}
+{"topic_id": "builder-kensei-intake-workflow", "title_hint": "The intake workflow: how a single front door turns scattered ideas into shippable agent tasks", "tags": ["workflow", "orchestration", "kensei"], "priority": 9}
+{"topic_id": "builder-gitradar-self-improvement", "title_hint": "GitRadar: wiring a self-improvement loop that learns from your own merged work", "tags": ["self-improvement", "tooling", "github"], "priority": 9}
+{"topic_id": "builder-hermaguard", "title_hint": "HermaGuard: the guardrail layer that keeps an autonomous agent from doing the wrong thing", "tags": ["safety", "guardrails", "agents"], "priority": 9}
+{"topic_id": "builder-simplify-swarm", "title_hint": "Simplify-Swarm: risk-tiered code simplification without deleting the load-bearing wall", "tags": ["refactoring", "agents", "tooling"], "priority": 9}
+{"topic_id": "builder-prompt-optimizer", "title_hint": "A multichannel prompt optimiser: treating prompts as versioned assets, not magic strings", "tags": ["prompting", "tooling", "evaluation"], "priority": 9}
+{"topic_id": "builder-memlock", "title_hint": "MemLock: the concept behind guarding a memory store from concurrent corruption", "tags": ["agent-memory", "reliability", "concurrency"], "priority": 9}
+{"topic_id": "builder-toolaria-versions-research", "title_hint": "Toolaria: a running log of tool versions and the research that prompted each change", "tags": ["tooling", "research", "kensei"], "priority": 9}

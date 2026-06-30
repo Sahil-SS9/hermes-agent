@@ -64,7 +64,7 @@ def test_run_stream_happy_path(monkeypatch, tmp_path):
     monkeypatch.setattr(bpl, "illustrate", lambda d, out_dir=None, max_sections=None: {"hero_path": "/tmp/fake_hero.png", "section_paths": {}})
 
     # Mock assembler.
-    def fake_assemble(d, imgs, repo=None):
+    def fake_assemble(d, imgs, repo=None, pub_date=None):
         p = Path(repo) / "src/content/blog" / f"{d['slug']}.mdx"
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text("---\ntitle: \"t\"\n---\nbody")
@@ -137,7 +137,7 @@ def test_run_all_runs_all_streams(monkeypatch, tmp_path):
     monkeypatch.setattr(bpl, "choose", lambda stream: plan)
     monkeypatch.setattr(bpl, "write_with_gate", lambda p, stream: _DRAFT)
     monkeypatch.setattr(bpl, "illustrate", lambda d, out_dir=None, max_sections=None: {"hero_path": "/tmp/fake_hero.png", "section_paths": {}})
-    def fake_assemble(d, imgs, repo=None):
+    def fake_assemble(d, imgs, repo=None, pub_date=None):
         p = Path(repo) / "src/content/blog" / f"{d['slug']}.mdx"
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text("---\ntitle: \"t\"\n---\nbody")
@@ -175,7 +175,7 @@ def test_run_stream_graceful_when_reviewer_degraded(monkeypatch, tmp_path):
     monkeypatch.setattr(bpl, "illustrate",
                         lambda d, out_dir=None, max_sections=None:
                         {"hero_path": "/tmp/fake_hero.png", "section_paths": {}})
-    def fake_assemble(d, imgs, repo=None):
+    def fake_assemble(d, imgs, repo=None, pub_date=None):
         p = Path(repo) / "src/content/blog" / f"{d['slug']}.mdx"
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text("---\ntitle: \"t\"\n---\nbody")
@@ -220,7 +220,7 @@ def test_run_stream_partial_images_proceeds(monkeypatch, tmp_path):
     monkeypatch.setattr(bpl, "illustrate",
                         lambda d, out_dir=None, max_sections=None:
                         {"hero_path": "/tmp/fake_hero.png", "section_paths": {}})
-    def fake_assemble(d, imgs, repo=None):
+    def fake_assemble(d, imgs, repo=None, pub_date=None):
         p = Path(repo) / "src/content/blog" / f"{d['slug']}.mdx"
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text("---\ntitle: \"t\"\n---\nbody")

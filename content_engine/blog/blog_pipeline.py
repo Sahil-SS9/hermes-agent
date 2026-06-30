@@ -147,8 +147,13 @@ def _maybe_request_approval(draft: dict, stream: str, slug: str, mdx_path: str) 
             "Approval request failed for %s (non-blocking): %s", slug, exc)
 
 
-def run_stream(stream: str, repo: Optional[str] = None) -> dict:
-    """Drive one blog post through the pipeline for a single stream."""
+def run_stream(stream: str, repo: Optional[str] = None,
+               pub_date: Optional[str] = None) -> dict:
+    """Drive one blog post through the pipeline for a single stream.
+
+    pub_date (YYYY-MM-DD) backdates the post; defaults to today. Used by the
+    backlog pre-generation driver to scatter dates across a historical window.
+    """
     if not BLOG_ENABLED:
         return {"status": "skipped_disabled", "stream": stream}
 
@@ -190,7 +195,7 @@ def run_stream(stream: str, repo: Optional[str] = None) -> dict:
         }
 
     # 5. Assembler (accept partial imagery — hero or some sections succeeded).
-    mdx_path = assemble(draft, images, repo=repo_path)
+    mdx_path = assemble(draft, images, repo=repo_path, pub_date=pub_date)
 
     # 6. Publisher (stage draft, no push).
     slug = stage_draft(str(mdx_path), repo=repo_path)

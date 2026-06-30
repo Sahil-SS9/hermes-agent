@@ -38,9 +38,10 @@ from typing import Optional
 GITHUB_REPOS = [
     "NousResearch/hermes-agent",
 ]
-# Multiple authors to search for — Sahil's upstream PRs are merged by teknium1
-# on behalf of Sahil-SS9. We try each author and deduplicate results.
-GITHUB_AUTHORS = ["teknium1", "Sahil-SS9"]
+# Sahil's GitHub handle. His upstream PRs are merged by teknium1 under teknium1's
+# authorship, so the daily scan finds his work by searching PR bodies for this
+# handle (the salvage / co-author marker), not by --author. See fetch_merged_prs.
+SAHIL_HANDLE = "Sahil-SS9"
 STATE_FILE = Path(__file__).parent / ".." / "data" / "pr-to-blog-state.json"
 LINKEDIN_DRAFTS_DIR = Path(__file__).parent / ".." / "output" / "linkedin-drafts"
 BUILDER_STREAM = "builder"
@@ -89,26 +90,31 @@ def _gh_exec(args: list[str]) -> dict:
 
 
 def fetch_merged_prs(repo: str, limit: int = 10) -> list[dict]:
-    """Fetch recently merged PRs by the configured author."""
-    all_prs: list[dict] = []
-    for author in GITHUB_AUTHORS:
-        # Try each author (Sahil's upstream PRs are merged by teknium1 on his behalf)
-        prs = _gh_exec([
-            "pr", "list",
-            "--repo", repo,
-            "--author", author,
-            "--state", "merged",
-            "--json", "number,title,body,mergedAt,additions,deletions,files,url",
-            "--limit", str(limit),
-        ])
-        if isinstance(prs, list):
-            all_prs.extend(prs)
-    # Deduplicate by PR number
-    seen = set()
-    unique_prs = []
-    for p in all_prs:
-        if p["number"] not in seen:
-            seen.add(p["number"])
+    """Fetch recently merged PRs that are Sahil's contributions.
+
+    Sahil's upstream work is merged by teknium1 *under teknium1's authorship*,
+    so an author filter cannot find it — and `--author teknium1` would scoop the
+    entire upstream firehose (300+ PRs/week of other people's work). Instead we
+    search merged PRs whose body credits ``Sahil-SS9`` (the salvage / co-author
+    marker carried on his contributions). Specific-PR backfills bypass this via
+    ``fetch_pr_detail``.
+    """
+    prs = _gh_exec([
+        "pr", "list",
+        "--repo", repo,
+        "--state", "merged",
+        "--search", f"{SAHIL_HANDLE} in:body",
+        "--json", "number,title,body,mergedAt,additions,deletions,files,url",
+        "--limit", str(limit),
+    ])
+    if not isinstance(prs, list):
+        return []
+    # Deduplicate by PR number (search can surface a PR more than once).
+    seen: set = set()
+    unique_prs: list[dict] = []
+    for p in prs:
+        if p.get("number") not in seen:
+            seen.add(p.get("number"))
             unique_prs.append(p)
     return unique_prs
 
@@ -208,7 +214,7 @@ def _build_pr_plan(pr: dict, repo: str) -> dict:
     signal = {
         "signal_type": "hermes_pr",
         "summary": f"{title} (+{additions}/-{deletions}, {len(files)} files, {commit_count} commits)",
-        "repo": "KenseiAgent",
+        "repo": repo.split("/")[-1],
         "sha": first_sha,
         "body": body[:1000] if body else "",
         "pr_url": url,
@@ -232,15 +238,34 @@ def _build_pr_plan(pr: dict, repo: str) -> dict:
 
 
 def _pr_title_to_blog_title(pr_title: str) -> str:
-    """Convert a conventional-commit PR title to a blog-ready title.
+    """Turn a conventional-commit PR title into a distinct, blog-ready headline.
+
+    Drops the type(scope) prefix and any trailing salvage ref, then frames the
+    summary by commit type so each post gets a unique, honest title. The old
+    behaviour prepended a blanket 'How I fixed a Hermes Agent bug:' to every
+    post, which collided on near-identical slugs and mislabelled feat/perf work.
 
     'fix(kanban): hold reclaim while the worker is still alive'
-    -> 'How I fixed the kanban dispatcher: hold reclaim while the worker is still alive'
+      -> 'Hold reclaim while the worker is still alive: a kanban fix'
+    'feat(simplify-code): risk-tiered application'
+      -> 'Risk-tiered application: a simplify-code feature'
     """
-    # Strip conventional-commit prefix: fix(x):, feat(x):, chore(x):, docs(x):
     import re
-    cleaned = re.sub(r'^(fix|feat|chore|docs|test|refactor|perf|style|ci|build|revert)(\([^)]+\))?:\s*', '', pr_title)
-    return f"How I fixed a Hermes Agent bug: {cleaned}"
+    m = re.match(
+        r'^(?P<type>fix|feat|chore|docs|test|refactor|perf|style|ci|build|revert)'
+        r'(\((?P<scope>[^)]+)\))?:\s*(?P<rest>.*)$',
+        pr_title.strip(),
+    )
+    if not m:
+        return pr_title.strip().rstrip('.')
+    ctype = m.group('type')
+    scope = (m.group('scope') or '').replace('_', ' ').replace('-', ' ').strip()
+    # Drop a trailing salvage ref like " (#41448)" for a cleaner headline.
+    rest = re.sub(r'\s*\(#\d+\)\s*$', '', m.group('rest').strip()).rstrip('.')
+    summary = (rest[:1].upper() + rest[1:]) if rest else rest
+    area = scope or ctype
+    kind = "feature" if ctype == "feat" else ("speedup" if ctype == "perf" else "fix")
+    return f"{summary}: a {area} {kind}"
 
 
 def generate_blog_post(pr: dict, repo: str, dry_run: bool = False) -> Optional[dict]:
@@ -421,16 +446,20 @@ This is the real build log. Not the polished version. The one where the VPS was 
 
 # ── Main Pipeline ───────────────────────────────────────────────────
 
-def run(dry_run: bool = False, specific_pr: Optional[int] = None) -> dict:
+def run(dry_run: bool = False, specific_pr: Optional[int] = None,
+        source_repo: Optional[str] = None) -> dict:
     """Run the PR-to-blog pipeline.
 
-    Returns a summary dict.
+    source_repo (owner/name) targets a single repo for a specific PR, so
+    cross-repo backfills (e.g. mnemosyne-oss/mnemosyne#265) resolve against the
+    right repo instead of the default hermes-agent list. Returns a summary dict.
     """
     state = _load_state()
     results = {"processed": [], "skipped": [], "failed": []}
 
-    for repo in GITHUB_REPOS:
-        print(f"\n=== Scanning {repo} for merged PRs by {GITHUB_AUTHORS} ===")
+    repos = [source_repo] if source_repo else GITHUB_REPOS
+    for repo in repos:
+        print(f"\n=== Scanning {repo} for merged PRs crediting {SAHIL_HANDLE} ===")
 
         if specific_pr:
             pr = fetch_pr_detail(repo, specific_pr)
@@ -516,9 +545,12 @@ def main():
                         help="Skip image generation, staging, approval, and social posting")
     parser.add_argument("--pr", type=int, metavar="N",
                         help="Process a specific PR number (default: scan for merged)")
+    parser.add_argument("--repo", metavar="OWNER/NAME", default=None,
+                        help="Target repo for --pr (e.g. mnemosyne-oss/mnemosyne). "
+                             "Defaults to the built-in hermes-agent list.")
     args = parser.parse_args()
 
-    results = run(dry_run=args.dry_run, specific_pr=args.pr)
+    results = run(dry_run=args.dry_run, specific_pr=args.pr, source_repo=args.repo)
 
     # Exit non-zero if any failures
     if results["failed"]:

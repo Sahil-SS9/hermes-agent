@@ -23,22 +23,24 @@ if str(ce_dir) not in sys.path:
 def test_pr_title_strips_fix_prefix():
     from blog.pr_to_blog import _pr_title_to_blog_title
     result = _pr_title_to_blog_title("fix(kanban): hold reclaim while the worker is still alive")
-    assert "hold reclaim while the worker is still alive" in result
+    assert "Hold reclaim while the worker is still alive" in result
     assert "fix(kanban)" not in result
-    assert result.startswith("How I fixed a Hermes Agent bug:")
+    assert result.endswith("a kanban fix")
 
 
 def test_pr_title_strips_feat_prefix():
     from blog.pr_to_blog import _pr_title_to_blog_title
     result = _pr_title_to_blog_title("feat(profile): add interactive profile creation wizard")
-    assert "add interactive profile creation wizard" in result
+    assert "Add interactive profile creation wizard" in result
     assert "feat(profile)" not in result
+    # feat is framed as a feature, not a "fix".
+    assert result.endswith("a profile feature")
 
 
 def test_pr_title_strips_chore_prefix():
     from blog.pr_to_blog import _pr_title_to_blog_title
     result = _pr_title_to_blog_title("chore(release): add Sahil-SS9 to AUTHOR_MAP")
-    assert "add Sahil-SS9 to AUTHOR_MAP" in result
+    assert "Add Sahil-SS9 to AUTHOR_MAP" in result
     assert "chore(release)" not in result
 
 
@@ -46,6 +48,15 @@ def test_pr_title_no_prefix():
     from blog.pr_to_blog import _pr_title_to_blog_title
     result = _pr_title_to_blog_title("update documentation for new API")
     assert "update documentation for new API" in result
+
+
+def test_pr_title_drops_salvage_ref_and_is_distinct():
+    """Two different PRs must not collide on the old blanket headline."""
+    from blog.pr_to_blog import _pr_title_to_blog_title
+    a = _pr_title_to_blog_title("fix(kanban): machine-global singleton lock (#41448)")
+    b = _pr_title_to_blog_title("fix(kanban): hold reclaim while the worker is still alive")
+    assert "(#41448)" not in a
+    assert a != b
 
 
 # ── _build_pr_plan ──────────────────────────────────────────────────

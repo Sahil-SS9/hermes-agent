@@ -5,8 +5,21 @@ brand=f"blog_{stream}" (mirrors article_pipeline's cross-run dedup). It gathers
 candidate topics from the stream's sources, drops recently-used ids, and picks
 the highest-priority. record() writes back AFTER a successful publish.
 """
+import pytest
+
 import blog.blog_router as br
 from blog.blog_streams import STREAMS
+
+
+@pytest.fixture(autouse=True)
+def _isolate_reservations(tmp_path, monkeypatch):
+    """Point the reservation file at a per-test tmp path.
+
+    reserve() writes to a real persistent JSONL; without isolation, a stale
+    reservation (180min TTL) from one test blocks topic ids in another and
+    across runs. Isolating the path keeps the suite deterministic.
+    """
+    monkeypatch.setattr(br, "TOPIC_RESERVATIONS_PATH", tmp_path / "reservations.jsonl")
 
 
 def _fake_topic(tid, priority=5, summary="a topic", tags=None, source=None):
@@ -107,20 +120,36 @@ def test_recent_used_is_defensive(monkeypatch):
 
 
 def test_gather_candidates_builder_uses_activity_collector(monkeypatch):
-    """Builder stream sources map to activity_collector.collect_all signals."""
+    """Builder pulls from frameworks + its own backlog queue + activity signals."""
     monkeypatch.setattr(br.ac, "collect_all", lambda: {
         "signals": [{"signal_id": "gh1", "summary": "push", "priority": 8,
                      "pillar": "agent_build_notes"}],
     })
     cands = br._gather_candidates("builder")
-    # Framework seeds (10) are now injected alongside the signal
-    # and come first due to highest priority.
-    assert len(cands) == 11, f"Expected 10 framework + 1 signal = 11, got {len(cands)}"
-    assert cands[0]["topic_id"].startswith("fw-"), "Framework seeds should be first"
-    # The signal should still be present (last, lower priority).
-    assert any(c["topic_id"] == "gh1" for c in cands), "Signal should still be present"
+    ids = {c["topic_id"] for c in cands}
+    # Framework seeds present.
+    assert any(i.startswith("fw-") for i in ids), "Framework seeds should be present"
+    # Builder's own backlog queue (builder.jsonl) is now wired in.
+    assert any(i.startswith("builder-") for i in ids), "Builder queue should be present"
+    # The activity signal is still present.
+    assert "gh1" in ids, "Activity signal should still be present"
 
 
 def test_gather_candidates_unknown_stream_returns_empty(monkeypatch):
     """An unknown stream name returns [] (no crash)."""
     assert br._gather_candidates("nonexistent") == []
+
+
+def test_manual_queue_skips_placeholder_stubs(tmp_path, monkeypatch):
+    """Placeholder stubs ('New Concept', empty) from external writers are dropped."""
+    qf = tmp_path / "ai.jsonl"
+    qf.write_text(
+        '{"topic_id": "real-1", "title_hint": "A real topic", "priority": 7}\n'
+        '{"topic_id": "manual-1", "title_hint": "New Concept", "priority": 10}\n'
+        '{"topic_id": "manual-2", "title_hint": "", "priority": 10}\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(br, "_manual_queue_path", lambda stream: qf)
+    out = br._read_manual_queue("ai")
+    ids = {c["topic_id"] for c in out}
+    assert ids == {"real-1"}, f"placeholders should be skipped, got {ids}"

@@ -166,7 +166,10 @@ def _gather_candidates(stream: str) -> list[dict]:
                 "signals": [sig],
                 "priority": sig.get("priority", 0),
             })
-        return framework_cands + cands
+        # Builder also pulls from its own backlog queue (builder.jsonl), so the
+        # stream has a durable topic source, not just live activity signals.
+        manual = _read_manual_queue("builder")
+        return framework_cands + manual + cands
 
     # AI / PM: read from the manual topic queue if it exists.
     cands = _read_manual_queue(stream)
@@ -178,12 +181,23 @@ def _manual_queue_path(stream: str):
     return Path(__file__).resolve().parent.parent / "blog_topics" / f"{stream}.jsonl"
 
 
+# Placeholder titles an external writer (kanban/dashboard UI) drops into the
+# queue files. They carry no real topic, so they must never be generated.
+_PLACEHOLDER_TITLES = {"", "new concept", "untitled", "tbd"}
+
+
 def _read_manual_queue(stream: str) -> list[dict]:
-    """Read queued topics from blog_topics/<stream>.jsonl (one JSON object per line)."""
+    """Read queued topics from blog_topics/<stream>.jsonl (one JSON object per line).
+
+    Defensively skips placeholder/empty stubs (e.g. "New Concept") so junk
+    entries written by other tools can never be selected for generation.
+    """
     p = _manual_queue_path(stream)
     objs = _read_jsonl(p)
     out = []
     for obj in objs:
+        if (obj.get("title_hint") or "").strip().lower() in _PLACEHOLDER_TITLES:
+            continue
         out.append({
             "topic_id": obj.get("topic_id", ""),
             "title_hint": obj.get("title_hint", ""),
