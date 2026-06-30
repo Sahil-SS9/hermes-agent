@@ -4867,6 +4867,10 @@ class DiscordAdapter(BasePlatformAdapter):
         Returns True on success, False on failure. The topic is written as a
         JSONL line to content_engine/blog_topics/<stream>.jsonl, which the
         blog_router reads on the next scheduled run.
+
+        Defensive guard: reject placeholder/empty titles (for example a UI
+        default like "New Concept") at write time so they never pollute the
+        queue files.
         """
         import json
         import time
@@ -4882,11 +4886,20 @@ class DiscordAdapter(BasePlatformAdapter):
         queue_path = topics_dir / f"{stream}.jsonl"
 
         try:
+            title_hint = topic.strip()[:200]
+            normalized = title_hint.strip().lower()
+            if normalized in {"", "new concept", "untitled", "tbd"}:
+                logger.info(
+                    "[Discord] rejected placeholder blog topic: stream=%s by=%s raw=%r",
+                    stream, interaction.user.display_name, topic,
+                )
+                return False
+
             topics_dir.mkdir(parents=True, exist_ok=True)
             topic_id = f"discord-{interaction.user.id}-{int(time.time())}"
             obj = {
                 "topic_id": topic_id,
-                "title_hint": topic.strip()[:200],
+                "title_hint": title_hint,
                 "tags": [],
                 "priority": int(priority),
             }
