@@ -246,9 +246,7 @@ def run(stream: Optional[str] = None, limit: Optional[int] = None,
                 images = {"hero_path": None, "section_paths": {}}
             else:
                 print(f"[backfill] illustrating [{s}] {title}...")
-                images = illustrate(draft, max_sections=draft["_max_sections"],
-                                    budget_label_prefix="backfill",
-                                    budget_ledger_path=config.BACKFILL_LEDGER_PATH)
+                images = illustrate(draft, max_sections=draft["_max_sections"])
                 if images.get("hero_path"):
                     result["total_images"] += 1
                 for heading, path in images.get("section_paths", {}).items():
