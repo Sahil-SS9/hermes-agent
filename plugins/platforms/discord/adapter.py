@@ -4881,7 +4881,7 @@ class DiscordAdapter(BasePlatformAdapter):
         # at the repo root (three levels up from the plugin dir, then
         # content_engine/).
         adapter_dir = Path(__file__).resolve().parent
-        repo_root = adapter_dir.parents[3]  # discord/ -> platforms/ -> plugins/ -> root
+        repo_root = adapter_dir.parents[2]  # discord/ -> platforms/ -> plugins/ -> root
         topics_dir = repo_root / "content_engine" / "blog_topics"
         queue_path = topics_dir / f"{stream}.jsonl"
 
