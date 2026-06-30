@@ -1,22 +1,97 @@
 from __future__ import annotations
 from pathlib import Path
 from typing import Optional
+from datetime import datetime, timedelta
 import json
+import uuid
 
 import activity_collector as ac
 import database as db
 from config import BLOG_TOPIC_RECENCY_DAYS
+
+TOPIC_RESERVATIONS_PATH = Path(__file__).resolve().parent.parent / "blog_topics" / "topic_reservations.jsonl"
+RESERVATION_TTL_MINUTES = 180
 from blog.blog_streams import STREAMS, tags_for
 
 
 def _recent_used(stream: str) -> list[str]:
-    """Topic ids used for this stream within the recency window."""
-    try:
-        return db.get_recently_used_topics(
-            f"blog_{stream}", days=BLOG_TOPIC_RECENCY_DAYS,
-        )
-    except Exception:
+    """Topic ids used by any blog stream within the recency window.
+
+    Framework seeds are shared across AI/PM/Builder. A topic used by one stream
+    should not be immediately reused by another stream unless explicitly queued
+    as a series later.
+    """
+    used: set[str] = set()
+    for s in STREAMS:
+        try:
+            used.update(db.get_recently_used_topics(
+                f"blog_{s}", days=BLOG_TOPIC_RECENCY_DAYS,
+            ))
+        except Exception:
+            continue
+    return list(used)
+
+
+def _reservation_cutoff() -> datetime:
+    return datetime.utcnow() - timedelta(minutes=RESERVATION_TTL_MINUTES)
+
+
+def _read_reservations() -> list[dict]:
+    if not TOPIC_RESERVATIONS_PATH.exists():
         return []
+    out: list[dict] = []
+    cutoff = _reservation_cutoff()
+    for line in TOPIC_RESERVATIONS_PATH.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            item = json.loads(line)
+            created = datetime.fromisoformat(item.get("created_at", ""))
+        except Exception:
+            continue
+        if created >= cutoff:
+            out.append(item)
+    # Opportunistically prune stale reservations.
+    if out:
+        TOPIC_RESERVATIONS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        TOPIC_RESERVATIONS_PATH.write_text("".join(json.dumps(x) + "\n" for x in out), encoding="utf-8")
+    elif TOPIC_RESERVATIONS_PATH.exists():
+        TOPIC_RESERVATIONS_PATH.write_text("", encoding="utf-8")
+    return out
+
+
+def _reserved_topic_ids() -> set[str]:
+    return {r.get("topic_id", "") for r in _read_reservations() if r.get("topic_id")}
+
+
+def reserve(stream: str, topic_id: str, title: str = "") -> str:
+    """Temporarily reserve a topic during generation.
+
+    Reservations prevent concurrent/next stream selection without permanently
+    burning the topic if generation fails. Call release(token) on failure and
+    after successful record().
+    """
+    token = uuid.uuid4().hex
+    entry = {
+        "token": token,
+        "stream": stream,
+        "topic_id": topic_id,
+        "title": title or "",
+        "created_at": datetime.utcnow().isoformat(),
+    }
+    existing = _read_reservations()
+    existing.append(entry)
+    TOPIC_RESERVATIONS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    TOPIC_RESERVATIONS_PATH.write_text("".join(json.dumps(x) + "\n" for x in existing), encoding="utf-8")
+    return token
+
+
+def release(token: str) -> None:
+    """Release a temporary topic reservation."""
+    if not token or not TOPIC_RESERVATIONS_PATH.exists():
+        return
+    existing = [r for r in _read_reservations() if r.get("token") != token]
+    TOPIC_RESERVATIONS_PATH.write_text("".join(json.dumps(x) + "\n" for x in existing), encoding="utf-8")
 
 
 def _read_jsonl(path: Path) -> list[dict]:
@@ -147,9 +222,9 @@ def choose(stream: str) -> Optional[dict]:
     """
     if stream not in STREAMS:
         return None
-    used = set(_recent_used(stream))
+    blocked = set(_recent_used(stream)) | _reserved_topic_ids()
     cands = [c for c in _gather_candidates(stream)
-             if c.get("topic_id") and c["topic_id"] not in used]
+             if c.get("topic_id") and c["topic_id"] not in blocked]
     if not cands:
         return None
 

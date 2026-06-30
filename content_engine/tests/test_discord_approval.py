@@ -10,32 +10,46 @@ from pathlib import Path
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def isolated_approval_tracker(tmp_path, monkeypatch):
+    monkeypatch.setattr("blog.blog_approval.TRACKER_PATH", tmp_path / "pending_approvals.jsonl")
+
+
+def _make_mdx(tmp_path: Path, slug: str, title: str = "Test Article") -> str:
+    mdx = tmp_path / f"{slug}.mdx"
+    mdx.write_text(
+        f"---\ntitle: \"{title}\"\ndescription: \"Preview test\"\npubDate: 2026-06-30\ntags: [\"test\"]\ntier: pm\nformat: essay\napproved: false\nsource: manual\n---\n\n# {title}\n\nBody.",
+        encoding="utf-8",
+    )
+    return str(mdx)
+
+
 # ── Process 1: Approval Tracker ─────────────────────────────────
 
 class TestApprovalTracker:
     """blog_approval — state management + Discord commands."""
 
-    def test_request_creates_pending_entry(self):
+    def test_request_creates_pending_entry(self, tmp_path):
         from blog.blog_approval import request, pending, _read_tracker, TRACKER_PATH
         # Use a unique slug per test.
         slug = f"test-approval-{id(self)}"
-        request(slug, "Test Article", "ai", "pm", "/tmp/test.mdx")
+        request(slug, "Test Article", "ai", "pm", _make_mdx(tmp_path, slug))
         items = pending()
         slugs = [i["slug"] for i in items]
         assert slug in slugs, f"Expected {slug} in pending: {slugs}"
 
-    def test_approve_changes_status(self):
+    def test_approve_changes_status(self, tmp_path):
         from blog.blog_approval import request, approve, pending
         slug = f"test-approve-{id(self)}"
-        request(slug, "Approve Test", "ai")
+        request(slug, "Approve Test", "ai", mdx_path=_make_mdx(tmp_path, slug, "Approve Test"))
         assert approve(slug) is True
         items = pending()
         assert slug not in [i["slug"] for i in items]
 
-    def test_reject_changes_status(self):
+    def test_reject_changes_status(self, tmp_path):
         from blog.blog_approval import request, reject, pending
         slug = f"test-reject-{id(self)}"
-        request(slug, "Reject Test", "ai")
+        request(slug, "Reject Test", "ai", mdx_path=_make_mdx(tmp_path, slug, "Reject Test"))
         reject(slug, "Not relevant")
         items = pending()
         assert slug not in [i["slug"] for i in items]
@@ -44,10 +58,10 @@ class TestApprovalTracker:
         from blog.blog_approval import approve
         assert approve("nonexistent-slug") is False
 
-    def test_amend_changes_status(self):
+    def test_amend_changes_status(self, tmp_path):
         from blog.blog_approval import request, amend, _read_tracker
         slug = f"test-amend-{id(self)}"
-        request(slug, "Amend Test", "ai")
+        request(slug, "Amend Test", "ai", mdx_path=_make_mdx(tmp_path, slug, "Amend Test"))
         amend(slug, "Add sources")
         entries = _read_tracker()
         e = next((x for x in entries if x["slug"] == slug), None)
@@ -55,10 +69,10 @@ class TestApprovalTracker:
         assert e["status"] == "amend"
         assert "sources" in e.get("notes", "")
 
-    def test_publish_removes_from_tracker(self, monkeypatch):
+    def test_publish_removes_from_tracker(self, monkeypatch, tmp_path):
         from blog.blog_approval import request, publish, _read_tracker
         slug = f"test-publish-{id(self)}"
-        request(slug, "Publish Test", "ai")
+        request(slug, "Publish Test", "ai", mdx_path=_make_mdx(tmp_path, slug, "Publish Test"))
 
         def mock_approve(slug):
             return {"status": "ok"}
@@ -69,18 +83,74 @@ class TestApprovalTracker:
         entries = _read_tracker()
         assert slug not in [e["slug"] for e in entries]
 
-    def test_summary_includes_key_fields(self):
+    def test_summary_includes_key_fields(self, tmp_path):
         from blog.blog_approval import summary
+        preview = tmp_path / "my-post.html"
+        preview.write_text("<html></html>")
         entry = {
             "title": "My Post", "stream": "ai", "tier": "pm",
             "slug": "my-post", "approval_id": "2026-06-29-my-post",
-            "mdx_path": "/tmp/my-post.mdx",
+            "mdx_path": str(tmp_path / "my-post.mdx"),
+            "preview_path": str(preview),
         }
         s = summary(entry)
         assert "My Post" in s
         assert "my-post" in s
         assert "!approve" in s
         assert "!reject" in s
+        assert f"MEDIA:{preview}" in s
+
+    def test_request_preview_embeds_article_image(self, tmp_path):
+        from blog.blog_approval import request, _read_tracker
+        slug = "image-preview-post"
+        hero = tmp_path / "hero.png"
+        hero.write_bytes(b"\x89PNG\r\n\x1a\n" + b"x" * 128)
+        mdx = tmp_path / f"{slug}.mdx"
+        mdx.write_text(
+            f"---\ntitle: \"Image Preview Post\"\ndescription: \"Check image\"\npubDate: 2026-06-30\nheroImage: \"{hero}\"\ntags: [\"test\"]\ntier: pm\nformat: essay\napproved: false\nsource: manual\n---\n\n# Image Preview Post\n\nBody.",
+            encoding="utf-8",
+        )
+        request(slug, "Image Preview Post", "pm", "pm", str(mdx))
+        entry = _read_tracker()[0]
+        preview = Path(entry["preview_path"])
+        assert preview.exists()
+        html = preview.read_text(encoding="utf-8")
+        assert "data:image/png;base64," in html
+        assert "ARTICLE HERO IMAGE" in html
+
+    def test_request_blocks_duplicate_topic_cluster_without_series(self, tmp_path):
+        from blog.blog_approval import request
+        first = _make_mdx(
+            tmp_path,
+            "token-one",
+            "The Token-Efficiency Frontier: A Framework for PMs",
+        )
+        second = _make_mdx(
+            tmp_path,
+            "token-two",
+            "The Token-Efficiency Frontier: A Builder's Map",
+        )
+        request("token-one", "The Token-Efficiency Frontier: A Framework for PMs", "pm", "pm", first)
+        with pytest.raises(ValueError, match="duplicate pending topic cluster"):
+            request("token-two", "The Token-Efficiency Frontier: A Builder's Map", "builder", "builder", second)
+
+    def test_batch_validation_allows_explicit_series(self):
+        from blog.blog_approval import batch_validation_issues
+        entries = [
+            {"slug": "one", "title": "The Token-Efficiency Frontier: Part One", "status": "pending", "series": "token-efficiency"},
+            {"slug": "two", "title": "The Token-Efficiency Frontier: Part Two", "status": "pending", "series": "token-efficiency"},
+        ]
+        assert batch_validation_issues(entries) == []
+
+    def test_batch_validation_flags_unplanned_duplicate_clusters(self):
+        from blog.blog_approval import batch_validation_issues
+        entries = [
+            {"slug": "one", "title": "The Token-Efficiency Frontier: Part One", "status": "pending"},
+            {"slug": "two", "title": "The Token-Efficiency Frontier: Part Two", "status": "pending"},
+        ]
+        issues = batch_validation_issues(entries)
+        assert len(issues) == 1
+        assert "token-efficiency-frontier" in issues[0]
 
     def test_parse_discord_command_approve(self):
         from blog.blog_approval import parse_discord_command
@@ -100,10 +170,10 @@ class TestApprovalTracker:
         assert r["command"] == "amend"
 
 
-    def test_handle_discord_command_outcomes(self, monkeypatch):
+    def test_handle_discord_command_outcomes(self, monkeypatch, tmp_path):
         from blog.blog_approval import request, handle_discord_command
         slug = "test-cmd-outcome"
-        request(slug, "Cmd Test", "ai")
+        request(slug, "Cmd Test", "ai", mdx_path=_make_mdx(tmp_path, slug, "Cmd Test"))
 
         def mock_approve(slug):
             return {"status": "ok"}
@@ -113,10 +183,10 @@ class TestApprovalTracker:
         assert r["handled"] is True
         assert r["action"] == "approved"
 
-    def test_handle_discord_command_reject(self):
+    def test_handle_discord_command_reject(self, tmp_path):
         from blog.blog_approval import request, handle_discord_command
         slug = "test-cmd-rej"
-        request(slug, "Cmd Reject", "ai")
+        request(slug, "Cmd Reject", "ai", mdx_path=_make_mdx(tmp_path, slug, "Cmd Reject"))
 
         r = handle_discord_command(f"!reject {slug} Bad topic")
         assert r["handled"] is True

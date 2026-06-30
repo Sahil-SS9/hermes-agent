@@ -8,6 +8,12 @@ import os
 from pathlib import Path
 
 import blog.blog_pipeline as bpl
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def no_real_approval_tracker(monkeypatch):
+    monkeypatch.setattr(bpl, "_maybe_request_approval", lambda *args, **kwargs: None)
 
 
 _DRAFT = {
@@ -110,10 +116,17 @@ def test_run_stream_does_not_record_on_generator_failure(monkeypatch, tmp_path):
     monkeypatch.setattr(bpl, "write_with_gate", lambda p, stream: None)
     record_called = []
     monkeypatch.setattr(bpl, "record", lambda s, tid, t: record_called.append(tid))
+    reserve_called = []
+    release_called = []
+    monkeypatch.setattr(bpl, "reserve", lambda s, tid, title: reserve_called.append(tid) or "tok")
+    monkeypatch.setattr(bpl, "release", lambda token: release_called.append(token))
+
     bpl.run_stream("ai", repo=str(repo))
-    # record is still called pre-emptively (right after choose) even if
-    # the generator later fails — prevents duplicate topic selection.
-    assert record_called == ["t1"]
+    # Failed generations release the temporary reservation and do not burn the
+    # topic into permanent usage.
+    assert reserve_called == ["t1"]
+    assert release_called == ["tok"]
+    assert record_called == []
 
 
 def test_run_all_runs_all_streams(monkeypatch, tmp_path):

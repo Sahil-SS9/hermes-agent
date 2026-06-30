@@ -6,42 +6,39 @@ import topics as tp
 
 # ── LLM chain ──────────────────────────────────────────────────────────────
 
-def test_fallback_chain_is_openai_then_opengo_then_ollama():
-    bases = [(c["base"], c["model"]) for c in lg._FREE_FALLBACK_CHAIN]
-    assert bases[0] == ("https://api.openai.com/v1", "gpt-4o-mini")
-    assert bases[1] == ("https://opencode.ai/zen/go/v1", "deepseek-v4-flash")
-    assert bases[2] == ("https://ollama.com/v1", "gpt-oss:120b")
+def test_fallback_chain_is_ollama_cloud_only():
+    bases = [(c["base"], c["model"], c["provider"]) for c in lg._FREE_FALLBACK_CHAIN]
+    assert bases[0] == ("https://ollama.com/v1", "deepseek-v4-flash", "ollama")
+    assert bases[1] == ("https://ollama.com/v1", "gpt-oss:120b", "ollama")
+    assert not any("opencode" in c["base"] for c in lg._FREE_FALLBACK_CHAIN)
 
 
 def test_key_for_provider(monkeypatch):
     monkeypatch.setenv("OLLAMA_API_KEY", "ollama-xyz")
     monkeypatch.setenv("OPENCODE_GO_API_KEY", "go-abc")
     assert lg._key_for("ollama") == "ollama-xyz"
+    # Legacy OpenCode key resolution is retained only for explicit operator overrides.
     assert lg._key_for("opencode") == "go-abc"
 
 
-def test_llm_configs_attaches_right_keys(monkeypatch):
+def test_llm_configs_attaches_ollama_keys(monkeypatch):
     monkeypatch.delenv("CONTENT_LLM_BASE_URL", raising=False)
     monkeypatch.delenv("CONTENT_LLM_MODEL", raising=False)
     monkeypatch.setenv("OLLAMA_API_KEY", "ollama-xyz")
-    monkeypatch.setenv("OPENCODE_GO_API_KEY", "go-abc")
     cfgs = lg._llm_configs()
-    by_base = {c["base"]: c for c in cfgs}
-    assert by_base["https://opencode.ai/zen/go/v1"]["model"] == "deepseek-v4-flash"
-    assert by_base["https://opencode.ai/zen/go/v1"]["key"] == "go-abc"
-    assert by_base["https://ollama.com/v1"]["key"] == "ollama-xyz"
+    assert cfgs[0]["base"] == "https://ollama.com/v1"
+    assert cfgs[0]["model"] == "deepseek-v4-flash"
+    assert all(c["key"] == "ollama-xyz" for c in cfgs)
 
 
-def test_longform_chain_uses_stronger_models(monkeypatch):
+def test_longform_chain_uses_ollama_models(monkeypatch):
     monkeypatch.delenv("CONTENT_LLM_BASE_URL", raising=False)
     monkeypatch.delenv("CONTENT_LLM_MODEL", raising=False)
     cfgs = lg._llm_configs(longform=True)
     models = [c["model"] for c in cfgs]
-    assert models[0] == "gpt-4o"             # OpenAI primary for long-form
-    assert "minimax-m3" in models             # OpenGo fallback
-    assert "glm-5.2" in models                # Ollama-Cloud fallback
-    # short tier must NOT leak into long-form
-    assert "deepseek-v4-flash" not in models
+    assert models[0] == "glm-5.2"
+    assert "deepseek-v4-flash" in models
+    assert "minimax-m3" not in models
 
 
 def test_short_and_longform_differ(monkeypatch):
@@ -49,8 +46,8 @@ def test_short_and_longform_differ(monkeypatch):
     monkeypatch.delenv("CONTENT_LLM_MODEL", raising=False)
     short = [c["model"] for c in lg._llm_configs(longform=False)]
     long = [c["model"] for c in lg._llm_configs(longform=True)]
-    assert short[0] == "gpt-4o-mini"
-    assert long[0] == "gpt-4o"
+    assert short[0] == "deepseek-v4-flash"
+    assert long[0] == "glm-5.2"
 
 
 def test_fabricated_numbers_catches_growth_metrics():

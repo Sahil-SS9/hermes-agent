@@ -14,7 +14,9 @@ production theme — no network dependencies (fonts inlined as fallbacks).
 
 from __future__ import annotations
 import argparse
+import base64
 import json
+import mimetypes
 import re
 import sys
 from datetime import datetime
@@ -723,6 +725,38 @@ def parse_frontmatter(text: str) -> tuple[dict[str, str], str]:
 
 # ── Preview builder ───────────────────────────────────────────────────────
 
+def _resolve_blog_asset_path(src: str) -> Optional[Path]:
+    """Resolve a blog image reference to a local file path when possible."""
+    if not src:
+        return None
+    if src.startswith("/blog/"):
+        return Path.home() / "repos/SahilBlog/public" / src.lstrip("/")
+    p = Path(src)
+    return p if p.is_absolute() else None
+
+
+def _image_to_data_uri(src: str) -> tuple[str, str]:
+    """Return (browser_src, meta) for preview images.
+
+    Approval HTML is delivered as a Discord attachment. Absolute local paths like
+    /home/kensei/repos/SahilBlog/public/blog/<slug>/hero.png are not readable on
+    Sahil's machine after download, so embed existing local images as data URIs.
+    Fall back to the original src when the file is unavailable so the preview
+    still shows an explicit broken-image placeholder.
+    """
+    p = _resolve_blog_asset_path(src)
+    if not p or not p.exists() or not p.is_file():
+        return src, "image missing from preview bundle"
+    try:
+        data = p.read_bytes()
+        mime = mimetypes.guess_type(str(p))[0] or "image/png"
+        encoded = base64.b64encode(data).decode("ascii")
+        size_kb = len(data) / 1024
+        return f"data:{mime};base64,{encoded}", f"embedded · {p.name} · {size_kb:.1f} KB"
+    except OSError:
+        return src, "image could not be embedded"
+
+
 def build_preview_html(
     slug: str,
     title: str,
@@ -756,14 +790,12 @@ def build_preview_html(
     # Hero image HTML
     hero_html = ""
     if hero_src:
-        # Check if it's a local relative path pointing to the blog dir
-        img_path = hero_src
-        if img_path.startswith("/blog/"):
-            img_path = str(Path.home() / "repos/SahilBlog/public" / img_path.lstrip("/"))
+        img_path, hero_meta = _image_to_data_uri(hero_src)
         hero_html = f'''
         <div class="hero-image">
-          <img src="{_escape(img_path)}" alt="Hero: {_escape(title)}" onerror="this.outerHTML='<div class=\\'hero-image\\' style=\\'padding:40px;text-align:center;color:var(--fg-mute);border:1px dashed var(--rule);font-family:VT323,monospace\\'>[HERO IMAGE — {_escape(title[:60])}]</div>'">
-          <div class="hero-label">▼ HERO</div>
+          <img src="{_escape(img_path)}" alt="Hero: {_escape(title)}" onerror="this.outerHTML='<div class=\\'hero-image\\' style=\\'padding:40px;text-align:center;color:var(--fg-mute);border:1px dashed var(--rule);font-family:VT323,monospace\\'>[HERO IMAGE MISSING — {_escape(title[:60])}]</div>'">
+          <div class="hero-label">▼ ARTICLE HERO IMAGE — REVIEW THIS</div>
+          <div class="hero-label" style="top:auto;bottom:8px;left:8px;color:var(--neon-yellow);">{_escape(hero_meta)}</div>
         </div>'''
     
     # Section images
@@ -771,10 +803,11 @@ def build_preview_html(
     if section_images:
         for i, img in enumerate(section_images):
             if isinstance(img, str) and img.strip():
+                section_src, section_meta = _image_to_data_uri(img.strip())
                 section_html += f'''
                 <div class="section-image">
-                  <img src="{_escape(img.strip())}" alt="Section {i+1}" loading="lazy" onerror="this.outerHTML='<div style=\\'padding:20px;text-align:center;color:var(--fg-mute);border:1px dashed var(--rule-soft);margin:16px 0;font-family:VT323,monospace\\'>[SECTION IMAGE {i+1}]</div>'">
-                  <div class="section-label">§ {i+1:02d}</div>
+                  <img src="{_escape(section_src)}" alt="Section {i+1}" loading="lazy" onerror="this.outerHTML='<div style=\\'padding:20px;text-align:center;color:var(--fg-mute);border:1px dashed var(--rule-soft);margin:16px 0;font-family:VT323,monospace\\'>[SECTION IMAGE {i+1}]</div>'">
+                  <div class="section-label">§ {i+1:02d} · {_escape(section_meta)}</div>
                 </div>'''
     
     # Status badge

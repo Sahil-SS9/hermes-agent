@@ -13,10 +13,11 @@ def test_streams_have_structural_rules():
     assert "verify" in bs.STREAMS["ai"]["structure"].lower()
 
 
-def test_blog_image_model_is_nano_banana_2():
-    """Config should point to nano-banana-2 with a positive backfill cap."""
+def test_blog_uses_codex_cli_not_fal():
+    """Blog images use Codex CLI (£0), not FAL. Backfill cap still positive."""
     import config as cfg
-    assert cfg.BLOG_IMAGE_MODEL == "fal-ai/nano-banana-2/edit"
+    assert not hasattr(cfg, "BLOG_IMAGE_MODEL"), "BLOG_IMAGE_MODEL should be removed"
+    assert not hasattr(cfg, "BLOG_IMAGE_COST_GBP"), "BLOG_IMAGE_COST_GBP should be removed"
     assert cfg.BACKFILL_SPEND_CAP_GBP > 0
 
 
@@ -80,13 +81,13 @@ def test_backfill_skips_existing_and_respects_cap(monkeypatch, tmp_path):
             hero = tmp_path / "hero.png"
             hero.write_text("x")
             out["hero_path"] = str(hero)
-            bgt.record(cfg.BLOG_IMAGE_COST_GBP, label="test:hero",
+            bgt.record(0.0, label="test:hero",
                        ledger_path=ledger_path)
         for i in range(max_sections):
             sec = tmp_path / f"sec{i}.png"
             sec.write_text("x")
             out["section_paths"][f"Section {i}"] = str(sec)
-            bgt.record(cfg.BLOG_IMAGE_COST_GBP, label="test:sec",
+            bgt.record(0.0, label="test:sec",
                        ledger_path=ledger_path)
         return out
     monkeypatch.setattr(bf, "illustrate", fake_illustrate)
@@ -103,6 +104,7 @@ def test_backfill_skips_existing_and_respects_cap(monkeypatch, tmp_path):
     # Point the backfill ledger to a temp path so we don't clobber a real one.
     bf_tmp_ledger = tmp_path / "backfill_ledger.json"
     monkeypatch.setattr(cfg, "BACKFILL_LEDGER_PATH", str(bf_tmp_ledger))
+    monkeypatch.setattr(bf, "stage_draft", lambda mdx_path, repo=None: Path(mdx_path).stem)
 
     # Run with a limit of 3 (should generate ~3 but cap stops earlier).
     result = bf.run(stream="ai", limit=5)

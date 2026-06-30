@@ -23,7 +23,7 @@ from llm_generate import gate_post
 
 SECRET_PATTERNS = [
     # OpenAI / generic API keys: sk-... with sufficient entropy.
-    re.compile(r"sk-(?:proj-|live-)?[A-Za-z0-9._-]{8,}"),
+    re.compile(r"(?<![A-Za-z0-9])sk-(?:proj-|live-)?[A-Za-z0-9._-]{8,}"),
     # GitHub tokens (classic + fine-grained prefixes).
     re.compile(r"ghp_[A-Za-z0-9]{16,}"),
     re.compile(r"github_pat_[A-Za-z0-9_]{16,}"),

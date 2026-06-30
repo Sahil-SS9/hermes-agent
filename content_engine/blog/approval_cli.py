@@ -26,10 +26,20 @@ sys.path.insert(0, str(_engine_root))
 from blog.blog_approval import (
     pending, approve, reject, amend, publish,
     parse_discord_command, handle_discord_command,
+    batch_validation_issues,
 )
 
 
 def _cmd_list_pending() -> int:
+    issues = batch_validation_issues()
+    if issues:
+        print("[Blog Approval Blocked]")
+        print("Pending approval batch failed uniqueness validation:")
+        for issue in issues:
+            print(f"- {issue}")
+        print("Amend/reject duplicates or mark an explicit series before posting approval requests.")
+        return 1
+
     items = pending()
     if not items:
         print("No pending approvals.")

@@ -14,6 +14,7 @@ from blog.preview import (
     parse_frontmatter,
     md_to_html,
     build_preview_html,
+    _image_to_data_uri,
     _read_mdx,
     _pending_slugs,
 )
@@ -179,6 +180,28 @@ class TestBuildPreviewHtml:
         assert "ai" in html  # stream badge
         assert "◆ 2026-06-29" in html
         assert "PENDING REVIEW" in html
+        assert "ARTICLE HERO IMAGE" in html
+        
+    def test_embeds_absolute_hero_image_as_data_uri(self, tmp_path):
+        hero = tmp_path / "hero.png"
+        hero.write_bytes(b"\x89PNG\r\n\x1a\n" + b"x" * 128)
+        html = build_preview_html(
+            slug="test-post",
+            title="Test Title",
+            stream="ai",
+            tier="ai",
+            tags=[],
+            body_md="body",
+            hero_src=str(hero),
+        )
+        assert "data:image/png;base64," in html
+        assert "ARTICLE HERO IMAGE" in html
+        assert "embedded · hero.png" in html
+
+    def test_image_to_data_uri_reports_missing_image(self):
+        src, meta = _image_to_data_uri("/tmp/definitely-missing-preview-image.png")
+        assert src == "/tmp/definitely-missing-preview-image.png"
+        assert meta == "image missing from preview bundle"
         
     def test_approved_status_badge(self):
         html = build_preview_html(

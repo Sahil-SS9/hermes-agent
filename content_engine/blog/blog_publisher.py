@@ -40,28 +40,37 @@ def _run_build(repo: str) -> int:
     return result.returncode
 
 
-def _git_push(repo: str) -> int:
-    """Push to origin main. Returns exit code."""
-    result = _git(repo, "push", "origin", "main")
-    return result.returncode
+def _git_push(repo: str) -> subprocess.CompletedProcess:
+    """Push to origin main. Returns the completed process."""
+    return _git(repo, "push", "origin", "main")
+
+
+def _ensure_git_ok(result: subprocess.CompletedProcess, action: str) -> None:
+    """Raise when a git command fails instead of silently corrupting state."""
+    if result.returncode != 0:
+        msg = (result.stderr or result.stdout or "").strip()
+        raise RuntimeError(f"git {action} failed: {msg}")
 
 
 def stage_draft(mdx_path: str, repo: Optional[str] = None) -> str:
     """Git add + commit the post and its images. Does NOT push.
 
-    Returns the slug.
+    Returns the slug. Raises if git staging/commit fails.
     """
     repo_path = str(repo) if repo else str(SAHILBLOG_REPO)
     slug = _slug_from_path(mdx_path)
     # Stage the post + its images.
-    _git(repo_path, "add", str(mdx_path))
+    _ensure_git_ok(_git(repo_path, "add", str(mdx_path)), "add draft")
     # Stage images in public/blog/<slug>/ if they exist.
     img_dir = Path(repo_path) / "public" / "blog" / slug
     if img_dir.exists():
-        _git(repo_path, "add", str(img_dir))
-    # Commit.
+        _ensure_git_ok(_git(repo_path, "add", str(img_dir)), "add draft images")
+    # Commit. A no-op commit is allowed only when the draft already exists in the worktree;
+    # callers still get a slug, but the failure is logged via the returned stderr.
     title = _read_title_from_mdx(mdx_path)
-    _git(repo_path, "commit", "-m", f"draft: {title}")
+    commit = _git(repo_path, "commit", "-m", f"draft: {title}")
+    if commit.returncode != 0 and "nothing to commit" not in ((commit.stderr or "") + (commit.stdout or "")).lower():
+        _ensure_git_ok(commit, "commit draft")
     return slug
 
 
@@ -167,40 +176,18 @@ def approve(slug: str, repo: Optional[str] = None) -> dict:
         return {"status": "build_failed", "slug": slug, "build_rc": build_rc}
 
     # 3. Commit.
-    _git(repo_path, "add", str(mdx_path))
+    _ensure_git_ok(_git(repo_path, "add", str(mdx_path)), "add publish")
     title = _read_title_from_mdx(str(mdx_path))
-    _git(repo_path, "commit", "-m", f"publish: {title}")
+    commit = _git(repo_path, "commit", "-m", f"publish: {title}")
+    if commit.returncode != 0:
+        return {"status": "commit_failed", "slug": slug, "commit_rc": commit.returncode,
+                "error": (commit.stderr or commit.stdout or "").strip()}
 
     # 4. Push.
-    push_rc = _git_push(repo_path)
-    return {"status": "ok", "slug": slug, "push_rc": push_rc}
+    push = _git_push(repo_path)
+    if push.returncode != 0:
+        return {"status": "push_failed", "slug": slug, "push_rc": push.returncode,
+                "error": (push.stderr or push.stdout or "").strip()}
+    return {"status": "ok", "slug": slug, "push_rc": 0}
 
 
-def publish_flow(slug: str, title: str, stream: str, tier: str = "",
-                 mdx_path: str = "", repo: Optional[str] = None) -> dict:
-    """Stage a draft AND request Discord approval in one call.
-
-    Steps:
-      1. git add + commit the MDX and images (stage_draft)
-      2. Register for Discord approval (blog_approval.request)
-      3. Returns approval_id so a cron posts the summary to Discord
-
-    Publishing only happens when !approve <slug> is received on Discord.
-    """
-    repo_path = str(repo) if repo else str(SAHILBLOG_REPO)
-    # Stage the draft (git add + commit, no push).
-    slug = stage_draft(mdx_path, repo=repo_path)
-    # Register for Discord approval.
-    approval_id = request_approval(slug, title, stream, tier, mdx_path)
-    return {
-        "status": "staged_and_awaiting_approval",
-        "slug": slug,
-        "approval_id": approval_id,
-        "title": title,
-        "stream": stream,
-        "mdx_path": mdx_path,
-        "message": (
-            f"Draft **'{title}'** staged (`{slug}`) and awaiting Discord approval.\n"
-            f"Use `!approve {slug}` on Discord to build + push to production."
-        ),
-    }

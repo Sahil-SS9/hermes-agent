@@ -161,7 +161,10 @@ def run(stream: Optional[str] = None, limit: Optional[int] = None,
         "results": [],
     }
     total_limit = limit or float("inf")
-    per_batch_cost = config.BLOG_IMAGE_COST_GBP * 3  # hero + 2 sections
+    # Blog images now use Codex CLI via ChatGPT subscription, so there is no
+    # per-image FAL budget to reserve. Keep spend fields for backwards-compatible
+    # reporting, but do not block backfill on image cost.
+    per_batch_cost = 0.0
 
     # Build a flat list of all topics to assign staggered pubDates. This makes
     # the blog read as naturally evolving instead of 36 posts all dated today.
@@ -248,10 +251,8 @@ def run(stream: Optional[str] = None, limit: Optional[int] = None,
                                     budget_ledger_path=config.BACKFILL_LEDGER_PATH)
                 if images.get("hero_path"):
                     result["total_images"] += 1
-                    result["total_spend_gbp"] += config.BLOG_IMAGE_COST_GBP
                 for heading, path in images.get("section_paths", {}).items():
                     result["total_images"] += 1
-                    result["total_spend_gbp"] += config.BLOG_IMAGE_COST_GBP
 
             # Assemble MDX and stage as draft.
             pub_date = date_map.get(title)

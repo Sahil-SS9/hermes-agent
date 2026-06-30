@@ -8,10 +8,9 @@ For each merged PR found since the last run:
   2. Generates a Builder's Log blog post via the existing blog pipeline
      (blog_generator.write_with_gate + blog_illustrator + blog_assembler)
   3. Stages as approved:false draft MDX in SahilBlog
-  4. Auto-approves, builds, and pushes (since the PR is already merged,
-     the work is verified)
-  5. Posts a summary to X via xurl
-  6. Drafts a LinkedIn post and saves it for review/posting
+  4. Registers the draft for Discord approval in #blog-management
+  5. Does NOT auto-publish; publishing requires !approve <slug>
+  6. Social distribution is deferred until the post is approved/published
 
 Idempotent: tracks processed PRs in a state file. Safe to run repeatedly.
 
@@ -26,8 +25,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -123,6 +124,49 @@ def fetch_pr_detail(repo: str, pr_number: int) -> dict:
 
 # ── Blog Post Generation ────────────────────────────────────────────
 
+_IMAGE_URL_RE = re.compile(
+    r'!\[[^\]]*\]\((https?://[^)]+)\)|'
+    r'(https?://[^\s)]+(?:\.png|\.jpg|\.jpeg|\.webp|/assets/[^\s)]+|user-attachments/assets/[^\s)]+))',
+    re.IGNORECASE,
+)
+
+
+def _extract_pr_infographic_url(pr: dict) -> str:
+    """Return the first PR-attached infographic/image URL, if present."""
+    body = pr.get("body") or ""
+    for match in _IMAGE_URL_RE.findall(body):
+        url = next((x for x in match if x), "") if isinstance(match, tuple) else match
+        if url:
+            return url.strip()
+    return ""
+
+
+def _download_pr_infographic(pr: dict, slug_hint: str) -> Optional[str]:
+    """Download a merged PR's attached infographic for use as the blog hero."""
+    url = _extract_pr_infographic_url(pr)
+    if not url:
+        return None
+    out_dir = Path(__file__).parent.parent / "output" / "pr_infographics"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    suffix = Path(url.split("?", 1)[0]).suffix.lower()
+    if suffix not in {".png", ".jpg", ".jpeg", ".webp"}:
+        suffix = ".png"
+    out = out_dir / f"{slug_hint}{suffix}"
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = resp.read()
+        if len(data) < 10_000:
+            print(f"  WARN: PR infographic too small from {url}")
+            return None
+        out.write_bytes(data)
+        print(f"  Using PR-attached infographic: {url}")
+        return str(out)
+    except Exception as exc:
+        print(f"  WARN: could not download PR infographic {url}: {exc}")
+        return None
+
+
 def _build_pr_plan(pr: dict, repo: str) -> dict:
     """Build a blog pipeline plan dict from a merged PR.
 
@@ -207,7 +251,8 @@ def generate_blog_post(pr: dict, repo: str, dry_run: bool = False) -> Optional[d
     from blog.blog_generator import write_with_gate
     from blog.blog_illustrator import illustrate
     from blog.blog_assembler import assemble
-    from blog.blog_publisher import stage_draft, approve
+    from blog.blog_publisher import stage_draft
+    from blog.blog_approval import request as request_approval
     from config import SAHILBLOG_REPO
 
     plan = _build_pr_plan(pr, repo)
@@ -228,11 +273,21 @@ def generate_blog_post(pr: dict, repo: str, dry_run: bool = False) -> Optional[d
         print("  DRY RUN: skipping illustration, assembly, staging")
         return {"slug": "dry-run", "mdx_path": None, "title": draft.get("title", "?")}
 
-    # 2. Illustrate (hero + section images)
-    print("  Generating images...")
-    images = illustrate(draft)
-    if not images.get("hero_path"):
-        print("  WARN: no hero image generated (budget or FAL issue)")
+    # 2. Resolve imagery. For upstream PR posts, prefer the merged PR's
+    # attached Teknium/NousResearch infographic. Generate via Codex only when
+    # no source image is attached or downloadable.
+    print("  Resolving hero image...")
+    slug_hint = plan["topic_id"].replace("/", "-")
+    pr_image = _download_pr_infographic(pr, slug_hint)
+    if pr_image:
+        images = {"hero_path": pr_image, "section_paths": {}}
+        image_source = "upstream_pr_infographic"
+    else:
+        print("  Generating images with Codex CLI...")
+        images = illustrate(draft)
+        image_source = "codex_cli"
+        if not images.get("hero_path"):
+            print("  WARN: no hero image generated; draft will still require approval")
 
     # 3. Assemble MDX
     print("  Assembling MDX...")
@@ -241,22 +296,17 @@ def generate_blog_post(pr: dict, repo: str, dry_run: bool = False) -> Optional[d
         print("  FAIL: assembler returned None")
         return None
 
-    # 4. Stage as draft
+    # 4. Stage as draft and request approval. Never auto-publish PR posts:
+    # merged code proves the code landed, not that the write-up is approved.
     print("  Staging draft...")
     slug = stage_draft(str(mdx_path), repo=str(SAHILBLOG_REPO))
-    print(f"  Staged: {slug}")
+    approval_id = request_approval(slug, draft.get("title", "?"), BUILDER_STREAM,
+                                   draft.get("tier", "builder"), str(mdx_path))
+    print(f"  Staged for approval: {slug} ({approval_id})")
 
-    # 5. Auto-approve (PR is already merged, work is verified)
-    print("  Approving (PR already merged)...")
-    result = approve(slug, repo=str(SAHILBLOG_REPO))
-    if result.get("status") != "ok":
-        print(f"  APPROVE FAIL: {result}")
-        return {"slug": slug, "mdx_path": str(mdx_path),
-                "title": draft.get("title", "?"), "approved": False}
-
-    print(f"  Published: {slug}")
     return {"slug": slug, "mdx_path": str(mdx_path),
-            "title": draft.get("title", "?"), "approved": True,
+            "title": draft.get("title", "?"), "approved": False,
+            "approval_id": approval_id, "image_source": image_source,
             "url": f"https://algorithmiccompass.com/blog/{slug}"}
 
 

@@ -248,3 +248,56 @@ def test_fetch_merged_prs_returns_empty_on_empty_output():
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
         prs = fetch_merged_prs("NousResearch/hermes-agent")
         assert prs == []
+
+# ── Source-aware PR imagery / approval governance ───────────────────────────
+
+def test_extract_pr_infographic_url_from_markdown_image():
+    from blog.pr_to_blog import _extract_pr_infographic_url
+    pr = {"body": "Here is the diagram:\n![async fix](https://github.com/user-attachments/assets/abc123)"}
+    assert _extract_pr_infographic_url(pr) == "https://github.com/user-attachments/assets/abc123"
+
+
+def test_generate_blog_post_requests_approval_not_publish(monkeypatch, tmp_path):
+    import blog.pr_to_blog as p2b
+
+    pr = {
+        "number": 49064,
+        "title": "fix: approval safe",
+        "body": "",
+        "mergedAt": "2026-06-19T14:38:10Z",
+        "additions": 1,
+        "deletions": 0,
+        "files": [{"path": "a.py"}],
+        "commits": [{"oid": "abc"}],
+        "url": "https://github.com/NousResearch/hermes-agent/pull/49064",
+    }
+    repo = tmp_path / "blog"
+    (repo / "src/content/blog").mkdir(parents=True)
+    (repo / "public/blog").mkdir(parents=True)
+
+    draft = {
+        "title": "Approval Safe", "description": "d", "body_md": "body",
+        "slug": "approval-safe", "tier": "builder", "tags": [],
+        "format": "essay", "source": "gitradar",
+    }
+    calls = []
+
+    monkeypatch.setattr("blog.blog_generator.write_with_gate", lambda plan, stream, strict_review=False: draft)
+    monkeypatch.setattr(p2b, "_download_pr_infographic", lambda pr, slug_hint: "/tmp/pr-image.png")
+
+    def fake_assemble(d, images, repo=None):
+        assert images["hero_path"] == "/tmp/pr-image.png"
+        mdx = Path(repo) / "src/content/blog/approval-safe.mdx"
+        mdx.write_text("---\ntitle: \"Approval Safe\"\napproved: false\n---\nbody")
+        return mdx
+
+    monkeypatch.setattr("blog.blog_assembler.assemble", fake_assemble)
+    monkeypatch.setattr("blog.blog_publisher.stage_draft", lambda mdx, repo=None: "approval-safe")
+    monkeypatch.setattr("blog.blog_approval.request", lambda slug, title, stream, tier, mdx_path: calls.append((slug, mdx_path)) or "aid")
+    monkeypatch.setattr("config.SAHILBLOG_REPO", repo)
+
+    result = p2b.generate_blog_post(pr, "NousResearch/hermes-agent", dry_run=False)
+    assert result["approved"] is False
+    assert result["approval_id"] == "aid"
+    assert result["image_source"] == "upstream_pr_infographic"
+    assert calls == [("approval-safe", str(repo / "src/content/blog/approval-safe.mdx"))]

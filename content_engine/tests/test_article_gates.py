@@ -123,6 +123,20 @@ def test_secret_scan_redacts_api_key():
     assert "***REDACTED***" in res.redacted_body
 
 
+def test_secret_scan_does_not_redact_task_specific_words():
+    """The sk- detector must not corrupt normal words like task-specific."""
+    body = (
+        "# T\n\nLede. Lede.\n\n"
+        "## A\n\nA task-specific context packet is not a credential.\n"
+        "## B\n\n" + ("body " * 30) + "\n\n"
+        "## C\n\n" + ("body " * 30) + "\n\n"
+        "## What I'd try next\n\n" + ("body " * 20) + "\n"
+    )
+    res = ag.check(_draft(body=body))
+    assert "task-specific" in res.redacted_body
+    assert "***REDACTED***" not in res.redacted_body
+
+
 def test_check_inherits_slop_gate():
     """Known slop phrase fails on the slop_score carried over from gate_post."""
     body = (

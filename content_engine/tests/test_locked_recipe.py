@@ -50,30 +50,38 @@ def test_generate_accepts_recipe_override(monkeypatch, tmp_path):
 
 
 def test_illustrate_locks_palette(monkeypatch, tmp_path):
-    """One palette string across hero + all sections (Codex CLI path).
+    """One consistent creative style across hero + all sections in one post.
 
-    The new Codex CLI illustrator does not use recipe-based palette locking.
-    Instead, palette guidance is passed as text in the prompt. This test
-    verifies the same palette string is passed to every generate call.
+    The skill rotation picks one style per post. All images in one post use
+    the same style template, guaranteeing visual consistency.
     """
     import blog.blog_illustrator as bi
-    seen_palettes = []
+    seen_skills = []
 
-    def fake_hero(title, description, out_path, **kw):
-        seen_palettes.append(kw.get("palette", ""))
-        p = tmp_path / f"hero_{len(seen_palettes)}.png"
+    def fake_generate(prompt, out_path, **kw):
+        # Infer which skill was used from the prompt content
+        if "Mythic Tech Codex" in prompt:
+            seen_skills.append("mythic-tech-codex-illustration")
+        elif "Saga Noir Studio" in prompt:
+            seen_skills.append("saga-noir-studio")
+        elif "Ink & Ember Studio" in prompt:
+            seen_skills.append("ink-ember-studio")
+        elif "Cosmic Postcard Atelier" in prompt:
+            seen_skills.append("cosmic-postcard-atelier")
+        elif "The Ninth Observatory" in prompt:
+            seen_skills.append("ninth-observatory")
+        elif "Chromatic Institute" in prompt:
+            seen_skills.append("chromatic-institute")
+        else:
+            seen_skills.append("unknown")
+        p = tmp_path / f"img_{len(seen_skills)}.png"
+        p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text("x")
-        return str(p)
+        return out_path
 
-    def fake_section(title, heading, out_path, **kw):
-        seen_palettes.append(kw.get("palette", ""))
-        p = tmp_path / f"sec_{len(seen_palettes)}.png"
-        p.write_text("x")
-        return str(p)
-
-    monkeypatch.setattr(bi, "generate_hero", fake_hero)
-    monkeypatch.setattr(bi, "generate_section", fake_section)
+    monkeypatch.setattr(bi, "_generate_codex_image", fake_generate)
     monkeypatch.setattr(bi.config, "BLOG_MAX_SECTION_IMAGES", 2)
+    monkeypatch.setattr(bi, "ROTATION_STATE_PATH", tmp_path / "skill_rotation.json")
 
     draft = {
         "title": "Test post",
@@ -82,6 +90,35 @@ def test_illustrate_locks_palette(monkeypatch, tmp_path):
         "body_md": "## One\nx\n\n## Two\ny\n\n## Three\nz",
     }
     bi.illustrate(draft, out_dir=tmp_path, max_sections=2)
-    # hero + 2 sections = 3 images, all same palette string
-    assert len(set(seen_palettes)) == 1, f"expected 1 palette, got {seen_palettes}"
-    assert len(seen_palettes) == 3, f"expected 3 images, got {len(seen_palettes)}"
+    # hero + 2 sections = 3 images, all same skill
+    assert len(seen_skills) == 3, f"expected 3 images, got {len(seen_skills)}"
+    assert len(set(seen_skills)) == 1, f"expected 1 skill across images, got {seen_skills}"
+
+
+def test_illustrate_varies_palette_across_topics(monkeypatch, tmp_path):
+    """Different topics should not all collapse into the same house image style.
+
+    The creative skill rotation system (6 styles + recency penalty) ensures
+    variety across posts. This test verifies that the skill selector produces
+    different choices for different content profiles.
+    """
+    import blog.blog_illustrator as bi
+
+    monkeypatch.setattr(bi, "ROTATION_STATE_PATH", tmp_path / "skill_rotation.json")
+
+    # Three different content profiles should produce varied skill selections
+    # via the scoring heuristics (stream + cue patterns).
+    selections = set()
+    for title, stream in [
+        ("A spreadsheet for LLM inference", "builder"),
+        ("Agent Memory Architecture", "builder"),
+        ("Model Routing Decision Framework", "ai"),
+    ]:
+        skill = bi._select_skill(title, stream)
+        selections.add(skill)
+
+    # With 6+ styles and different cue patterns, we expect at least 2 different
+    # selections across 3 distinct topics (recency penalty forces variety).
+    assert len(selections) >= 2, (
+        f"Expected at least 2 different skills across 3 topics, got {selections}"
+    )

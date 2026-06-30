@@ -388,25 +388,19 @@ When False (cron mode), the cron agent handles generation via its own prompt."""
 
 
 # Canonical generation chain:
-#   1. OpenAI — gpt-4o-mini: cheap, fast, strong prose. Primary.
-#   2. OpenCode Zen Go — deepseek-v4-flash: free-tier fallback.
-#   3. Ollama-Cloud — gpt-oss:120b: different model family for redundancy.
-# Each entry names its provider so the right API key is attached.
-# OpenAI is primary — it costs ~$0.15/M input tokens, ~$0.60/M output (gpt-4o-mini).
-# At typical content engine volume (~20 posts/month, ~500 tokens each), monthly cost < $1.
+#   1. Ollama-Cloud — deepseek-v4-flash: active low-cost content model.
+#   2. Ollama-Cloud — gpt-oss:120b: different model family for redundancy.
+# OpenCode is intentionally not in the active chain: Cloudflare/availability
+# issues made it too fragile for unattended blog/content crons.
 _FREE_FALLBACK_CHAIN = [
-    {"base": "https://api.openai.com/v1", "model": "gpt-4o-mini", "provider": "openai"},
-    {"base": "https://opencode.ai/zen/go/v1", "model": "deepseek-v4-flash", "provider": "opencode"},
+    {"base": "https://ollama.com/v1", "model": "deepseek-v4-flash", "provider": "ollama"},
     {"base": "https://ollama.com/v1", "model": "gpt-oss:120b", "provider": "ollama"},
 ]
 
-# Long-form / factual tier (articles + blog): stronger, lower-hallucination models
-# where prose quality matters more than per-call cost. Low volume, so the modest
-# extra cost is fine. gpt-4o primary, minimax-m3 (OpenGo) fallback, glm-5.2 (Ollama) last.
+# Long-form / factual tier (articles + blog): stronger Ollama-Cloud models.
 _LONGFORM_CHAIN = [
-    {"base": "https://api.openai.com/v1", "model": "gpt-4o", "provider": "openai"},
-    {"base": "https://opencode.ai/zen/go/v1", "model": "minimax-m3", "provider": "opencode"},
     {"base": "https://ollama.com/v1", "model": "glm-5.2", "provider": "ollama"},
+    {"base": "https://ollama.com/v1", "model": "deepseek-v4-flash", "provider": "ollama"},
 ]
 
 
@@ -439,11 +433,13 @@ def _llm_configs(longform: bool = False) -> list[dict]:
     configs: list[dict] = []
     seen: set = set()
 
-    # Optional operator override (tried first when set). Uses the opencode key.
+    # Optional operator override (tried first when set). Pick the matching key
+    # from the base URL instead of assuming the legacy OpenCode key.
     base = os.getenv("CONTENT_LLM_BASE_URL", "").strip().rstrip("/")
     model = os.getenv("CONTENT_LLM_MODEL", "").strip()
     if base and model:
-        configs.append({"base": base, "model": model, "key": _opencode_key()})
+        provider = "ollama" if "ollama.com" in base else ("openai" if "openai.com" in base else "opencode")
+        configs.append({"base": base, "model": model, "key": _key_for(provider)})
         seen.add((base, model))
 
     chain = _LONGFORM_CHAIN if longform else _FREE_FALLBACK_CHAIN

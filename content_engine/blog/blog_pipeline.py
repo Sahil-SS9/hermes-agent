@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Optional
 
 from config import BLOG_ENABLED, BLOG_STREAMS, SAHILBLOG_REPO
-from blog.blog_router import choose, record
+from blog.blog_router import choose, record, reserve, release
 from blog.blog_generator import write_with_gate
 from blog.blog_illustrator import illustrate
 from blog.blog_assembler import assemble
@@ -126,7 +126,7 @@ def get_stale_failed_images() -> list[dict]:
     return [e for e in _get_failed_entries() if _is_stale(e)]
 
 
-def _maybe_request_approval(draft: dict, stream: str, slug: str) -> None:
+def _maybe_request_approval(draft: dict, stream: str, slug: str, mdx_path: str) -> None:
     """Request Discord approval for a successfully staged draft (Process 1).
 
     Non-blocking: logs error on failure but never crashes the pipeline.
@@ -139,7 +139,7 @@ def _maybe_request_approval(draft: dict, stream: str, slug: str) -> None:
             title=draft.get("title", ""),
             stream=stream,
             tier=draft.get("tier", ""),
-            mdx_path="",
+            mdx_path=mdx_path,
         )
     except Exception as exc:
         import logging
@@ -159,12 +159,15 @@ def run_stream(stream: str, repo: Optional[str] = None) -> dict:
     if not plan:
         return {"status": "skipped_router", "stream": stream}
 
-    # Mark the topic as used immediately so other streams don't pick it.
-    record(stream, plan.get("topic_id", ""), plan.get("title_hint", ""))
+    # Reserve temporarily so other streams/processes don't pick it while this
+    # run is in flight. This is released on generator/image failure and after
+    # successful permanent record(), avoiding topic-burn.
+    reservation_token = reserve(stream, plan.get("topic_id", ""), plan.get("title_hint", ""))
 
     # 2. Generator (with gate + retry).
     draft = write_with_gate(plan, stream=stream)
     if not draft:
+        release(reservation_token)
         return {"status": "skipped_generator", "stream": stream,
                 "topic_id": plan.get("topic_id")}
 
@@ -178,6 +181,7 @@ def run_stream(stream: str, repo: Optional[str] = None) -> dict:
         slug = draft.get("slug", "")
         error = "All image generation attempts failed (hero + sections)"
         _track_failed_image(slug, stream, error)
+        release(reservation_token)
         return {
             "status": "failed_images", "stream": stream,
             "slug": slug, "title": draft.get("title", ""),
@@ -191,44 +195,20 @@ def run_stream(stream: str, repo: Optional[str] = None) -> dict:
     # 6. Publisher (stage draft, no push).
     slug = stage_draft(str(mdx_path), repo=repo_path)
 
-    # 7. Record topic (on success only, record-on-success).
+    # 7. Record topic permanently (on success only), then release reservation.
     record(stream, plan.get("topic_id", ""), draft.get("title", ""))
+    release(reservation_token)
 
     # 8. Optionally request Discord approval (Process 1).
     # This doesn't change the publish flow — approval is tracked separately
     # and handled by the approval-requester cron.
-    _maybe_request_approval(draft, stream, slug)
+    _maybe_request_approval(draft, stream, slug, str(mdx_path))
 
     return {
         "status": "ok", "stream": stream, "slug": slug,
         "title": draft.get("title", ""), "topic_id": plan.get("topic_id", ""),
         "mdx_path": str(mdx_path),
     }
-
-
-def _check_systemic_ocr_failures(draft: dict, images: dict) -> None:
-    """Check if >50% of section images had OCR text issues and flag the post."""
-    import logging
-    section_paths = images.get("section_paths", [])
-    if isinstance(section_paths, list) and len(section_paths) > 0:
-        total = len(section_paths)
-        # Check each section image by re-running OCR (quick stats check).
-        ocr_failures = 0
-        for img_path in section_paths:
-            try:
-                from blog.codex_image_gen import _ocr_text_check
-                result = _ocr_text_check(str(img_path))
-                if not result["legible"]:
-                    ocr_failures += 1
-            except Exception:
-                ocr_failures += 1
-        failure_pct = ocr_failures / total * 100
-        if failure_pct > 50:
-            logging.getLogger("blog_pipeline").warning(
-                "Systemic OCR failure: title='%s', %d/%d images illegible (%.0f%%). "
-                "Flagging post for review.",
-                draft.get("title", ""), ocr_failures, total, failure_pct,
-            )
 
 
 def retry_failed_images(slug: str, stream: str,
