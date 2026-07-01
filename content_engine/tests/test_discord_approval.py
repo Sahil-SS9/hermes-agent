@@ -102,9 +102,15 @@ class TestApprovalTracker:
 
     def test_request_preview_embeds_article_image(self, tmp_path):
         from blog.blog_approval import request, _read_tracker
+        from PIL import Image
+        import io
         slug = "image-preview-post"
         hero = tmp_path / "hero.png"
-        hero.write_bytes(b"\x89PNG\r\n\x1a\n" + b"x" * 128)
+        # Create a 100x100 red PNG via Pillow
+        img = Image.new("RGB", (100, 100), (255, 0, 0))
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        hero.write_bytes(buf.getvalue())
         mdx = tmp_path / f"{slug}.mdx"
         mdx.write_text(
             f"---\ntitle: \"Image Preview Post\"\ndescription: \"Check image\"\npubDate: 2026-06-30\nheroImage: \"{hero}\"\ntags: [\"test\"]\ntier: pm\nformat: essay\napproved: false\nsource: manual\n---\n\n# Image Preview Post\n\nBody.",
@@ -115,8 +121,8 @@ class TestApprovalTracker:
         preview = Path(entry["preview_path"])
         assert preview.exists()
         html = preview.read_text(encoding="utf-8")
-        assert "data:image/png;base64," in html
-        assert "ARTICLE HERO IMAGE" in html
+        assert "data:image/jpeg;base64," in html  # compressed images embedded
+        assert "compressed" in html  # compression meta label
 
     def test_request_blocks_duplicate_topic_cluster_without_series(self, tmp_path):
         from blog.blog_approval import request

@@ -735,18 +735,48 @@ def _resolve_blog_asset_path(src: str) -> Optional[Path]:
     return p if p.is_absolute() else None
 
 
-def _image_to_data_uri(src: str) -> tuple[str, str]:
+def _image_to_data_uri(src: str, max_width: int = 800, jpeg_quality: int = 80) -> tuple[str, str]:
     """Return (browser_src, meta) for preview images.
 
     Approval HTML is delivered as a Discord attachment. Absolute local paths like
     /home/kensei/repos/SahilBlog/public/blog/<slug>/hero.png are not readable on
     Sahil's machine after download, so embed existing local images as data URIs.
-    Fall back to the original src when the file is unavailable so the preview
-    still shows an explicit broken-image placeholder.
+
+    Images are compressed (resize to max_width, JPEG quality jpeg_quality) before
+    embedding to keep the preview file under 1MB. Falls back to raw embedding when
+    Pillow is unavailable or the image format can't be processed.
     """
     p = _resolve_blog_asset_path(src)
     if not p or not p.exists() or not p.is_file():
         return src, "image missing from preview bundle"
+    try:
+        # Try compressed path via Pillow
+        from PIL import Image as PILImage
+        pil_img = PILImage.open(p)
+        ow, oh = pil_img.size
+        if ow > max_width:
+            nh = int(oh * max_width / ow)
+            pil_img = pil_img.resize((max_width, nh), PILImage.LANCZOS)
+        import io
+        buf = io.BytesIO()
+        # Convert to RGB if RGBA (JPEG doesn't support alpha)
+        if pil_img.mode in ("RGBA", "P"):
+            pil_img = pil_img.convert("RGB")
+        pil_img.save(buf, format="JPEG", quality=jpeg_quality, optimize=True)
+        compressed = buf.getvalue()
+        encoded = base64.b64encode(compressed).decode("ascii")
+        orig_kb = p.stat().st_size / 1024
+        new_kb = len(compressed) / 1024
+        return (
+            f"data:image/jpeg;base64,{encoded}",
+            f"compressed · {p.name} · {new_kb:.0f} KB (was {orig_kb:.0f} KB)",
+        )
+    except ImportError:
+        # Pillow not available — fall back to raw embed
+        pass
+    except Exception:
+        # Any compression failure — fall back to raw embed
+        pass
     try:
         data = p.read_bytes()
         mime = mimetypes.guess_type(str(p))[0] or "image/png"
@@ -769,8 +799,15 @@ def build_preview_html(
     hero_src: str = "",
     section_images: Optional[list[str]] = None,
     status: str = "pending",
+    embed_images: bool = True,
 ) -> str:
-    """Build a standalone HTML file from post data."""
+    """Build a standalone HTML file from post data.
+
+    When embed_images is False, images are referenced by their blog-relative
+    paths instead of being embedded as base64 data URIs. This keeps the preview
+    file small (< 50 KB) for Discord attachment, at the cost of showing image
+    placeholders when the file is opened offline.
+    """
     body_html, extracted_h = md_to_html(body_md)
     
     # Build tag spans
@@ -790,25 +827,35 @@ def build_preview_html(
     # Hero image HTML
     hero_html = ""
     if hero_src:
-        img_path, hero_meta = _image_to_data_uri(hero_src)
-        hero_html = f'''
+        if embed_images:
+            img_path, hero_meta = _image_to_data_uri(hero_src)
+            hero_label = "▼ ARTICLE HERO IMAGE — REVIEW THIS"
+        else:
+            img_path = hero_src
+            hero_meta = "placeholders — lightweight preview (no embedded images)"
+            hero_label = "▼ HERO (placeholder in lightweight preview)"
+        hero_html = f"""\
         <div class="hero-image">
-          <img src="{_escape(img_path)}" alt="Hero: {_escape(title)}" onerror="this.outerHTML='<div class=\\'hero-image\\' style=\\'padding:40px;text-align:center;color:var(--fg-mute);border:1px dashed var(--rule);font-family:VT323,monospace\\'>[HERO IMAGE MISSING — {_escape(title[:60])}]</div>'">
-          <div class="hero-label">▼ ARTICLE HERO IMAGE — REVIEW THIS</div>
+          <img src="{_escape(img_path)}" alt="Hero: {_escape(title)}" onerror="this.outerHTML='<div class=\\\\'hero-image\\\\' style=\\\\'padding:40px;text-align:center;color:var(--fg-mute);border:1px dashed var(--rule);font-family:VT323,monospace\\\\'>[HERO IMAGE — {_escape(title[:60])}]</div>'">
+          <div class="hero-label">{hero_label}</div>
           <div class="hero-label" style="top:auto;bottom:8px;left:8px;color:var(--neon-yellow);">{_escape(hero_meta)}</div>
-        </div>'''
-    
+        </div>"""
+
     # Section images
     section_html = ""
     if section_images:
         for i, img in enumerate(section_images):
             if isinstance(img, str) and img.strip():
-                section_src, section_meta = _image_to_data_uri(img.strip())
-                section_html += f'''
+                if embed_images:
+                    section_src, section_meta = _image_to_data_uri(img.strip())
+                else:
+                    section_src = img.strip()
+                    section_meta = "placeholders — lightweight preview"
+                section_html += f"""\
                 <div class="section-image">
-                  <img src="{_escape(section_src)}" alt="Section {i+1}" loading="lazy" onerror="this.outerHTML='<div style=\\'padding:20px;text-align:center;color:var(--fg-mute);border:1px dashed var(--rule-soft);margin:16px 0;font-family:VT323,monospace\\'>[SECTION IMAGE {i+1}]</div>'">
+                  <img src="{_escape(section_src)}" alt="Section {i+1}" loading="lazy" onerror="this.outerHTML='<div style=\\\\'padding:20px;text-align:center;color:var(--fg-mute);border:1px dashed var(--rule-soft);margin:16px 0;font-family:VT323,monospace\\\\'>[SECTION IMAGE {i+1}]</div>'">
                   <div class="section-label">§ {i+1:02d} · {_escape(section_meta)}</div>
-                </div>'''
+                </div>"""
     
     # Status badge
     if status == "approved":

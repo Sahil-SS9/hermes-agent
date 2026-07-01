@@ -139,6 +139,7 @@ def _generate_preview(slug: str, mdx_path: str = "") -> str:
                 hero_src=fm.get("heroImage", ""),
                 section_images=section_images,
                 status="pending",
+                embed_images=True,  # images compressed via Pillow before embedding
             )
         else:
             from blog.preview import _read_mdx, build_preview_html
@@ -248,8 +249,23 @@ def remove(slug: str) -> None:
     _write_tracker(entries)
 
 
+def _preview_size_ok(preview_path: str, max_mb: int = 7) -> bool:
+    """Check if preview file is small enough for Discord attachment."""
+    try:
+        return Path(preview_path).stat().st_size < max_mb * 1024 * 1024
+    except OSError:
+        return False
+
+
+_ATTACHMENT_OVERSIZE_MSG = "Preview too large for Discord attachment. Use `!preview <slug>` to generate and receive a lightweight preview."
+
+
 def summary(entry: dict) -> str:
     """Build a Discord-friendly approval request message."""
+    preview = entry.get("preview_path") or ""
+    preview_ok = bool(preview and Path(preview).exists() and _preview_size_ok(preview))
+    preview_oversize = bool(preview and Path(preview).exists() and not _preview_size_ok(preview))
+
     lines = [
         "[Blog Approval Request]",
         "━━━ **📝  Draft Ready for Review** ━━━",
@@ -259,15 +275,18 @@ def summary(entry: dict) -> str:
         f"**Approval ID:** `{entry.get('approval_id', '?')}`",
         f"**File:** `{entry.get('mdx_path', '?')}`",
     ]
-    preview = entry.get("preview_path") or ""
-    if preview and Path(preview).exists():
+    if preview_ok:
         lines.append(f"MEDIA:{preview}")
+    elif preview_oversize:
+        lines.append(f"> {_ATTACHMENT_OVERSIZE_MSG}")
     lines.extend([
         "",
         "**Reply in this thread:**",
         "  `!approve <slug>` — build + push to production",
         "  `!reject <slug> [reason]` — block, draft stays hidden",
         "  `!amend <slug> [notes]` — needs edits before approval",
+        "",
+        "Need to see the visual preview? Reply `!preview <slug>` for a lightweight text preview with image placeholders.",
     ])
     return "\n".join(lines)
 
@@ -293,7 +312,7 @@ def parse_discord_command(text: str) -> Optional[dict]:
 
     Returns dict with keys: {'command': str, 'slug': str, 'args': str} or None.
     """
-    m = re.match(r"^!(approve|reject|amend)\s+(\S+)\s*(.*)", text.strip(), re.IGNORECASE)
+    m = re.match(r"^!(approve|reject|amend|preview)\s+(\S+)\s*(.*)", text.strip(), re.IGNORECASE)
     if not m:
         return None
     return {
@@ -342,5 +361,52 @@ def handle_discord_command(text: str) -> dict:
         amend(slug, cmd["args"])
         return {"handled": True, "action": "amended", "slug": slug,
                 "message": f"✏️ **{slug}** marked for amendment. Edit the MDX locally and re-stage."}
+
+    elif action == "preview":
+        # Find the pending entry
+        entries = _read_tracker()
+        entry = next((e for e in entries if e.get("slug") == slug), None)
+        if not entry:
+            return {"handled": False, "message": f"❌ No approval entry found for `{slug}`."}
+        mdx_path = entry.get("mdx_path", "")
+        if not mdx_path or not Path(mdx_path).exists():
+            return {"handled": False, "message": f"❌ MDX file not found for `{slug}`: {mdx_path}"}
+        # Generate lightweight text-only preview
+        try:
+            from blog.preview import build_preview_html, parse_frontmatter
+            text = Path(mdx_path).read_text(encoding="utf-8", errors="replace")
+            fm, body = parse_frontmatter(text)
+            import json, re
+            tags_raw = fm.get("tags", "[]")
+            try:
+                tags = json.loads(tags_raw) if tags_raw.startswith("[") else [t.strip().strip("\"'") for t in tags_raw.strip("[]").split(",") if t.strip()]
+            except Exception:
+                tags = []
+            section_images = [m[1] for m in re.findall(r'!\[([^\]]*)\]\(([^)]+)\)', body)[:6]]
+            html = build_preview_html(
+                slug=slug,
+                title=fm.get("title", slug),
+                description=fm.get("description", ""),
+                stream="builder" if fm.get("tier") == "builder" else fm.get("tier", "ai"),
+                tier=fm.get("tier", "ai"),
+                tags=tags,
+                body_md=body,
+                pub_date=str(fm.get("pubDate", "")),
+                hero_src=fm.get("heroImage", ""),
+                section_images=section_images,
+                status="pending",
+                embed_images=True,
+            )
+            out_dir = Path(__file__).resolve().parent.parent / "previews"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            out_path = out_dir / f"{slug}-light.html"
+            out_path.write_text(html, encoding="utf-8")
+            return {
+                "handled": True, "action": "preview", "slug": slug,
+                "message": f"MEDIA:{out_path}\n📄 **{slug}** — lightweight preview generated.",
+            }
+        except Exception as exc:
+            return {"handled": True, "action": "preview_failed", "slug": slug,
+                    "message": f"⚠️ Preview generation failed for `{slug}`: {exc}"}
 
     return {"handled": False, "message": "Unexpected error."}
