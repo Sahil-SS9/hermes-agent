@@ -12,6 +12,7 @@ Order of operations (mirrors article_pipeline):
 Status values:
   - "skipped_disabled"    - BLOG_ENABLED is False
   - "skipped_router"      - router returned None
+  - "skipped_excluded"    - exclusion-list policy blocked the item
   - "skipped_generator"   - generator returned None (LLM dead or gate fail)
   - "ok"                  - draft staged + topic recorded
   - "failed_images"       - all images failed; post set aside for retry
@@ -31,6 +32,7 @@ from blog.blog_generator import write_with_gate
 from blog.blog_illustrator import illustrate
 from blog.blog_assembler import assemble
 from blog.blog_publisher import stage_draft
+from blog.exclusions import ExcludedContentError, assert_allowed
 
 
 # Path for tracking posts with failed images.
@@ -164,6 +166,16 @@ def run_stream(stream: str, repo: Optional[str] = None,
     if not plan:
         return {"status": "skipped_router", "stream": stream}
 
+    try:
+        assert_allowed(title=plan.get("title_hint", ""),
+                       topic_id=plan.get("topic_id", ""))
+    except ExcludedContentError as exc:
+        return {
+            "status": "skipped_excluded", "stream": stream,
+            "topic_id": plan.get("topic_id", ""),
+            "reason": str(exc),
+        }
+
     # Reserve temporarily so other streams/processes don't pick it while this
     # run is in flight. This is released on generator/image failure and after
     # successful permanent record(), avoiding topic-burn.
@@ -198,7 +210,15 @@ def run_stream(stream: str, repo: Optional[str] = None,
     mdx_path = assemble(draft, images, repo=repo_path, pub_date=pub_date)
 
     # 6. Publisher (stage draft, no push).
-    slug = stage_draft(str(mdx_path), repo=repo_path)
+    try:
+        slug = stage_draft(str(mdx_path), repo=repo_path)
+    except ExcludedContentError as exc:
+        release(reservation_token)
+        return {
+            "status": "skipped_excluded", "stream": stream,
+            "topic_id": plan.get("topic_id", ""),
+            "reason": str(exc),
+        }
 
     # 7. Record topic permanently (on success only), then release reservation.
     record(stream, plan.get("topic_id", ""), draft.get("title", ""))

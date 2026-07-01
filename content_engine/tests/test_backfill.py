@@ -115,6 +115,31 @@ def test_backfill_skips_existing_and_respects_cap(monkeypatch, tmp_path):
         f"spend {result['total_spend_gbp']} exceeded cap {cfg.BACKFILL_SPEND_CAP_GBP}"
 
 
+def test_backfill_excludes_seeded_topics_before_generation(monkeypatch, tmp_path):
+    import blog.backfill as bf
+    import config as cfg
+
+    repo = tmp_path / "SahilBlog"
+    posts_dir = repo / "src/content/blog"
+    posts_dir.mkdir(parents=True)
+
+    monkeypatch.setattr(cfg, "SAHILBLOG_REPO", str(repo))
+    monkeypatch.setattr(cfg, "BACKFILL_LEDGER_PATH", str(tmp_path / "bf_ledger.json"))
+
+    call_count = {"n": 0}
+    def tracking_write(*args, **kwargs):
+        call_count["n"] += 1
+        return None
+    monkeypatch.setattr(bf, "write_with_gate", tracking_write)
+
+    result = bf.run(stream="builder")
+    titles = {r["title"]: r["status"] for r in result["results"]}
+    assert titles["Cheap-first model routing"] == "excluded"
+    assert titles["Reference-anchored image generation"] == "excluded"
+    assert titles["What production AI agent actually means"] == "excluded"
+    assert call_count["n"] >= 1
+
+
 def test_backfill_halts_on_review_unavailable(monkeypatch, tmp_path):
     """When write_with_gate raises ReviewUnavailable, backfill halts the stream
     and no further stage_draft calls are made."""

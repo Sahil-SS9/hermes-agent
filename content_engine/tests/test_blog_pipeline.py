@@ -96,6 +96,29 @@ def test_run_stream_skips_when_router_returns_none(monkeypatch, tmp_path):
     assert result["status"] == "skipped_router"
 
 
+def test_run_stream_skips_when_excluded_by_policy(monkeypatch, tmp_path):
+    """Excluded topics are rejected before generation begins."""
+    repo = _setup_tmp_repo(tmp_path)
+    plan = {
+        "topic_id": "manual-1234",
+        "title_hint": "Cheap-first model routing",
+        "tags": [],
+        "source": "manual",
+        "signals": [{"signal_id": "t1", "summary": "s"}],
+    }
+    monkeypatch.setattr(bpl, "choose", lambda stream: plan)
+    generator_called = {"n": 0}
+
+    def fake_write(p, stream):
+        generator_called["n"] += 1
+        return _DRAFT
+
+    monkeypatch.setattr(bpl, "write_with_gate", fake_write)
+    result = bpl.run_stream("ai", repo=str(repo))
+    assert result["status"] == "skipped_excluded"
+    assert generator_called["n"] == 0
+
+
 def test_run_stream_skips_when_generator_returns_none(monkeypatch, tmp_path):
     """When the generator returns None (LLM dead), run_stream skips."""
     repo = _setup_tmp_repo(tmp_path)

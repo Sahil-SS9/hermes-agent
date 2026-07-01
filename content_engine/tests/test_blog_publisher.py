@@ -36,3 +36,19 @@ def test_stage_draft_raises_on_git_add_failure(monkeypatch, tmp_path):
         assert "add failed" in str(exc)
     else:
         raise AssertionError("stage_draft should raise on git add failure")
+
+
+def test_stage_draft_raises_when_excluded(monkeypatch, tmp_path):
+    from blog import blog_publisher as bp
+
+    mdx = tmp_path / "src/content/blog/cheap-first-model-routing.mdx"
+    mdx.parent.mkdir(parents=True)
+    mdx.write_text('---\ntitle: "Cheap-first model routing"\n---\nbody')
+    monkeypatch.setattr(bp, "_git", lambda repo_path, *args: MagicMock(returncode=0, stdout="", stderr=""))
+
+    try:
+        bp.stage_draft(str(mdx), repo=str(tmp_path))
+    except bp.ExcludedContentError as exc:
+        assert "Excluded by policy" in str(exc)
+    else:
+        raise AssertionError("stage_draft should raise on excluded content")

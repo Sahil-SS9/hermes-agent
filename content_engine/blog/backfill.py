@@ -35,6 +35,7 @@ from blog.blog_assembler import assemble
 from blog.blog_generator import ReviewUnavailable, write_with_gate
 from blog.blog_illustrator import illustrate
 from blog.blog_publisher import stage_draft
+from blog.exclusions import ExcludedContentError, assert_allowed
 
 if sys.version_info >= (3, 11):
     from typing import assert_never  # noqa: F401
@@ -189,6 +190,16 @@ def run(stream: Optional[str] = None, limit: Optional[int] = None,
             title = topic["title"]
             slug = _slug_from_title(title)
 
+            try:
+                assert_allowed(title=title, slug=slug, topic_id=title)
+            except ExcludedContentError as exc:
+                print(f"[backfill] EXCLUDE [{s}] {title}: {exc}")
+                result["skipped"] += 1
+                result["results"].append(
+                    {"stream": s, "title": title, "status": "excluded", "reason": str(exc)}
+                )
+                continue
+
             # Idempotency check.
             if _exists_on_disk(slug):
                 print(f"[backfill] SKIP (exists) [{s}] {title}")
@@ -256,7 +267,15 @@ def run(stream: Optional[str] = None, limit: Optional[int] = None,
             pub_date = date_map.get(title)
             mdx_path = assemble(draft, images, repo=config.SAHILBLOG_REPO,
                                 pub_date=pub_date)
-            slug_staged = stage_draft(str(mdx_path), repo=config.SAHILBLOG_REPO)
+            try:
+                slug_staged = stage_draft(str(mdx_path), repo=config.SAHILBLOG_REPO)
+            except ExcludedContentError as exc:
+                print(f"[backfill] EXCLUDE [{s}] {title}: {exc}")
+                result["skipped"] += 1
+                result["results"].append(
+                    {"stream": s, "title": title, "status": "excluded", "reason": str(exc)}
+                )
+                continue
             print(f"[backfill] staged [{s}] {slug_staged}")
             result["generated"] += 1
             result["results"].append({

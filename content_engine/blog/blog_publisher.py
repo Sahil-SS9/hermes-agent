@@ -17,6 +17,7 @@ from typing import Optional
 
 from config import SAHILBLOG_REPO
 from blog.blog_approval import request as request_approval
+from blog.exclusions import ExcludedContentError, assert_allowed
 
 
 def _git(repo: str, *args) -> subprocess.CompletedProcess:
@@ -59,6 +60,8 @@ def stage_draft(mdx_path: str, repo: Optional[str] = None) -> str:
     """
     repo_path = str(repo) if repo else str(SAHILBLOG_REPO)
     slug = _slug_from_path(mdx_path)
+    title = _read_title_from_mdx(mdx_path)
+    assert_allowed(title=title, slug=slug)
     # Stage the post + its images.
     _ensure_git_ok(_git(repo_path, "add", str(mdx_path)), "add draft")
     # Stage images in public/blog/<slug>/ if they exist.
@@ -145,6 +148,11 @@ def stage_adhoc(mdx_path: str, stream: str = "ai",
     status, issues = adhoc_check(draft, stream)
     if status != "ok":
         return {"status": "rejected", "issues": issues}
+
+    try:
+        assert_allowed(title=draft.get("title", ""), slug=draft.get("slug", ""))
+    except ExcludedContentError as exc:
+        return {"status": "rejected", "issues": [str(exc)]}
 
     # Write the (possibly redacted) body back to the MDX.
     if draft["body_md"] != body_md:
