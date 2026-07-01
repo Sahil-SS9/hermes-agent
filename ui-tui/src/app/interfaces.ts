@@ -138,6 +138,7 @@ export interface OverlayState {
   askUserQuestions: AskUserQuestionsReq | null
   clarify: ClarifyReq | null
   confirm: ConfirmReq | null
+  journey: boolean
   modelPicker: boolean
   pager: null | PagerState
   petPicker: boolean
