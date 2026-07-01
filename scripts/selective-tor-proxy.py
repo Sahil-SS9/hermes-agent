@@ -120,7 +120,7 @@ async def _rotate_and_notify():
 async def new_tor_ip(timeout=15.0) -> bool:
     try:
         proc = await asyncio.create_subprocess_exec(
-            "sh", str(Path(__file__).parent / "rotate-tor-ip.sh"), "--quiet",
+            "bash", str(Path(__file__).parent / "rotate-tor-ip.sh"), "--quiet",
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         _, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         if proc.returncode == 0:
