@@ -507,10 +507,13 @@ def _find_latest_codex_image(
 
 
 def _generate_webp(png_path: str) -> Optional[str]:
-    """Generate a WebP copy alongside the PNG for the Astro <picture> tag."""
+    """Generate a WebP copy alongside the PNG for the Astro <picture> tag.
+
+    Always overwrites: PostLayout serves the .webp first, so a stale webp left
+    beside a freshly regenerated png would keep the OLD image live. The webp
+    must track the png, never short-circuit on existence.
+    """
     webp_path = Path(png_path).with_suffix(".webp")
-    if webp_path.exists():
-        return str(webp_path)
     try:
         result = subprocess.run(
             [
