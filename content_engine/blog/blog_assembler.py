@@ -25,6 +25,7 @@ from typing import Optional
 
 from config import SAHILBLOG_REPO
 from blog.blog_slug import slugify
+from blog.schema_contract import normalise_frontmatter
 
 
 SEMANTIC_DUPLICATE_THRESHOLD = 0.85
@@ -236,6 +237,9 @@ def assemble(draft: dict, images: dict, repo: Optional[str] = None,
         "approved": False,
         "source": draft.get("source", "manual"),
     }
+    # Enforce the Astro schema contract: clamp source/tier/format/tags to the
+    # enums in content.config.ts so a draft can never break the production build.
+    fm = normalise_frontmatter(fm, repo=str(repo_path))
 
     # Hero image.
     hero = images.get("hero_path")
