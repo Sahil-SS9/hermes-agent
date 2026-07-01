@@ -376,8 +376,7 @@ def main() -> int:
 
     # ── 3. Silent if nothing changed ──────────────────────────────────────
     if not log_entries:
-        print("[SILENT]")
-        return 0
+        return 0  # silent — nothing changed
 
     # ── 4. Update index.md + log.md ───────────────────────────────────────
     _update_index(new_pages)

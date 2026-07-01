@@ -152,7 +152,7 @@ def main():
             report_path.write_text(report)
             print(report)
         else:
-            print("[SILENT] - no pattern to report")
+            return  # silent — no pattern
         return
 
     print("Usage: spawn-logger.py [--query | --report]")

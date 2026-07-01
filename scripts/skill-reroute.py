@@ -266,8 +266,7 @@ def scan_and_reroute(db_path, board_label, skill_map):
 def main():
     boards = get_board_paths()
     if not boards:
-        print("[SILENT] No kanban boards found")
-        return
+        return  # silent — no kanban boards
 
     print(f"Scanning {len(boards)} board(s) for forced-skill blocks...", flush=True)
 
@@ -285,7 +284,7 @@ def main():
     if total_rerouted == 0:
         # Check for stale forced_skill_rejected tasks that were manually moved
         # but still have unresolved reject events
-        print(f"\n[SILENT] No forced-skill blocks found across all boards")
+        return  # silent — no forced-skill blocks
     else:
         print(f"\nDone: {total_rerouted} rerouted, {total_skipped} skipped")
 

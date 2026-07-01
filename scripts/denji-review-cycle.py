@@ -232,9 +232,6 @@ def _run_cycle(cycle: str) -> str:
     event_type = f"profile.review.{cycle}"
     profiles = _all_profiles()
 
-    print(f"Denji Review Cycle - {cycle} - {len(profiles)} profiles - {datetime.now(timezone.utc).isoformat()}")
-    print()
-
     results = []
     for profile in sorted(profiles):
         findings = review_fn(profile, since)
@@ -254,14 +251,30 @@ def _run_cycle(cycle: str) -> str:
         )
         results.append((profile, findings["recommendation"]))
 
-    # Summary
+    # Summary — only print when there are changes from last cycle
     active = sum(1 for _, r in results if "active" in r)
     low = sum(1 for _, r in results if "low activity" in r)
     dormant = sum(1 for _, r in results if "dormant" in r)
-    print(f"Summary: {active} active, {low} low, {dormant} dormant")
-    print(f"Events recorded to ledger: {len(results)} × {event_type}")
 
-    # Write JSON artifact to logboard for reference
+    # Compare against previous artifact to detect changes
+    prev_artifacts = sorted(LOGBOARD.glob(f"profile-review-{cycle}-*.json"), reverse=True) if LOGBOARD.exists() else []
+    prev_recs = {}
+    if prev_artifacts:
+        try:
+            prev = json.loads(prev_artifacts[0].read_text())
+            for entry in prev.get("results", []):
+                prev_recs[entry["profile"]] = entry["recommendation"]
+        except Exception:
+            pass
+
+    # Count changes
+    changed = []
+    for profile, rec in results:
+        prev_rec = prev_recs.get(profile)
+        if prev_rec != rec:
+            changed.append((profile, prev_rec, rec))
+
+    # Write JSON artifact to logboard for reference (always)
     LOGBOARD.mkdir(parents=True, exist_ok=True)
     artifact = {
         "cycle": cycle,
@@ -278,6 +291,18 @@ def _run_cycle(cycle: str) -> str:
     }
     artifact_path = LOGBOARD / f"profile-review-{cycle}-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}.json"
     artifact_path.write_text(json.dumps(artifact, indent=2))
+
+    # Only deliver to Discord when there are changes
+    if not changed:
+        return event_type  # silent — no changes from last cycle
+
+    print(f"Denji Review Cycle - {cycle} - {len(profiles)} profiles")
+    print(f"Changes: {len(changed)} (of {len(results)} reviewed)")
+    print(f"Summary: {active} active, {low} low, {dormant} dormant")
+    print(f"Events recorded to ledger: {len(results)} × {event_type}")
+    for profile, prev_rec, new_rec in changed[:10]:
+        prev_short = (prev_rec or "new")[:40]
+        print(f"  {profile}: {prev_short} → {new_rec[:40]}")
     print(f"Artifact: {artifact_path}")
 
     return event_type

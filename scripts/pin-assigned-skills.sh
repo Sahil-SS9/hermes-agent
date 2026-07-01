@@ -126,6 +126,5 @@ if [ "$FAILED" -gt 0 ]; then
 elif [ "$SKIPPED" -gt 0 ]; then
     echo "🟡 Skill pinning · $SKIPPED stale/invalid ref(s) of $UNIQUE ($PINNED pinned)"
     printf '%s\n' "${PROBLEMS[@]}"
-else
-    echo "[SILENT]"
 fi
+# else: silent — clean run, no output

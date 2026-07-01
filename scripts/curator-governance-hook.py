@@ -342,8 +342,7 @@ def main():
 
     if report is None:
         status("No curator report found - curator may not have run yet (expected on first run).")
-        print("[SILENT]")
-        return
+        return  # silent
 
     c = report.get("counts", {}) or {}
     status(f"Curator report {report.get('started_at', 'unknown')}: "
@@ -428,8 +427,7 @@ def main():
         print(f"{sev} Curator governance - {len(archival_overrides)} blocked archival(s), "
               f"{len(pending_lines)} skill(s) need review")
         print("\n".join(actionable))
-    else:
-        print("[SILENT]")
+    # else: silent — no actionable items
 
 
 if __name__ == "__main__":

@@ -449,33 +449,32 @@ def main() -> int:
     shutil.copy2(logfile, latest)
 
     if not findings and not integrity_failures and not scan_errors:
-        print("[SILENT]")
-        return 0
+        return 0  # silent — nothing to report
+
+    # Historical-only drift goes to JSON log only, not Discord.
+    # Only deliver to Discord when there are live findings, integrity failures, or scan errors.
+    if not live_findings and not integrity_failures and not scan_errors:
+        return 0  # silent — historical drift is audit-only, logged to JSON
 
     # Lead with a severity marker so the delivery envelope can route correctly:
     # 🔴 actionable (live critical, or DB integrity/scan failures) pings; 🟡 live
-    # non-critical posts quietly; 🟢 historical-only drift goes to the briefing.
+    # non-critical posts quietly.
     if integrity_failures or scan_errors or live_by_severity.get("critical"):
         marker = "🔴"
-    elif live_findings:
-        marker = "🟡"
     else:
-        marker = "🟢"
+        marker = "🟡"
     print(f"{marker} Worker Failure Analysis · {display_now(scan_time)}")
     print(
         f"DBs scanned: {len(dbs)} · tasks: {payload['summary']['task_count']} · "
-        f"live findings: {len(live_findings)} · historical terminal drift: {len(historical_findings)}"
+        f"live findings: {len(live_findings)}"
     )
-    print(f"Integrity: {'OK' if not integrity_failures else 'FAIL ' + str(len(integrity_failures))}")
+    if integrity_failures:
+        print(f"Integrity: FAIL {len(integrity_failures)}")
     if live_by_severity:
         sev_bits = [f"{k}={v}" for k, v in sorted(live_by_severity.items())]
         print("Live severity: " + ", ".join(sev_bits))
-    elif historical_findings:
-        print("Live severity: none")
     if live_by_kind:
         print("Live issue types: " + ", ".join(f"{k}={v}" for k, v in live_by_kind.most_common(5)))
-    if by_kind:
-        print("Historical issue types: " + ", ".join(f"{k}={v}" for k, v in by_kind.most_common(5)))
     if live_findings:
         print("Highest-risk live examples:")
         sev_order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
@@ -491,8 +490,6 @@ def main() -> int:
             printed += 1
             if printed >= 8:
                 break
-    elif historical_findings:
-        print("No live task/run drift found. Historical terminal drift is retained in JSON for cleanup/audit.")
     if scan_errors:
         print("Scan warnings:")
         for b in scan_errors[:5]:
