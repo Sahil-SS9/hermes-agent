@@ -49,37 +49,35 @@ def test_generate_accepts_recipe_override(monkeypatch, tmp_path):
     assert called["select"] == 0, "should never re-select when recipe is given"
 
 
-def test_illustrate_locks_palette(monkeypatch, tmp_path):
-    """One consistent creative style across hero + all sections in one post.
+def test_illustrate_locks_style_across_post(monkeypatch, tmp_path):
+    """One consistent style + palette across hero + all sections in one post.
 
-    The skill rotation picks one style per post. All images in one post use
-    the same style template, guaranteeing visual consistency.
+    The art brief locks one style/palette for the whole post; every image
+    prompt is composed against it, guaranteeing visual consistency.
     """
     import blog.blog_illustrator as bi
-    seen_skills = []
+
+    def fake_brief(draft, headings, recent_styles=None, llm=None):
+        return {
+            "style": "chromatic-institute",
+            "palette": "cobalt, coral, cream",
+            "motif": "interlocking nodes",
+            "art_direction": "clean modern research abstraction.",
+            "hero_prompt": "hero concept",
+            "section_prompts": {h: f"concept for {h}" for h in headings},
+        }
+
+    prompts = []
 
     def fake_generate(prompt, out_path, **kw):
-        # Infer which skill was used from the prompt content
-        if "Mythic Tech Codex" in prompt:
-            seen_skills.append("mythic-tech-codex-illustration")
-        elif "Saga Noir Studio" in prompt:
-            seen_skills.append("saga-noir-studio")
-        elif "Ink & Ember Studio" in prompt:
-            seen_skills.append("ink-ember-studio")
-        elif "Cosmic Postcard Atelier" in prompt:
-            seen_skills.append("cosmic-postcard-atelier")
-        elif "The Ninth Observatory" in prompt:
-            seen_skills.append("ninth-observatory")
-        elif "Chromatic Institute" in prompt:
-            seen_skills.append("chromatic-institute")
-        else:
-            seen_skills.append("unknown")
-        p = tmp_path / f"img_{len(seen_skills)}.png"
-        p.parent.mkdir(parents=True, exist_ok=True)
+        prompts.append(prompt)
+        p = tmp_path / f"img_{len(prompts)}.png"
         p.write_text("x")
         return out_path
 
+    monkeypatch.setattr(bi, "build_art_brief", fake_brief)
     monkeypatch.setattr(bi, "_generate_codex_image", fake_generate)
+    monkeypatch.setattr(bi, "_generate_webp", lambda p: p)
     monkeypatch.setattr(bi.config, "BLOG_MAX_SECTION_IMAGES", 2)
     monkeypatch.setattr(bi, "ROTATION_STATE_PATH", tmp_path / "skill_rotation.json")
 
@@ -90,35 +88,28 @@ def test_illustrate_locks_palette(monkeypatch, tmp_path):
         "body_md": "## One\nx\n\n## Two\ny\n\n## Three\nz",
     }
     bi.illustrate(draft, out_dir=tmp_path, max_sections=2)
-    # hero + 2 sections = 3 images, all same skill
-    assert len(seen_skills) == 3, f"expected 3 images, got {len(seen_skills)}"
-    assert len(set(seen_skills)) == 1, f"expected 1 skill across images, got {seen_skills}"
+    assert len(prompts) == 3, f"expected 3 images, got {len(prompts)}"
+    # Same style label + palette in every prompt = locked visual identity.
+    assert all("Chromatic Institute" in p for p in prompts)
+    assert all("coral" in p for p in prompts)
 
 
-def test_illustrate_varies_palette_across_topics(monkeypatch, tmp_path):
-    """Different topics should not all collapse into the same house image style.
+def test_art_director_varies_style_across_topics(monkeypatch):
+    """The fallback selector spreads styles across posts (variety).
 
-    The creative skill rotation system (6 styles + recency penalty) ensures
-    variety across posts. This test verifies that the skill selector produces
-    different choices for different content profiles.
+    Recording each pick as "recent" pushes the next post to a different style,
+    so distinct posts don't collapse into one house style.
     """
-    import blog.blog_illustrator as bi
+    import blog.art_director as ad
 
-    monkeypatch.setattr(bi, "ROTATION_STATE_PATH", tmp_path / "skill_rotation.json")
+    recent = []
+    picks = set()
+    for title in ["A spreadsheet for LLM inference",
+                  "Agent memory architecture",
+                  "Model routing decision framework"]:
+        brief = ad.fallback_brief({"title": title, "description": ""}, [],
+                                  recent_styles=recent)
+        picks.add(brief["style"])
+        recent.append(brief["style"])
 
-    # Three different content profiles should produce varied skill selections
-    # via the scoring heuristics (stream + cue patterns).
-    selections = set()
-    for title, stream in [
-        ("A spreadsheet for LLM inference", "builder"),
-        ("Agent Memory Architecture", "builder"),
-        ("Model Routing Decision Framework", "ai"),
-    ]:
-        skill = bi._select_skill(title, stream)
-        selections.add(skill)
-
-    # With 6+ styles and different cue patterns, we expect at least 2 different
-    # selections across 3 distinct topics (recency penalty forces variety).
-    assert len(selections) >= 2, (
-        f"Expected at least 2 different skills across 3 topics, got {selections}"
-    )
+    assert len(picks) >= 2, f"expected variety across topics, got {picks}"
