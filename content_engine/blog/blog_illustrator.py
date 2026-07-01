@@ -38,7 +38,11 @@ from blog.blog_streams import STREAMS
 CREATIVE_SKILLS_DIR = Path.home() / ".hermes" / "skills" / "creative"
 ROTATION_STATE_PATH = Path(__file__).parent.parent / "blog_topics" / "skill_rotation.json"
 ROTATION_HISTORY_LIMIT = 6
-ROTATION_PENALTIES = [-5.0, -3.0, -1.0]
+# Recency penalties are deliberately small: rotation is a tiebreaker between
+# near-equal styles, never strong enough to override a genuine content match
+# (stream +3, each cue +1). A large penalty is exactly what made an off-theme
+# style win for variety and produced "random-feeling" heroes.
+ROTATION_PENALTIES = [-1.5, -1.0, -0.5]
 
 SKILL_STYLES = [
     {
@@ -259,12 +263,14 @@ def _load_prompt_template(skill_name: str) -> Optional[str]:
 
 # ── Skill selection ─────────────────────────────────────────────
 
-def _score_style(style: dict, title: str, stream: str) -> float:
+def _score_style(style: dict, title: str, stream: str, body: str = "") -> float:
     """Score a style's relevance to the given content.
 
-    Factors: stream match, keyword cue match, recency penalty.
+    Factors: stream match, keyword cue match, recency penalty. Cues are matched
+    against title + body so the style reflects what the article is actually
+    about, not just its headline wording.
     """
-    title_lower = title.lower()
+    haystack = f"{title} {body}".lower()
     score = 0.0
 
     # Stream match: primary (+3), secondary (+1), none (-1)
@@ -273,16 +279,16 @@ def _score_style(style: dict, title: str, stream: str) -> float:
     else:
         score -= 1.0
 
-    # Cue matches: +1 per hit
+    # Cue matches: +1 per distinct pattern hit
     for pattern in style["cue_patterns"]:
-        if re.search(pattern, title_lower):
+        if re.search(pattern, haystack):
             score += 1.0
 
     # Default fallback: if no cues matched and stream is primary, base of 2.0
     return score
 
 
-def _select_skill(title: str, stream: str) -> str:
+def _select_skill(title: str, stream: str, body: str = "") -> str:
     """Select and persist the best creative skill for this post.
 
     Uses stream + keyword cues, then applies a weighted penalty across the
@@ -291,7 +297,7 @@ def _select_skill(title: str, stream: str) -> str:
     history = _load_rotation_state()
     scored = []
     for style in SKILL_STYLES:
-        score = _score_style(style, title, stream)
+        score = _score_style(style, title, stream, body)
 
         # Weighted recency penalty across the last few selections.
         recent = list(reversed(history))
@@ -317,18 +323,77 @@ def _select_skill(title: str, stream: str) -> str:
 
 # ── Concept builder ─────────────────────────────────────────────
 
-def _build_concept(title: str, description: str, skill_name: str) -> str:
-    """Build the {CONCEPT} variable from the blog post's title and description.
-
-    Follows each skill's Concept Extraction Guide:
-    - Blog post -> read title + first 2-3 paragraphs -> core metaphor
+def _lede(body_md: str, limit: int = 500) -> str:
+    """Return the article's opening prose — the first real paragraphs under the
+    title, skipping headings, code, images and frontmatter. This is what grounds
+    the illustration in the actual argument rather than just the headline.
     """
-    # For most skills, combine title and description as the concept
-    concept = f"{title}. {description}" if description else title
-    # Truncate to reasonable length for the prompt
-    if len(concept) > 400:
-        concept = concept[:397] + "..."
+    if not body_md:
+        return ""
+    paras: list[str] = []
+    buf: list[str] = []
+    in_code = False
+    for raw in body_md.splitlines():
+        line = raw.rstrip()
+        if line.startswith("```"):
+            in_code = not in_code
+            continue
+        if in_code:
+            continue
+        stripped = line.strip()
+        if not stripped:
+            if buf:
+                paras.append(" ".join(buf))
+                buf = []
+            continue
+        # Skip structural / non-prose lines.
+        if stripped.startswith(("#", ">", "|", "!", "-", "*", "<")):
+            continue
+        if re.match(r"^\d+\.\s", stripped):
+            continue
+        buf.append(stripped)
+        if sum(len(p) for p in paras) + len(" ".join(buf)) >= limit:
+            break
+    if buf:
+        paras.append(" ".join(buf))
+    return " ".join(paras)[:limit].strip()
+
+
+def _build_concept(title: str, description: str, skill_name: str,
+                   body_md: str = "") -> str:
+    """Build the {CONCEPT} variable from title + description + the article lede.
+
+    Follows each skill's Concept Extraction Guide: read title + first 2-3
+    paragraphs -> core metaphor. The lede is the critical grounding signal;
+    without it the image is generated from a headline alone and feels random.
+    """
+    parts = [title.strip()]
+    if description:
+        parts.append(description.strip())
+    lede = _lede(body_md)
+    if lede:
+        parts.append(lede)
+    concept = ". ".join(p.rstrip(".") for p in parts if p)
+    if len(concept) > 600:
+        concept = concept[:597] + "..."
     return concept
+
+
+def _article_anchor(title: str, description: str, body_md: str) -> str:
+    """Derive a concrete visual anchor (the 'reference item' / subject) for the
+    illustration from the article itself, so the style skills' {REFERENCE},
+    {REFERENCE_ITEM} and {PROTAGONIST} slots point at what the piece is about
+    instead of being blanked out with 'N/A'.
+    """
+    anchor = title.strip()
+    lede = _lede(body_md, limit=240)
+    source = f"{description} {lede}".strip()
+    if source:
+        # First sentence of the supporting prose gives a compact subject cue.
+        first = re.split(r"(?<=[.!?])\s", source, maxsplit=1)[0].strip()
+        if first and first.lower() not in anchor.lower():
+            anchor = f"{anchor} — {first}"
+    return anchor[:300].rstrip(" —")
 
 
 # ── Codex CLI generation ────────────────────────────────────────
@@ -512,6 +577,7 @@ def _select_and_generate(
     is_section: bool = False,
     heading: Optional[str] = None,
     skill_name: Optional[str] = None,
+    body_md: str = "",
 ) -> Optional[str]:
     """Select a creative skill, build the prompt, and generate via Codex CLI.
 
@@ -532,26 +598,34 @@ def _select_and_generate(
         skill_name = _select_skill(title, stream)
     template = _load_prompt_template(skill_name)
 
+    concept = _build_concept(title, description, skill_name, body_md)
+    anchor = _article_anchor(title, description, body_md)
+
     if not template:
         print(f"[blog_illustrator] no template for {skill_name}, "
               f"falling back to generic prompt")
         # Generic fallback prompt
-        concept = _build_concept(title, description, skill_name)
         prompt = (
             f"Create an editorial illustration for a blog post. "
             f"Title: {title}. Concept: {concept}. "
+            f"Central subject: {anchor}. "
             f"No text in the image. 16:9 landscape, high detail."
         )
     else:
-        # Build the concept and fill the template
-        concept = _build_concept(title, description, skill_name)
+        # Fill the concept and the article-derived anchor into every input slot
+        # the style templates expose. The anchor is what makes the image relate
+        # to the article; leaving these blank produced generic style-only art.
         prompt = template.replace("{CONCEPT}", concept)
+        for slot in ("{REFERENCE}", "{REFERENCE_ITEM}", "{PROTAGONIST}"):
+            prompt = prompt.replace(slot, anchor)
+        # Tone/mood slots have no article signal — collapse them cleanly.
+        for slot in ("{MOOD}", "{EMOTIONAL_TONE}", "{EDITORIAL_TONE}"):
+            prompt = prompt.replace(slot, "")
 
-        # Remove optional variables that aren't used for blog heroes
-        prompt = re.sub(r"\{REFERENCE\}", "N/A", prompt)
-        prompt = re.sub(r"\{MOOD\}", "", prompt)
-        prompt = re.sub(r"\{EMOTIONAL_TONE\}", "", prompt)
-        prompt = re.sub(r"\{EDITORIAL_TONE\}", "", prompt)
+        # Safety net: never leak an unfilled {PLACEHOLDER} token to the image
+        # model. Any remaining {UPPER_CASE} slot becomes the anchor so the
+        # prompt stays grounded rather than literal.
+        prompt = re.sub(r"\{[A-Z][A-Z0-9_]*\}", anchor, prompt)
 
         # Add blog-specific output instruction
         prompt += (
@@ -601,12 +675,14 @@ def illustrate(
     # Select ONE creative skill for this entire post (consistent style)
     title = draft.get("title", "")
     description = draft.get("description", "")
-    post_skill = _select_skill(title, stream)
+    body_md = draft.get("body_md", "")
+    post_skill = _select_skill(title, stream, body_md)
 
     # ── Hero image ──────────────────────────────────────────
     hero_out = str(out_path / "hero.png")
     gen = _select_and_generate(
         title, description, stream, hero_out, skill_name=post_skill,
+        body_md=body_md,
     )
 
     if gen and Path(gen).exists():
@@ -628,7 +704,7 @@ def illustrate(
             gen_sec = _select_and_generate(
                 heading, section_text or heading, stream,
                 section_out, is_section=True, heading=heading,
-                skill_name=post_skill,
+                skill_name=post_skill, body_md=section_text,
             )
             if gen_sec and Path(gen_sec).exists():
                 result["section_paths"][heading] = gen_sec
