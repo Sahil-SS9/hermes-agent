@@ -1604,8 +1604,16 @@ def _get_due_jobs_locked() -> List[Dict[str, Any]]:
             continue
 
         next_run = job.get("next_run_at")
+        schedule = job.get("schedule", {})
+        if not isinstance(schedule, dict):
+            logger.error(
+                "Job '%s' has invalid schedule payload %r; skipping instead of crashing scheduler",
+                job.get("name", job.get("id", "<unknown>")),
+                schedule,
+            )
+            continue
+
         if not next_run:
-            schedule = job.get("schedule", {})
             kind = schedule.get("kind")
 
             # One-shot jobs use a small grace window via the dedicated helper.

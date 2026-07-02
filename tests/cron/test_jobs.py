@@ -1005,6 +1005,58 @@ class TestGetDueJobs:
             recovered_dt = recovered_dt.replace(tzinfo=timezone.utc)
         assert recovered_dt > now
 
+    def test_invalid_string_schedule_is_skipped_not_scheduler_crash(self, tmp_cron_dir, monkeypatch, caplog):
+        now = datetime(2026, 3, 18, 10, 0, 0, tzinfo=timezone.utc)
+        monkeypatch.setattr("cron.jobs._hermes_now", lambda: now)
+
+        save_jobs(
+            [
+                {
+                    "id": "bad-schedule",
+                    "name": "Bad direct-writer job",
+                    "prompt": "...",
+                    "schedule": "*/5 * * * *",
+                    "schedule_display": "every 5m",
+                    "repeat": {"times": None, "completed": 0},
+                    "enabled": True,
+                    "state": "scheduled",
+                    "paused_at": None,
+                    "paused_reason": None,
+                    "created_at": "2026-03-18T09:00:00+00:00",
+                    "next_run_at": None,
+                    "last_run_at": None,
+                    "last_status": None,
+                    "last_error": None,
+                    "deliver": "local",
+                    "origin": None,
+                },
+                {
+                    "id": "good-due",
+                    "name": "Good due job",
+                    "prompt": "...",
+                    "schedule": {"kind": "interval", "minutes": 60, "display": "every 60m"},
+                    "schedule_display": "every 60m",
+                    "repeat": {"times": None, "completed": 0},
+                    "enabled": True,
+                    "state": "scheduled",
+                    "paused_at": None,
+                    "paused_reason": None,
+                    "created_at": "2026-03-18T08:00:00+00:00",
+                    "next_run_at": "2026-03-18T09:00:00+00:00",
+                    "last_run_at": None,
+                    "last_status": None,
+                    "last_error": None,
+                    "deliver": "local",
+                    "origin": None,
+                },
+            ]
+        )
+
+        due = get_due_jobs()
+
+        assert [job["id"] for job in due] == ["good-due"]
+        assert "invalid schedule payload" in caplog.text
+
 
     def test_cron_next_run_offset_migration_is_rescheduled_not_fired(self, tmp_cron_dir, monkeypatch):
         current_tz = timezone(timedelta(hours=2))
