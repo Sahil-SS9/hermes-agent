@@ -28,6 +28,9 @@ log = logging.getLogger("tproxy")
 TOR_SOCKS = ("127.0.0.1", 9050)
 LISTEN = ("127.0.0.1", 8118)
 TARGET = "opencode.ai"
+# Reap a tunnel if neither direction moves a byte for this long. Without it,
+# idle keep-alive HTTPS connections pin two sockets each and leak FDs to the limit.
+IDLE_TIMEOUT = 120
 TOR_ERROR_CODES = (b"429", b"403", b"401")
 
 SOCKS5_ATYP_IPV4 = 1
@@ -147,16 +150,29 @@ async def tunnel(client_r, client_w, target_host, target_port, use_tor):
     async def relay(src_r, dst_w):
         try:
             while True:
-                d = await src_r.read(65536)
+                d = await asyncio.wait_for(src_r.read(65536), timeout=IDLE_TIMEOUT)
                 if not d: break
                 dst_w.write(d); await dst_w.drain()
         except Exception:
             pass
-        finally:
-            try: dst_w.close()
-            except Exception: pass
 
-    await asyncio.gather(relay(client_r, remote_w), relay(remote_r, client_w))
+    def _close(w):
+        try:
+            if not w.is_closing(): w.close()
+        except Exception:
+            pass
+
+    # Run both directions; as soon as one ends (EOF, idle timeout, error),
+    # close both sockets so the other side unblocks and no FDs are pinned.
+    t1 = asyncio.ensure_future(relay(client_r, remote_w))
+    t2 = asyncio.ensure_future(relay(remote_r, client_w))
+    try:
+        await asyncio.wait({t1, t2}, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        _close(remote_w); _close(client_w)
+        for t in (t1, t2):
+            if not t.done():
+                t.cancel()
 
 
 async def handle_http(client_r, client_w, method, path, headers, target_host, target_port, use_tor):
@@ -167,75 +183,87 @@ async def handle_http(client_r, client_w, method, path, headers, target_host, ta
     if remote is None:
         client_w.write(b"HTTP/1.1 502 Bad Gateway\r\n\r\n"); await client_w.drain(); return
     remote_r, remote_w = remote
-    if path.startswith(b"http://"):
-        path = b"/" + path.split(b"/", 3)[-1:][0] if b"/" in path.split(b"://", 1)[1] else b"/"
-    remote_w.write(method + b" " + path + b" HTTP/1.1\r\n")
-    for h in headers: remote_w.write(h + b"\r\n")
-    remote_w.write(b"\r\n")
-    content_length = 0
-    for h in headers:
-        if h.lower().startswith(b"content-length:"):
-            try: content_length = int(h.split(b":")[1].strip())
-            except ValueError: pass
-            break
-    if content_length > 0:
-        remote_w.write(await client_r.readexactly(content_length))
-    await remote_w.drain()
-    status_line = await remote_r.readline()
-    if use_tor and any(code in status_line for code in TOR_ERROR_CODES):
-        log.warning("Rate limit / auth error from %s — rotating Tor IP...", target_host)
-        asyncio.ensure_future(_rotate_and_notify())
-    client_w.write(status_line)
-    while True:
-        h = await remote_r.readline()
-        client_w.write(h)
-        if h in (b"\r\n", b"\n", b""): break
-    await client_w.drain()
-    while True:
-        d = await remote_r.read(65536)
-        if not d: break
-        client_w.write(d); await client_w.drain()
+    try:
+        if path.startswith(b"http://"):
+            path = b"/" + path.split(b"/", 3)[-1:][0] if b"/" in path.split(b"://", 1)[1] else b"/"
+        remote_w.write(method + b" " + path + b" HTTP/1.1\r\n")
+        for h in headers: remote_w.write(h + b"\r\n")
+        remote_w.write(b"\r\n")
+        content_length = 0
+        for h in headers:
+            if h.lower().startswith(b"content-length:"):
+                try: content_length = int(h.split(b":")[1].strip())
+                except ValueError: pass
+                break
+        if content_length > 0:
+            remote_w.write(await client_r.readexactly(content_length))
+        await remote_w.drain()
+        status_line = await remote_r.readline()
+        if use_tor and any(code in status_line for code in TOR_ERROR_CODES):
+            log.warning("Rate limit / auth error from %s — rotating Tor IP...", target_host)
+            asyncio.ensure_future(_rotate_and_notify())
+        client_w.write(status_line)
+        while True:
+            h = await remote_r.readline()
+            client_w.write(h)
+            if h in (b"\r\n", b"\n", b""): break
+        await client_w.drain()
+        while True:
+            d = await remote_r.read(65536)
+            if not d: break
+            client_w.write(d); await client_w.drain()
+    finally:
+        try:
+            if not remote_w.is_closing(): remote_w.close()
+        except Exception:
+            pass
 
 
 async def handle_client(client_r, client_w):
     try:
-        request_line = await asyncio.wait_for(client_r.readline(), timeout=30)
-    except asyncio.TimeoutError:
-        return
-    if not request_line: return
-    parts = request_line.strip().split(b" ", 2)
-    if len(parts) < 2: return
-    method, target = parts[0], parts[1]
-    headers = []
-    while True:
-        try: line = await asyncio.wait_for(client_r.readline(), timeout=10)
-        except asyncio.TimeoutError: break
-        if line in (b"\r\n", b"\n", b""): break
-        headers.append(line.strip())
-    if method == b"CONNECT":
-        hostport = target.decode("ascii")
-        host, _, port_str = hostport.rpartition(":")
-        port = int(port_str)
-    else:
-        target_str = target.decode("ascii")
-        if target_str.startswith(("http://", "https://")):
-            from urllib.parse import urlparse
-            parsed = urlparse(target_str)
-            host = parsed.hostname
-            port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        try:
+            request_line = await asyncio.wait_for(client_r.readline(), timeout=30)
+        except asyncio.TimeoutError:
+            return
+        if not request_line: return
+        parts = request_line.strip().split(b" ", 2)
+        if len(parts) < 2: return
+        method, target = parts[0], parts[1]
+        headers = []
+        while True:
+            try: line = await asyncio.wait_for(client_r.readline(), timeout=10)
+            except asyncio.TimeoutError: break
+            if line in (b"\r\n", b"\n", b""): break
+            headers.append(line.strip())
+        if method == b"CONNECT":
+            hostport = target.decode("ascii")
+            host, _, port_str = hostport.rpartition(":")
+            port = int(port_str)
         else:
-            host, port = target_str, 80
-            for h in headers:
-                if h.lower().startswith(b"host:"):
-                    hv = h.split(b":", 1)[1].strip().decode("ascii")
-                    host, _, port_str = hv.rpartition(":"); port = int(port_str) if port_str else hv
-                    break
-    if not host: client_w.close(); return
-    use_tor = should_route_via_tor(host)
-    if method == b"CONNECT":
-        await tunnel(client_r, client_w, host, port, use_tor)
-    else:
-        await handle_http(client_r, client_w, method, target, headers, host, port, use_tor)
+            target_str = target.decode("ascii")
+            if target_str.startswith(("http://", "https://")):
+                from urllib.parse import urlparse
+                parsed = urlparse(target_str)
+                host = parsed.hostname
+                port = parsed.port or (443 if parsed.scheme == "https" else 80)
+            else:
+                host, port = target_str, 80
+                for h in headers:
+                    if h.lower().startswith(b"host:"):
+                        hv = h.split(b":", 1)[1].strip().decode("ascii")
+                        host, _, port_str = hv.rpartition(":"); port = int(port_str) if port_str else hv
+                        break
+        if not host: return
+        use_tor = should_route_via_tor(host)
+        if method == b"CONNECT":
+            await tunnel(client_r, client_w, host, port, use_tor)
+        else:
+            await handle_http(client_r, client_w, method, target, headers, host, port, use_tor)
+    finally:
+        try:
+            if not client_w.is_closing(): client_w.close()
+        except Exception:
+            pass
 
 
 async def main():
