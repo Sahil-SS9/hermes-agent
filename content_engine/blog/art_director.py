@@ -21,10 +21,12 @@ import re
 from typing import Optional
 
 # ── Curated, visually DISTINCT style library ────────────────────
-# Deduplicated from the old 12: the dark-neon-dashboard duplicates (Baoyu
-# Infographic + Dark Cyberpunk HUD) are merged into "signal-hud"; the generic
-# "Baoyu Article Illustrator" is dropped (overlapped ink/chromatic). Each entry
-# is described richly enough that the LLM can pick on genuine article fit.
+# Curated from the old 12. "signal-hud" keeps the Dark Cyberpunk HUD look; the
+# "Baoyu Infographic" explainer is its OWN distinct light/structured style
+# (baoyu-infographic) — it is a legible diagram aesthetic, not the dark HUD, so
+# it must stay selectable. The generic "Baoyu Article Illustrator" stays dropped
+# (overlapped ink/chromatic). Each entry is described richly enough that the LLM
+# can pick on genuine article fit.
 STYLE_LIBRARY = [
     {
         "id": "mythic-tech-codex",
@@ -61,6 +63,16 @@ STYLE_LIBRARY = [
                 "rainbow; diagnostic mood (no readable text).",
         "best_for": "observability, evals, metrics, diagnostics, debugging, "
                     "production reliability. Use sparingly.",
+    },
+    {
+        "id": "baoyu-infographic",
+        "label": "Baoyu Infographic",
+        "look": "clean modern explainer infographic; flat/isometric structured "
+                "panels, flow arrows and stepwise layouts; confident soft palette "
+                "(teal, coral, navy, amber on cream); highly legible diagrammatic "
+                "storytelling; friendly and precise (no readable text or labels).",
+        "best_for": "step-by-step explainers, comparisons, how-it-works "
+                    "breakdowns, process/decision flows, PM frameworks.",
     },
     {
         "id": "ink-ember-studio",
