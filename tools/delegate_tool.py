@@ -1089,6 +1089,13 @@ def _build_child_agent(
     # 'leaf' (default) cannot; 'orchestrator' retains the delegation
     # toolset subject to depth/kill-switch bounds applied below.
     role: str = "leaf",
+    # Profile-based config — load a profile's config.yaml, SOUL.md, and
+    # always_skills instead of inheriting the parent's provider:model.
+    profile: Optional[str] = None,
+    # Pre-resolved profile content (populated by delegate_task when the
+    # profile parameter is set on the outer tool call, then passed down
+    # to every child in the batch so we only load/parse YAML once).
+    profile_content: Optional[Dict[str, Any]] = None,
 ):
     """
     Build a child AIAgent on the main thread (thread-safe construction).
@@ -1177,13 +1184,77 @@ def _build_child_agent(
         max_spawn_depth=max_spawn,
         child_depth=child_depth,
     )
+
+    # ── Profile-based config (SOUL.md + skills + model/provider) ──
+    # When profile_content is pre-resolved (by delegate_task's outer profile
+    # param), use it directly — avoids re-parsing YAML for every task in a batch.
+    # When only profile is set (i.e. from a synthesis/verify sub-call), load
+    # synchronously since there's only one child.
+    loaded_profile_cfg = profile_content
+    if loaded_profile_cfg is None and profile:
+        import yaml as _yaml
+        _pdir = os.path.expanduser(f"~/.hermes/profiles/{profile}")
+        _config_path = os.path.join(_pdir, "config.yaml")
+        _soul_path = os.path.join(_pdir, "SOUL.md")
+        if not os.path.isdir(_pdir):
+            raise ValueError(f"Profile '{profile}' not found at {_pdir}")
+        loaded_profile_cfg = {"name": profile, "config": {}, "soul_md": None, "skills": []}
+        try:
+            with open(_config_path) as _f:
+                loaded_profile_cfg["config"] = _yaml.safe_load(_f) or {}
+        except FileNotFoundError:
+            logger.warning("Profile '%s' has no config.yaml", profile)
+        if os.path.isfile(_soul_path):
+            with open(_soul_path) as _f:
+                loaded_profile_cfg["soul_md"] = _f.read()
+
+    # Apply profile settings to effective child config.
+    # Explicit override_* params (from delegation config or per-task) always win.
+    if loaded_profile_cfg:
+        _pcfg = loaded_profile_cfg.get("config", {})
+        _pmodel = _pcfg.get("model", {}) or {}
+
+        # Model/provider/base_url — only apply as defaults (explicit wins)
+        if not model and _pmodel.get("default"):
+            effective_model_for_cb = _pmodel["default"]
+        if not override_provider and _pmodel.get("provider"):
+            pass  # resolved below via effective_provider
+
+        # Toolsets from profile — intersect with parent (subagent can't gain tools parent lacks)
+        _p_toolsets = _pcfg.get("toolsets") or []
+        if _p_toolsets and toolsets is None and parent_toolsets:
+            _expanded = _expand_parent_toolsets(parent_toolsets)
+            child_toolsets = [t for t in _p_toolsets if t in _expanded]
+            child_toolsets = _strip_blocked_tools(child_toolsets)
+            if effective_role == "orchestrator" and "delegation" not in child_toolsets:
+                child_toolsets.append("delegation")
+
+        # Always_skills stored for later injection into child context
+        _p_skills_block = _pcfg.get("skills", {}) or {}
+        loaded_profile_cfg["skills"] = list(_p_skills_block.get("always_skills") or [])
+
+    # Inject profile SOUL.md into the child system prompt
+    if loaded_profile_cfg and loaded_profile_cfg.get("soul_md"):
+        _soul = loaded_profile_cfg["soul_md"].strip()
+        if _soul:
+            child_prompt = (
+                f"# Profile: {loaded_profile_cfg['name']}\n\n"
+                f"--- BEGIN PROFILE IDENTITY ---\n"
+                f"{_soul}\n"
+                f"--- END PROFILE IDENTITY ---\n\n"
+                f"--- DELEGATED TASK ---\n"
+                f"{child_prompt}"
+            )
+
     # Extract parent's API key so subagents inherit auth (e.g. Nous Portal).
     parent_api_key = getattr(parent_agent, "api_key", None)
     if (not parent_api_key) and hasattr(parent_agent, "_client_kwargs"):
         parent_api_key = parent_agent._client_kwargs.get("api_key")
 
     # Resolve the child's effective model early so it can ride on every event.
-    effective_model_for_cb = model or getattr(parent_agent, "model", None)
+    # Priority: explicit model > profile config model > parent agent model
+    _profile_model_cb = loaded_profile_cfg["config"].get("model", {}).get("default") if loaded_profile_cfg else None
+    effective_model_for_cb = model or _profile_model_cb or getattr(parent_agent, "model", None)
 
     # Build progress callback to relay tool calls to parent display.
     # Identity kwargs thread the subagent_id through every emitted event so the
@@ -1220,10 +1291,13 @@ def _build_child_agent(
 
         child_thinking_cb = _child_thinking
 
-    # Resolve effective credentials: config override > parent inherit
-    effective_model = model or parent_agent.model
-    effective_provider = override_provider or getattr(parent_agent, "provider", None)
-    effective_base_url = override_base_url or parent_agent.base_url
+    # Resolve effective credentials: explicit override > profile config > parent inherit
+    _profile_model = loaded_profile_cfg["config"].get("model", {}).get("default") if loaded_profile_cfg else None
+    _profile_provider = loaded_profile_cfg["config"].get("model", {}).get("provider") if loaded_profile_cfg else None
+    _profile_base_url = loaded_profile_cfg["config"].get("model", {}).get("base_url") if loaded_profile_cfg else None
+    effective_model = model or _profile_model or parent_agent.model
+    effective_provider = override_provider or _profile_provider or getattr(parent_agent, "provider", None)
+    effective_base_url = override_base_url or _profile_base_url or parent_agent.base_url
     if not override_base_url:
         effective_base_url = _inherit_parent_base_url(parent_agent, effective_base_url)
     effective_api_key = override_api_key or parent_api_key
@@ -1278,9 +1352,15 @@ def _build_child_agent(
         effective_provider = "copilot-acp"
         effective_api_mode = "chat_completions"
 
-    # Resolve reasoning config: delegation override > parent inherit
+    # Resolve reasoning config: delegation override > profile config > parent inherit
     parent_reasoning = getattr(parent_agent, "reasoning_config", None)
-    child_reasoning = parent_reasoning
+    _profile_reasoning = None
+    if loaded_profile_cfg:
+        _p_re = loaded_profile_cfg["config"].get("agent", {}).get("reasoning_effort")
+        if _p_re:
+            from hermes_constants import parse_reasoning_effort
+            _profile_reasoning = parse_reasoning_effort(str(_p_re))
+    child_reasoning = _profile_reasoning or parent_reasoning
     try:
         delegation_effort = str(delegation_cfg.get("reasoning_effort") or "").strip()
         if delegation_effort:
@@ -1297,11 +1377,9 @@ def _build_child_agent(
     except Exception as exc:
         logger.debug("Could not load delegation reasoning_effort: %s", exc)
 
-    # Inherit the parent's fallback provider chain so subagents can recover
-    # from rate-limits and credential exhaustion exactly like the top-level
-    # agent does.  _fallback_chain is a list accepted by AIAgent's
-    # fallback_model parameter (which handles both list and dict forms).
-    parent_fallback = getattr(parent_agent, "_fallback_chain", None) or None
+    # Inherit fallback chain: profile config > parent inherit
+    _profile_fallback = loaded_profile_cfg["config"].get("fallback_providers") if loaded_profile_cfg else None
+    parent_fallback = _profile_fallback or getattr(parent_agent, "_fallback_chain", None) or None
 
     # Inherit the parent's OpenRouter provider-preference filters by default
     # (so subagents routed to the same provider honour the same routing
@@ -2369,6 +2447,7 @@ def delegate_task(
     synthesis_prompt: Optional[str] = None,
     verify: Optional[bool] = None,
     verify_rubric: Optional[str] = None,
+    profile: Optional[str] = None,  # load profile config/SOUL.md/skills for subagent
     # ── END KENSEI CUSTOM ──
     parent_agent=None,
 ) -> str:
@@ -2383,6 +2462,13 @@ def delegate_task(
     'leaf' (default) cannot; 'orchestrator' retains the delegation
     toolset and can spawn its own workers, bounded by
     delegation.max_spawn_depth.  Per-task role beats the top-level one.
+
+    The 'profile' parameter loads a specialist profile's config.yaml (model,
+    provider, toolsets), SOUL.md (identity), and always_skills so the child
+    runs as that profile rather than inheriting the parent's config.
+    Profile config values are PRIMARY — they override delegation.provider/model
+    in config.yaml. Explicit per-call overrides (model=, provider=, etc.) still
+    win over profile config.
 
     Returns JSON with results array, one entry per task.
     """
@@ -2450,6 +2536,44 @@ def delegate_task(
         creds = _resolve_delegation_credentials(cfg, parent_agent)
     except ValueError as exc:
         return tool_error(str(exc))
+
+    # Pre-resolve profile config (load once, share across all batch children)
+    profile_content = None
+    if profile:
+        import yaml as _yaml
+        _pdir = os.path.expanduser(f"~/.hermes/profiles/{profile}")
+        _config_path = os.path.join(_pdir, "config.yaml")
+        _soul_path = os.path.join(_pdir, "SOUL.md")
+        if not os.path.isdir(_pdir):
+            return tool_error(f"Profile '{profile}' not found at {_pdir}")
+        _cfg = {}
+        try:
+            with open(_config_path) as _f:
+                _cfg = _yaml.safe_load(_f) or {}
+        except FileNotFoundError:
+            return tool_error(f"Profile '{profile}' has no config.yaml")
+        _soul_md = None
+        if os.path.isfile(_soul_path):
+            with open(_soul_path) as _f:
+                _soul_md = _f.read()
+        profile_content = {
+            "name": profile,
+            "config": _cfg,
+            "soul_md": _soul_md,
+            "skills": list((_cfg.get("skills") or {}).get("always_skills") or []),
+        }
+        # Profile config values are PRIMARY when profile is set explicitly.
+        # Delegation config (from parent) fills gaps only — the whole point
+        # of profile= is to make the subagent run AS that profile.
+        _pm = _cfg.get("model", {}) or {}
+        if _pm.get("default"):
+            creds["model"] = _pm["default"]
+        if _pm.get("provider"):
+            creds["provider"] = _pm["provider"]
+        if _pm.get("base_url"):
+            creds["base_url"] = _pm["base_url"]
+        if _pm.get("api_key"):
+            creds["api_key"] = _pm["api_key"]
 
     # Normalize to task list
     max_children = _get_max_concurrent_children()
@@ -2534,6 +2658,8 @@ def delegate_task(
                     else (acp_args if acp_args is not None else creds.get("args"))
                 ),
                 role=effective_role,
+                profile=profile,
+                profile_content=profile_content,
             )
             # Override with correct parent tool names (before child construction mutated global)
             child._delegate_saved_tool_names = _parent_tool_names
@@ -3715,6 +3841,16 @@ DELEGATE_TASK_SCHEMA = {
                     "Custom rubric for the skeptic when verify=true."
                 ),
             },
+            "profile": {
+                "type": "string",
+                "description": (
+                    "Profile name to load config, SOUL.md, and always_skills "
+                    "from for the subagent. When set, the subagent uses the "
+                    "profile's model, provider, toolsets, and identity instead "
+                    "of inheriting the parent's. The profile must exist under "
+                    "~/.hermes/profiles/<name>/."
+                ),
+            },
             # ── END KENSEI CUSTOM ──
             "acp_command": {
                 "type": "string",
@@ -3771,6 +3907,7 @@ def _handle_delegate_dispatch(args, **kw):
         synthesis_prompt=args.get("synthesis_prompt"),
         verify=args.get("verify"),
         verify_rubric=args.get("verify_rubric"),
+        profile=args.get("profile"),
         # ── END KENSEI CUSTOM ──
         parent_agent=kw.get("parent_agent"),
     )

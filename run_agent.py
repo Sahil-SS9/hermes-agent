@@ -5385,6 +5385,11 @@ class AIAgent:
             acp_args=function_args.get("acp_args"),
             role=function_args.get("role"),
             background=(not _is_subagent),
+            profile=function_args.get("profile"),
+            synthesize=function_args.get("synthesize"),
+            synthesis_prompt=function_args.get("synthesis_prompt"),
+            verify=function_args.get("verify"),
+            verify_rubric=function_args.get("verify_rubric"),
             parent_agent=self,
         )
 
