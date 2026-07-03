@@ -210,12 +210,18 @@ class _NoopBackend(ComputerUseBackend):  # pragma: no cover
         self.calls.append(("scroll", kw))
         return ActionResult(ok=True, action="scroll")
 
-    def type_text(self, text: str) -> ActionResult:
-        self.calls.append(("type", {"text": text}))
+    def type_text(self, text: str, dispatch: Optional[str] = None) -> ActionResult:
+        kw: Dict[str, Any] = {"text": text}
+        if dispatch:
+            kw["dispatch"] = dispatch
+        self.calls.append(("type", kw))
         return ActionResult(ok=True, action="type")
 
-    def key(self, keys: str) -> ActionResult:
-        self.calls.append(("key", {"keys": keys}))
+    def key(self, keys: str, dispatch: Optional[str] = None) -> ActionResult:
+        kw: Dict[str, Any] = {"keys": keys}
+        if dispatch:
+            kw["dispatch"] = dispatch
+        self.calls.append(("key", kw))
         return ActionResult(ok=True, action="key")
 
     def list_apps(self) -> List[Dict[str, Any]]:
@@ -226,8 +232,12 @@ class _NoopBackend(ComputerUseBackend):  # pragma: no cover
         self.calls.append(("focus_app", {"app": app, "raise": raise_window}))
         return ActionResult(ok=True, action="focus_app")
 
-    def set_value(self, value: str, element: Optional[int] = None) -> ActionResult:
-        self.calls.append(("set_value", {"value": value, "element": element}))
+    def set_value(self, value: str, element: Optional[int] = None,
+                  dispatch: Optional[str] = None) -> ActionResult:
+        kw: Dict[str, Any] = {"value": value, "element": element}
+        if dispatch:
+            kw["dispatch"] = dispatch
+        self.calls.append(("set_value", kw))
         return ActionResult(ok=True, action="set_value")
 
 
@@ -342,6 +352,11 @@ def _summarize_action(action: str, args: Dict[str, Any]) -> str:
 
 def _dispatch(backend: ComputerUseBackend, action: str, args: Dict[str, Any]) -> Any:
     capture_after = bool(args.get("capture_after"))
+    # `dispatch` applies to all input actions (click, drag, scroll, type,
+    # key, set_value). When set to "background"|"foreground"|"auto" it is
+    # forwarded to the backend so cua-driver can pick the Win32 delivery
+    # path. None means "use the backend default" (background).
+    dispatch = args.get("dispatch")
 
     if action == "capture":
         mode = str(args.get("mode", "som"))
@@ -384,6 +399,7 @@ def _dispatch(backend: ComputerUseBackend, action: str, args: Dict[str, Any]) ->
             element=element if element is not None else None,
             x=x, y=y, button=button or "left", click_count=click_count,
             modifiers=args.get("modifiers"),
+            dispatch=dispatch,
         )
         return _maybe_follow_capture(backend, res, capture_after)
 
@@ -401,6 +417,7 @@ def _dispatch(backend: ComputerUseBackend, action: str, args: Dict[str, Any]) ->
             to_xy=tuple(args["to_coordinate"]) if args.get("to_coordinate") else None,
             button=args.get("button", "left"),
             modifiers=args.get("modifiers"),
+            dispatch=dispatch,
         )
         return _maybe_follow_capture(backend, res, capture_after)
 
@@ -413,22 +430,24 @@ def _dispatch(backend: ComputerUseBackend, action: str, args: Dict[str, Any]) ->
             x=coord[0] if coord and coord[0] is not None else None,
             y=coord[1] if coord and coord[1] is not None else None,
             modifiers=args.get("modifiers"),
+            dispatch=dispatch,
         )
         return _maybe_follow_capture(backend, res, capture_after)
 
     if action == "type":
-        res = backend.type_text(args.get("text", ""))
+        res = backend.type_text(args.get("text", ""), dispatch=dispatch)
         return _maybe_follow_capture(backend, res, capture_after)
 
     if action == "key":
-        res = backend.key(args.get("keys", ""))
+        res = backend.key(args.get("keys", ""), dispatch=dispatch)
         return _maybe_follow_capture(backend, res, capture_after)
 
     if action == "set_value":
         value = args.get("value")
         if value is None:
             return json.dumps({"error": "set_value requires `value`"})
-        res = backend.set_value(value=str(value), element=args.get("element"))
+        res = backend.set_value(value=str(value), element=args.get("element"),
+                                dispatch=dispatch)
         return _maybe_follow_capture(backend, res, capture_after)
 
     return json.dumps({"error": f"unknown action {action!r}"})

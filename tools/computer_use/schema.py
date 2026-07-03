@@ -139,6 +139,23 @@ COMPUTER_USE_SCHEMA: Dict[str, Any] = {
                 },
                 "description": "Modifier keys held during the action.",
             },
+            # ── dispatch mode (input actions) ─────────────────────
+            "dispatch": {
+                "type": "string",
+                "enum": ["background", "foreground", "auto"],
+                "description": (
+                    "Input delivery mode for click, drag, scroll, type, "
+                    "key, and set_value actions. `background` (default) "
+                    "uses non-foreground Win32/UIA APIs — non-disruptive "
+                    "but silently fails on some Windows UI frameworks "
+                    "(Explorer SysListView32, Qt apps like WeChat/Telegram). "
+                    "`foreground` uses real SendInput events — works on "
+                    "every app but briefly steals focus. `auto` tries "
+                    "background first, then retries with foreground if the "
+                    "action appears to have failed. Ignored on macOS/Linux "
+                    "where only one dispatch path exists."
+                ),
+            },
             # ── drag ───────────────────────────────────────────────
             "from_element": {"type": "integer",
                               "description": "Source element index (drag)."},

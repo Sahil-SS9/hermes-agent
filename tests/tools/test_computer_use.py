@@ -265,6 +265,75 @@ class TestDispatch:
         out = handle_computer_use({"action": "set_value"})
         parsed = json.loads(out)
         assert "error" in parsed
+
+    # ── dispatch parameter routing (#57623) ────────────────────────
+
+    def test_dispatch_param_routes_to_click(self, noop_backend):
+        """click action must forward dispatch to the backend."""
+        from tools.computer_use.tool import handle_computer_use
+        handle_computer_use({"action": "click", "element": 5, "dispatch": "foreground"})
+        click_kw = next(c[1] for c in noop_backend.calls if c[0] == "click")
+        assert click_kw.get("dispatch") == "foreground"
+
+    def test_dispatch_param_routes_to_drag(self, noop_backend):
+        """drag action must forward dispatch to the backend."""
+        from tools.computer_use.tool import handle_computer_use
+        handle_computer_use({
+            "action": "drag",
+            "from_coordinate": [10, 20],
+            "to_coordinate": [30, 40],
+            "dispatch": "foreground",
+        })
+        drag_kw = next(c[1] for c in noop_backend.calls if c[0] == "drag")
+        assert drag_kw.get("dispatch") == "foreground"
+
+    def test_dispatch_param_routes_to_scroll(self, noop_backend):
+        """scroll action must forward dispatch to the backend."""
+        from tools.computer_use.tool import handle_computer_use
+        handle_computer_use({"action": "scroll", "direction": "down", "dispatch": "auto"})
+        scroll_kw = next(c[1] for c in noop_backend.calls if c[0] == "scroll")
+        assert scroll_kw.get("dispatch") == "auto"
+
+    def test_dispatch_param_routes_to_type(self, noop_backend):
+        """type action must forward dispatch to the backend."""
+        from tools.computer_use.tool import handle_computer_use
+        handle_computer_use({"action": "type", "text": "hi", "dispatch": "foreground"})
+        type_kw = next(c[1] for c in noop_backend.calls if c[0] == "type")
+        assert type_kw.get("dispatch") == "foreground"
+
+    def test_dispatch_param_routes_to_key(self, noop_backend):
+        """key action must forward dispatch to the backend."""
+        from tools.computer_use.tool import handle_computer_use
+        handle_computer_use({"action": "key", "keys": "ctrl+s", "dispatch": "foreground"})
+        key_kw = next(c[1] for c in noop_backend.calls if c[0] == "key")
+        assert key_kw.get("dispatch") == "foreground"
+
+    def test_dispatch_param_routes_to_set_value(self, noop_backend):
+        """set_value action must forward dispatch to the backend."""
+        from tools.computer_use.tool import handle_computer_use
+        handle_computer_use({
+            "action": "set_value",
+            "value": "Option A",
+            "element": 3,
+            "dispatch": "foreground",
+        })
+        sv_kw = next(c[1] for c in noop_backend.calls if c[0] == "set_value")
+        assert sv_kw.get("dispatch") == "foreground"
+
+    def test_dispatch_param_defaults_to_none(self, noop_backend):
+        """Without dispatch, backend should not receive the param."""
+        from tools.computer_use.tool import handle_computer_use
+        handle_computer_use({"action": "click", "element": 1})
+        click_kw = next(c[1] for c in noop_backend.calls if c[0] == "click")
+        assert click_kw.get("dispatch") is None
+
+    def test_schema_includes_dispatch_param(self):
+        """Schema must expose the dispatch parameter."""
+        from tools.computer_use.schema import COMPUTER_USE_SCHEMA
+        props = COMPUTER_USE_SCHEMA["parameters"]["properties"]
+        assert "dispatch" in props
+        assert props["dispatch"]["enum"] == ["background", "foreground", "auto"]
+
     def test_capture_after_skipped_when_action_failed(self, noop_backend):
         """capture_after must not fire when res.ok=False (regression guard).
 
@@ -379,8 +448,8 @@ class TestCaptureResponse:
             def click(self, **kw): ...
             def drag(self, **kw): ...
             def scroll(self, **kw): ...
-            def type_text(self, text): ...
-            def key(self, keys): ...
+            def type_text(self, text, dispatch=None): ...
+            def key(self, keys, dispatch=None): ...
             def list_apps(self): return []
             def focus_app(self, app, raise_window=False): ...
 
@@ -449,8 +518,8 @@ class TestCaptureResponse:
             def click(self, **kw): ...
             def drag(self, **kw): ...
             def scroll(self, **kw): ...
-            def type_text(self, text): ...
-            def key(self, keys): ...
+            def type_text(self, text, dispatch=None): ...
+            def key(self, keys, dispatch=None): ...
             def list_apps(self): return []
             def focus_app(self, app, raise_window=False): ...
 
@@ -488,8 +557,8 @@ class TestCaptureResponse:
             def click(self, **kw): ...
             def drag(self, **kw): ...
             def scroll(self, **kw): ...
-            def type_text(self, text): ...
-            def key(self, keys): ...
+            def type_text(self, text, dispatch=None): ...
+            def key(self, keys, dispatch=None): ...
             def list_apps(self): return []
             def focus_app(self, app, raise_window=False): ...
 
@@ -636,8 +705,8 @@ class TestCaptureResponse:
             def click(self, **kw): ...
             def drag(self, **kw): ...
             def scroll(self, **kw): ...
-            def type_text(self, text): ...
-            def key(self, keys): ...
+            def type_text(self, text, dispatch=None): ...
+            def key(self, keys, dispatch=None): ...
             def list_apps(self): return []
             def focus_app(self, app, raise_window=False): ...
 
@@ -1275,10 +1344,10 @@ class TestCaptureAfterAppContext:
             def scroll(self, **kw):
                 return ActionResult(ok=True, action="scroll")
 
-            def type_text(self, text):
+            def type_text(self, text, dispatch=None):
                 return ActionResult(ok=True, action="type")
 
-            def key(self, keys):
+            def key(self, keys, dispatch=None):
                 return ActionResult(ok=True, action="key")
 
             def list_apps(self):
@@ -1287,7 +1356,7 @@ class TestCaptureAfterAppContext:
             def focus_app(self, app, raise_window=False):
                 return ActionResult(ok=True, action="focus_app")
 
-            def set_value(self, value, element=None):
+            def set_value(self, value, element=None, dispatch=None):
                 return ActionResult(ok=True, action="set_value")
 
             def wait(self, seconds=1.0):
@@ -1341,10 +1410,10 @@ class TestCaptureAfterAppContext:
             def scroll(self, **kw):
                 return ActionResult(ok=True, action="scroll")
 
-            def type_text(self, text):
+            def type_text(self, text, dispatch=None):
                 return ActionResult(ok=True, action="type")
 
-            def key(self, keys):
+            def key(self, keys, dispatch=None):
                 return ActionResult(ok=True, action="key")
 
             def list_apps(self):
@@ -1353,7 +1422,7 @@ class TestCaptureAfterAppContext:
             def focus_app(self, app, raise_window=False):
                 return ActionResult(ok=True, action="focus_app")
 
-            def set_value(self, value, element=None):
+            def set_value(self, value, element=None, dispatch=None):
                 return ActionResult(ok=True, action="set_value")
 
             def wait(self, seconds=1.0):
