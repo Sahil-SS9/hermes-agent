@@ -4,6 +4,9 @@ Posts the actual draft copy paired with its generated image so Sahil reviews the
 real content (not an HTML file of path strings). Uses the Discord REST API
 directly with ``DISCORD_BOT_TOKEN`` (the same bot the gateway already runs), so
 delivery is deterministic and independent of the agent's formatting.
+
+For short posts and articles, also generates a styled HTML preview via
+content_preview.py and attaches it as a file for visual approval.
 """
 from __future__ import annotations
 import os
@@ -16,6 +19,8 @@ from typing import List, Optional
 
 import requests
 
+from content_preview import render_short_post, render_article
+
 DISCORD_API = "https://discord.com/api/v10"
 DEFAULT_CHANNEL = os.getenv("DISCORD_CONTENT_CHANNEL_ID", "1507448580649123900")
 CONTENT_LIMIT = 1900  # Discord hard limit is 2000; leave headroom.
@@ -26,6 +31,9 @@ BRAND_ORDER = [
 ]
 
 _TYPE_BADGE = {"text": "📝", "text+image": "🖼️", "text+video": "🎬", "video": "🎬"}
+
+# Preview output directory (same as SahilBlog uses).
+_PREVIEWS_DIR = Path(__file__).resolve().parent / "previews"
 
 
 # ── Article preview / delivery ──────────────────────────────────────
@@ -56,6 +64,9 @@ def _section_headers(body_md: str) -> list[str]:
 def post_article(bundle, channel_id: str = DEFAULT_CHANNEL) -> Optional[str]:
     """Post the article preview to Discord. Returns the message id of the
     preview header (or None when the token is missing / delivery fails).
+
+    Generates a styled HTML preview via content_preview.render_article() and
+    attaches it as a file for visual approval.
     """
     if not _token():
         print("[discord_digest] DISCORD_BOT_TOKEN not set, cannot deliver article.")
@@ -64,6 +75,25 @@ def post_article(bundle, channel_id: str = DEFAULT_CHANNEL) -> Optional[str]:
     headers = _section_headers(bundle.article_md)
     stamp = datetime.now().strftime("%d/%m/%y %H:%M")
     lede = (bundle.lede or "").strip().replace("\n", " ")[:240]
+
+    # Build a draft dict for the preview renderer.
+    draft = {
+        "id": bundle.dir.name if bundle.dir else "article",
+        "brand": "sahil",
+        "platform": "blog",
+        "body_text": bundle.article_md,
+        "title": bundle.title,
+        "content_type": "article",
+        "ai_image_path": str(bundle.image_paths[0]) if bundle.image_paths else "",
+        "visual_path": "",
+        "pillar": bundle.pillar,
+    }
+
+    # Generate the HTML preview and get the file path.
+    _PREVIEWS_DIR.mkdir(parents=True, exist_ok=True)
+    html = render_article(draft, bundle_dir=str(bundle.dir) if bundle.dir else None)
+    preview_path = _PREVIEWS_DIR / f"{draft['id']}.html"
+
     preview = "\n".join([
         f"📰 **Article Preview** · {stamp}",
         f"**Title**: {bundle.title}",
@@ -73,6 +103,8 @@ def post_article(bundle, channel_id: str = DEFAULT_CHANNEL) -> Optional[str]:
         "",
         "**Sections**:",
         "\n".join(f"- {h}" for h in headers) or "(none)",
+        "",
+        f"📎 HTML preview attached: `{preview_path.name}`",
     ])
 
     target = channel_id
@@ -86,6 +118,10 @@ def post_article(bundle, channel_id: str = DEFAULT_CHANNEL) -> Optional[str]:
         target = thread_id
     else:
         _post(target, preview)
+
+    # Attach the HTML preview file.
+    if preview_path.exists():
+        _post(target, "📎 Visual preview (open in browser):", file_path=str(preview_path))
 
     # Attach the hero image (first image, if any) to a follow-up message.
     if bundle.image_paths:
@@ -224,8 +260,26 @@ def deliver_discord_digest(drafts: List[dict], channel_id: str = DEFAULT_CHANNEL
             card = f"{badge} **{i}/{len(items)}** `{ct}` · {d.get('platform','')}  ·  `{d.get('id','')}`{note}"
             body = (d.get("body_text") or "").strip()
             img = d.get("ai_image_path") if "image" in ct else None
+
+            # Generate HTML preview for short posts (not articles).
+            preview_path = None
+            if ct != "article":
+                try:
+                    _PREVIEWS_DIR.mkdir(parents=True, exist_ok=True)
+                    render_short_post(d)
+                    preview_path = _PREVIEWS_DIR / f"{d.get('id', 'unknown')}.html"
+                    if not preview_path.exists():
+                        preview_path = None
+                except Exception as exc:  # noqa: BLE001
+                    print(f"[discord_digest] preview generation failed for {d.get('id', '?')}: {exc}")
+
             ok = _post(target, f"{card}\n{body}", file_path=img)
             delivered += 1 if ok else 0
+
+            # Attach the HTML preview as a separate message.
+            if ok and preview_path:
+                _post(target, f"📎 HTML preview: `{preview_path.name}`", file_path=str(preview_path))
+
             time.sleep(0.6)  # stay under Discord channel rate limits
 
     print(f"[discord_digest] delivered {delivered}/{len(drafts)} drafts to {target}")

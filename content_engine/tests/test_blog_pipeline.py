@@ -316,3 +316,85 @@ def test_stale_failed_images_flags_old_entries(monkeypatch, tmp_path):
     assert len(stale) == 1
     assert stale[0]["slug"] == "old-slug"
 
+
+
+# ── Holistic retry (failed-image recovery + Codex cap defer) ────────────
+
+def _seed_failed(tmp_path, monkeypatch, slug="token-maxing-at-the-edge", stream="ai"):
+    """Point trackers at tmp and seed one held post with a persisted draft."""
+    monkeypatch.setattr(bpl, "FAILED_IMAGES_PATH", tmp_path / "failed_images.jsonl")
+    monkeypatch.setattr(bpl, "PENDING_DRAFTS_DIR", tmp_path / "pending_images")
+    bpl._track_failed_image(slug, stream, "seed")
+    bpl._save_pending_draft({**_DRAFT, "slug": slug}, stream)
+    return slug
+
+
+def test_retry_all_defers_when_codex_capped(monkeypatch, tmp_path):
+    """A usage cap must defer the whole run and burn NO attempts."""
+    from blog.blog_illustrator import CodexCapExceeded
+    slug = _seed_failed(tmp_path, monkeypatch)
+
+    def capped(draft, **kw):
+        raise CodexCapExceeded("capped")
+    monkeypatch.setattr(bpl, "illustrate", capped)
+
+    res = bpl.retry_all_pending_images(repo=str(tmp_path))
+    assert res["status"] == "deferred"
+    assert res["reason"] == "codex_capped"
+    assert slug in res["pending"]
+    # Attempt count unchanged (still the single seed attempt), draft preserved.
+    entries = bpl._get_failed_entries()
+    assert entries and entries[0]["attempts"] == 1
+    assert (tmp_path / "pending_images" / f"{slug}.json").exists()
+
+
+def test_retry_recovers_held_post_with_persisted_draft(monkeypatch, tmp_path):
+    """On success the post is assembled, staged, and cleared from both trackers."""
+    slug = _seed_failed(tmp_path, monkeypatch)
+    seen = {}
+
+    def ok_illustrate(draft, **kw):
+        seen["body"] = draft.get("body_md", "")
+        return {"hero_path": "/tmp/h.png", "section_paths": {"The mechanism": "/tmp/s.png"}}
+    monkeypatch.setattr(bpl, "illustrate", ok_illustrate)
+    monkeypatch.setattr(bpl, "assemble", lambda d, imgs, repo=None, pub_date=None: tmp_path / f"{d['slug']}.mdx")
+    monkeypatch.setattr(bpl, "stage_draft", lambda mdx, repo=None: slug)
+
+    res = bpl.retry_all_pending_images(repo=str(tmp_path))
+    assert res["status"] == "ok"
+    assert slug in res["recovered"]
+    # Used the FULL persisted body, not a slug-only draft.
+    assert "The mechanism" in seen["body"]
+    # Cleared from both trackers.
+    assert bpl._get_failed_entries() == []
+    assert not (tmp_path / "pending_images" / f"{slug}.json").exists()
+
+
+def test_retry_reports_legacy_entry_without_draft(monkeypatch, tmp_path):
+    """Held entries with no persisted draft are surfaced, not silently retried."""
+    monkeypatch.setattr(bpl, "FAILED_IMAGES_PATH", tmp_path / "failed_images.jsonl")
+    monkeypatch.setattr(bpl, "PENDING_DRAFTS_DIR", tmp_path / "pending_images")
+    bpl._track_failed_image("legacy-slug", "ai", "seed")  # no _save_pending_draft
+
+    monkeypatch.setattr(bpl, "illustrate", lambda *a, **k: pytest.fail("should not illustrate"))
+    res = bpl.retry_all_pending_images(repo=str(tmp_path))
+    assert res["status"] == "ok"
+    assert "legacy-slug" in res["no_draft"]
+
+
+def test_retry_prunes_stale_legacy_no_draft(monkeypatch, tmp_path):
+    """A no-draft entry older than the stale threshold is pruned, not reported."""
+    monkeypatch.setattr(bpl, "FAILED_IMAGES_PATH", tmp_path / "failed_images.jsonl")
+    monkeypatch.setattr(bpl, "PENDING_DRAFTS_DIR", tmp_path / "pending_images")
+    bpl._track_failed_image("ancient-slug", "ai", "seed")
+    # Backdate first_failure well past the stale threshold.
+    entries = bpl._get_failed_entries()
+    entries[0]["first_failure"] = "2020-01-01"
+    (tmp_path / "failed_images.jsonl").write_text(
+        "\n".join(__import__("json").dumps(e) for e in entries) + "\n")
+
+    monkeypatch.setattr(bpl, "illustrate", lambda *a, **k: pytest.fail("no illustrate for no_draft"))
+    res = bpl.retry_all_pending_images(repo=str(tmp_path))
+    assert "ancient-slug" in res["pruned"]
+    assert "ancient-slug" not in res["no_draft"]
+    assert bpl._get_failed_entries() == []

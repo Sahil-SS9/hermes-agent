@@ -23,34 +23,22 @@ POSTGRES_DB = os.getenv("POSTIZ_DB_NAME", "postiz-db-local")
 # Organisation ID from the existing Postiz instance
 ORG_ID = "2645662d-a479-4a6a-91ca-a50a7d29f607"
 
-# Integration IDs per brand/platform — populated from the live Postiz DB.
-# Run `postiz_bridge.py --refresh-integrations` to rebuild from the database.
-# As of 2026-05-14, only a Telegram test channel exists.
-# All other platforms must be linked via the Postiz web UI OAuth flow.
+# Integration IDs per brand/platform — restored from Postiz DB backup 03/07/26.
+# All 4 X accounts have long-lived OAuth1 tokens (expire 2058).
+# LinkedIn has OAuth2 with refresh token (Postiz auto-refreshes).
+# Focus: personal accounts only (sahil_twitter, sahil_linkedin).
+# App brand accounts (matchdaymaestro, plenishd, coachos) are wired but paused.
 INTEGRATION_MAP: dict[str, Optional[str]] = {
-    "matchdaymaestro_twitter": None,
-    "matchdaymaestro_instagram": None,
-    "matchdaymaestro_tiktok": None,
-    "plenishd_twitter": None,
-    "plenishd_instagram": None,
-    "plenishd_linkedin": None,
-    "sahil_twitter_twitter": None,  # real ID from Postiz DB: cmp8jnrcs0003oa6vxtjfs4et
-    "sahil_linkedin_linkedin": None,  # real ID from Postiz DB: cmp8v51dh0001nz6y5nmydws4
-    "coachos_twitter": None,
-    "coachos_instagram": None,
-    "coachos_linkedin": None,
-    # Hardcoded personal IDs — Postiz DB has these; refresh_integration_map()
-    # can't find them due to underscore-split bug (sahil_* brand keys).
-    # Bug: key.split("_",1) on e.g. "sahil_twitter_twitter" yields
-    # brand='sahil', provider='twitter_twitter' which won't match 'x'.
-    # Hardcode until refresh_integration_map is fixed for multi-word brands.
+    # Personal accounts (ACTIVE)
     "sahil_twitter_twitter": "cmp8jnrcs0003oa6vxtjfs4et",
     "sahil_linkedin_linkedin": "cmp8v51dh0001nz6y5nmydws4",
-    # Telegram is wired — can be used for test posts
-    "matchdaymaestro_telegram": "72a8d345-6951-4707-b503-03070d7643e3",
-    "plenishd_telegram": "72a8d345-6951-4707-b503-03070d7643e3",
+    # App brand accounts (PAUSED — not in use yet)
+    "matchdaymaestro_twitter": "cmp8i1isr0001oa6v7s7luvt8",
+    "plenishd_twitter": "cmp8kogmw0005oa6vrhzr240m",
+    "coachos_twitter": "cmp8nxc5y0007oa6vkx8qmvb2",
+    "matchdaymaestro_instagram": "cmp94dmqb0001qo6plq4e3wf0",
+    # Telegram (test channel)
     "sahil_telegram": "72a8d345-6951-4707-b503-03070d7643e3",
-    "coachos_telegram": "72a8d345-6951-4707-b503-03070d7643e3",
 }
 
 
@@ -211,6 +199,60 @@ def list_postiz_integrations() -> list[dict]:
         return []
 
 
+def _upload_media_to_postiz(media_path: str) -> Optional[str]:
+    """Upload an image to Postiz via the public API and return the media URL.
+    
+    Postiz stores uploads at /uploads/YYYY/MM/DD/<hash>.<ext> inside the container.
+    We copy the file into the container's upload directory and return the URL path.
+    """
+    if not media_path or not os.path.exists(media_path):
+        return None
+    
+    try:
+        from pathlib import Path
+        import hashlib
+        
+        now = datetime.now(timezone.utc)
+        year = now.strftime("%Y")
+        month = now.strftime("%m")
+        day = now.strftime("%d")
+        
+        # Read the file and hash it for the filename
+        with open(media_path, "rb") as f:
+            file_data = f.read()
+        file_hash = hashlib.md5(file_data).hexdigest()
+        ext = Path(media_path).suffix.lower()
+        
+        rel_path = f"{year}/{month}/{day}/{file_hash}{ext}"
+        container_path = f"/uploads/{rel_path}"
+        
+        # Copy into the container
+        import subprocess
+        result = subprocess.run(
+            ["docker", "cp", media_path, f"postiz:{container_path}"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode != 0:
+            # Create the directory first
+            subprocess.run(
+                ["docker", "exec", "postiz", "mkdir", "-p", f"/uploads/{year}/{month}/{day}"],
+                capture_output=True, text=True, timeout=10,
+            )
+            result = subprocess.run(
+                ["docker", "cp", media_path, f"postiz:{container_path}"],
+                capture_output=True, text=True, timeout=30,
+            )
+            if result.returncode != 0:
+                print(f"  Media upload failed: {result.stderr[:100]}")
+                return None
+        
+        # Postiz serves uploads at /uploads/<path> via nginx
+        return f"/uploads/{rel_path}"
+    except Exception as e:
+        print(f"  Media upload error: {e}")
+        return None
+
+
 def queue_post(
     body_text: str,
     brand: str,
@@ -218,14 +260,14 @@ def queue_post(
     title: Optional[str] = None,
     publish_at: Optional[datetime] = None,
     group: str = "kensei-generated",
-    state: str = "DRAFT",
+    state: str = "QUEUE",
     media_path: Optional[str] = None,
 ) -> Optional[str]:
     """Insert a post into Postiz DB, or export manually if no integration.
 
-    ``media_path`` is the local image/video to attach. Until Postiz media-library
-    upload is wired, the path is recorded in the manual export so the asset is
-    never lost; the DB insert stays content-only.
+    ``media_path`` is the local image/video to attach. If provided, the file is
+    copied into the Postiz container's /uploads directory and the URL is stored
+    in the Post.image column.
 
     Returns the Postiz post ID if queued, or None (manual export printed).
     """
@@ -233,6 +275,11 @@ def queue_post(
     if not integration_id:
         _manual_export(body_text, brand, platform, title=title, media_path=media_path)
         return None
+
+    # Upload media if provided
+    image_url = None
+    if media_path:
+        image_url = _upload_media_to_postiz(media_path)
 
     post_id = str(uuid.uuid4())
     scheduled = publish_at or (datetime.now(timezone.utc) + timedelta(hours=2))
@@ -245,14 +292,14 @@ def queue_post(
             INSERT INTO "Post" (
                 id, state, "publishDate", "organizationId", "integrationId",
                 content, title, "group", delay, "approvedSubmitForOrder",
-                "createdAt", "updatedAt"
+                "createdAt", "updatedAt", image
             ) VALUES (
                 %s, %s, %s, %s, %s,
                 %s, %s, %s, 0, 'NO',
-                NOW(), NOW()
+                NOW(), NOW(), %s
             )
             """,
-            (post_id, state, scheduled, ORG_ID, integration_id, body_text, title or "", group),
+            (post_id, state, scheduled, ORG_ID, integration_id, body_text, title or "", group, image_url),
         )
         conn.commit()
         cur.close()
