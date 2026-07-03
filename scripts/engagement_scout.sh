@@ -15,4 +15,4 @@ set +a
 export PYTHONPATH="${CE_DIR}:${PYTHONPATH:-}"
 
 cd "$CE_DIR"
-timeout 120 /home/kensei/repos/KenseiAgent/.venv/bin/python "$ENGAGEMENT_PY" scan 2>&1
+timeout 300 /home/kensei/repos/KenseiAgent/.venv/bin/python "$ENGAGEMENT_PY" scan 2>&1

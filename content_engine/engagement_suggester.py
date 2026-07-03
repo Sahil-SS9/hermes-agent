@@ -237,10 +237,12 @@ def _post_to_discord(channel_id: str, content: str) -> bool:
 
 
 def _run_xurl(args: List[str]) -> Tuple[int, str]:
-    """Run xurl with the given args and return (exit_code, stdout).
-    
+    """Run xurl with the given args and return (exit_code, combined_output).
+
     Always uses --auth oauth1 since the default app config may not auto-select
     the right auth mode for all endpoints (search, quote, reply, etc.).
+    Combines stdout and stderr since xurl writes error details (e.g. 429
+    "Too Many Requests") to stderr.
     """
     try:
         result = subprocess.run(
@@ -249,7 +251,13 @@ def _run_xurl(args: List[str]) -> Tuple[int, str]:
             text=True,
             timeout=30,
         )
-        return result.returncode, result.stdout.strip()
+        # Combine stdout + stderr (xurl errors come via stderr)
+        combined = (result.stdout or "").strip()
+        if result.stderr and "{" in result.stderr:
+            # xurl prints structured error JSON to stderr; prefer it if it
+            # contains a status code (4xx/5xx).
+            combined = (result.stderr or "").strip() + ("\n" + combined if combined else "")
+        return result.returncode, combined
     except FileNotFoundError:
         return -1, f"xurl not found at {XURL_BIN}"
     except subprocess.TimeoutExpired:
@@ -588,20 +596,57 @@ def _build_detail_suffix(text: str, category: str) -> str:
 # The scan_and_suggest pipeline follows.
 
 
-def scan_and_suggest() -> List[Dict]:
-    """Main pipeline: scan target accounts, generate suggestions, save to JSON.
+def _auto_like_tweet(tweet_id: str) -> bool:
+    """Like a tweet via xurl. Returns True on success.
 
-    Returns the list of new suggestions generated.
+    Returns False on 429 (rate limit) so caller can detect and continue
+    instead of treating as hard failure.
     """
-    print(f"[engagement] Scanning {len(TARGET_ACCOUNTS)} target accounts...")
+    if not tweet_id:
+        return False
+    code, output = _run_xurl(["like", tweet_id])
+    if code == 0:
+        try:
+            return json.loads(output).get("data", {}).get("liked", False)
+        except (json.JSONDecodeError, AttributeError):
+            pass
+    # Detect rate limit in stderr output
+    if "429" in output or "Too Many Requests" in output:
+        print(f"[engagement]    ⏸ Rate limited on {tweet_id}")
+    return False
+
+
+def scan_and_suggest() -> List[Dict]:
+    """Main pipeline: scan target accounts, auto-like, generate reply suggestions.
+
+    On X API Basic tier:
+    - LIKING arbitrary tweets works (we auto-like high-engagement tweets)
+    - REPLYING only works when mentioned/replied-to by the author
+    - QUOTE TWEETING only works when part of the conversation
+
+    We auto-like qualifying tweets from target accounts, then separately
+    scan Sahil's mentions for reply-suggestion candidates.
+
+    Returns the list of new reply suggestions generated.
+    """
+    print(f"[engagement] Scanning {len(TARGET_ACCOUNTS)} target accounts for likes...")
     all_suggestions = _load_suggestions()
 
     # Track existing tweet IDs to avoid duplicates
     existing_ids = {s.get("tweet_id") for s in all_suggestions if s.get("tweet_id")}
-
+    liked_ids = set()
     new_suggestions = []
 
+    # ─── Phase 1: Auto-like high-engagement tweets from target accounts ───
+    rate_limited = False
     for account in TARGET_ACCOUNTS:
+        if rate_limited:
+            break
+
+        # Skip own account for likes
+        if account == "Sahil_Saghir":
+            continue
+
         print(f"[engagement]  Fetching tweets from @{account}...")
         tweets = fetch_recent_tweets(account)
 
@@ -610,7 +655,7 @@ def scan_and_suggest() -> List[Dict]:
 
         for tweet in tweets:
             tweet_id = tweet.get("id", "")
-            if tweet_id in existing_ids:
+            if tweet_id in existing_ids or tweet_id in liked_ids:
                 continue
 
             # Skip low-engagement posts
@@ -626,44 +671,104 @@ def scan_and_suggest() -> List[Dict]:
             if any(re.search(p, text, re.IGNORECASE) for p in bait_patterns):
                 continue
 
-            # Generate quote tweet
-            quote_text = _generate_quote_tweet(tweet)
+            # Auto-like the tweet (this works on Basic tier)
+            liked = _auto_like_tweet(tweet_id)
+            if liked:
+                liked_ids.add(tweet_id)
+                print(f"[engagement]    ❤️ Liked @{account} tweet {tweet_id}")
+            else:
+                # If rate limited, stop entirely to avoid wasting calls
+                if "⏸" in str(liked):
+                    rate_limited = True
+                    print(f"[engagement]    ⏸ Hit rate limit, stopping likes")
+                    break
+                print(f"[engagement]    - Could not like @{account} tweet {tweet_id}")
 
-            # Generate reply
-            reply_text = _generate_reply(tweet)
+            # Brief pause to respect X rate limits (Basic tier: ~50 likes/15min)
+            time.sleep(1.0)
 
-            suggestion_id = str(uuid.uuid4())[:8]
+    # ─── Phase 2: Scan Sahil's mentions for reply opportunities ───
+    print("[engagement] Scanning @Sahil_Saghir mentions for reply opportunities...")
+    # Use dedicated search for tweets mentioning Sahil
+    code, output = _run_xurl([
+        "search", "@Sahil_Saghir",
+        "-n", "20",
+    ])
+    mention_tweets = []
+    if code == 0:
+        try:
+            data = json.loads(output)
+            raw = data.get("data", data) if isinstance(data, dict) else data
+            mention_tweets = raw if isinstance(raw, list) else raw.get("data", [])
+        except (json.JSONDecodeError, AttributeError):
+            pass
 
-            suggestion = {
-                "id": suggestion_id,
-                "tweet_id": tweet_id,
-                "author": account,
-                "author_name": tweet.get("author_name", account),
-                "tweet_text": text,
-                "tweet_url": tweet.get("url", ""),
-                "engagement": tweet.get("engagement", 0),
-                "likes": tweet.get("likes", 0),
-                "replies": tweet.get("replies", 0),
-                "retweets": tweet.get("retweets", 0),
-                "category": _categorize_post(text),
-                "quote_tweet": quote_text,
-                "reply": reply_text,
-                "status": "pending",  # pending, approved_qt, approved_reply, skipped
-                "created_at": datetime.now(timezone.utc).isoformat(),
-            }
+    for raw_tweet in mention_tweets:
+        if not isinstance(raw_tweet, dict):
+            continue
+        tweet_id = raw_tweet.get("id", "")
+        text = raw_tweet.get("text", "") or ""
 
-            new_suggestions.append(suggestion)
-            existing_ids.add(tweet_id)
+        # Skip Sahil's own posts and retweets
+        if text.startswith("RT @") or text.startswith("RT "):
+            continue
 
-            print(f"[engagement]    + Suggestion {suggestion_id}: @{account} "
-                  f"(engagement: {tweet['engagement']})")
+        if tweet_id in existing_ids:
+            continue
+
+        # Must mention @Sahil_Saghir
+        if "@sahil_saghir" not in text.lower():
+            continue
+
+        # Convert to suggestion format
+        tweet = {
+            "id": tweet_id,
+            "text": text,
+            "author": "unknown",
+            "author_name": "unknown",
+            "likes": 0,
+            "replies": 0,
+            "retweets": 0,
+            "engagement": 0,
+            "url": f"https://x.com/i/web/status/{tweet_id}",
+        }
+
+        # Generate contextual reply via LLM
+        reply_text = _generate_reply(tweet)
+
+        suggestion_id = str(uuid.uuid4())[:8]
+        suggestion = {
+            "id": suggestion_id,
+            "tweet_id": tweet_id,
+            "author": "mentioned_user",
+            "author_name": "mentioned_user",
+            "tweet_text": text,
+            "tweet_url": tweet["url"],
+            "engagement": 0,
+            "likes": 0,
+            "replies": 0,
+            "retweets": 0,
+            "category": _categorize_post(text),
+            "reply": reply_text,
+            "status": "pending",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+        new_suggestions.append(suggestion)
+        existing_ids.add(tweet_id)
+
+        print(f"[engagement]    + Reply suggestion {suggestion_id}: @{suggestion['author']} "
+              f"(engagement: {tweet['engagement']})")
 
     if new_suggestions:
         all_suggestions.extend(new_suggestions)
         _save_suggestions(all_suggestions)
-        print(f"[engagement] Saved {len(new_suggestions)} new suggestions to {SUGGESTIONS_FILE}")
+        print(f"[engagement] Saved {len(new_suggestions)} new reply suggestions to {SUGGESTIONS_FILE}")
     else:
-        print("[engagement] No new suggestions generated.")
+        print("[engagement] No new reply suggestions generated.")
+
+    # Summary
+    print(f"\n[engagement] Summary: {len(liked_ids)} liked, {len(new_suggestions)} reply suggestions")
 
     return new_suggestions
 
@@ -704,7 +809,7 @@ def deliver_to_discord(suggestions: Optional[List[Dict]] = None) -> int:
         f"Target Engagement Suggestions · {stamp}\n"
         f"Top {len(to_deliver)} by engagement"
         + (f" ({skipped} lower-scoring skipped)" if skipped else "")
-        + "\nUse `!qt <id>` (quote tweet), `!reply <id>` (reply), `!skip <id>` (dismiss)"
+        + "\nUse `!reply <id>` (reply), `!skip <id>` (dismiss)"
     )
 
     # Forum channels (type 15) need a thread — create one and post inside it
@@ -736,7 +841,7 @@ def deliver_to_discord(suggestions: Optional[List[Dict]] = None) -> int:
 
 
 def _build_discord_card(suggestion: Dict) -> str:
-    """Build a Discord message card for a suggestion."""
+    """Build a Discord message card for a reply suggestion."""
     lines = [
         f"━━━ **@{suggestion['author']}** · {suggestion['engagement']} engagements ━━━",
         "",
@@ -745,13 +850,10 @@ def _build_discord_card(suggestion: Dict) -> str:
         f"{suggestion['tweet_url']}",
         f"❤️ {suggestion['likes']}  💬 {suggestion['replies']}  🔄 {suggestion['retweets']}",
         "",
-        f"**💬 Quote tweet:**",
-        f"```{suggestion['quote_tweet'][:280]}```",
-        "",
-        f"**↩️ Reply:**",
+        f"**↩️ Suggested reply:**",
         f"```{suggestion['reply'][:280]}```",
         "",
-        f"`!qt {suggestion['id']}` · `!reply {suggestion['id']}` · `!skip {suggestion['id']}`",
+        f"`!reply {suggestion['id']}` · `!skip {suggestion['id']}`",
     ]
     return "\n".join(lines)
 
