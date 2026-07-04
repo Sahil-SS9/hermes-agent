@@ -27,7 +27,7 @@ from urllib.parse import quote
 
 # ── Config ──────────────────────────────────────────────────────────────────
 ATOM_NS = "http://www.w3.org/2005/Atom"
-CUTOFF_DAYS = int(os.environ.get("PAPER_CUTOFF_DAYS", "14"))
+CUTOFF_DAYS = int(os.environ.get("PAPER_CUTOFF_DAYS", "2"))
 MAX_CANDIDATES = int(os.environ.get("PAPER_MAX_CANDIDATES", "30"))
 OUTPUT_PATH = os.environ.get("PAPER_OUTPUT", "")
 SCRIPT_DIR = Path(__file__).resolve().parent

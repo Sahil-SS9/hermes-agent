@@ -27,5 +27,5 @@ fi
 ) >>"$LOG" 2>&1 < /dev/null &
 
 pid=$!
-echo "blog-stream-daily detached pid=$pid log=$LOG"
+# Detached process started — silent on success (no Discord delivery)
 exit 0

@@ -2906,7 +2906,7 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
 # also strips inline verification lines that appear before those markers.
 
 _VERIFICATION_LEAK_PATTERNS = [
-    re.compile(r'^[Aa]d-hoc verification\b', re.MULTILINE),
+    re.compile(r'^\*{0,2}[Aa]d-hoc verification\b', re.MULTILINE),
     re.compile(r'hermes-verify-\S+', re.MULTILINE),
     re.compile(r'\b\d+/\d+ PASS\b', re.MULTILINE),
     re.compile(r'\b\d+ checks? passed\b', re.MULTILINE),
@@ -2917,6 +2917,7 @@ _VERIFICATION_LEAK_PATTERNS = [
     re.compile(r'verification complete.*0 errors\b', re.MULTILINE),
     re.compile(r'Queue is valid.*pending is empty\b', re.MULTILINE),
     re.compile(r'^##\s*[Aa]d-hoc verification\b', re.MULTILINE),
+    re.compile(r'^\*{0,2}[Aa]d-hoc verification\s+passed\b', re.MULTILINE),
 ]
 
 _MEDIA_TAG_RE = re.compile(r'^MEDIA:/\S+', re.MULTILINE)
