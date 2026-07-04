@@ -2897,6 +2897,96 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
             logger.debug("Job '%s': failed to reap stale auxiliary clients: %s", job_id, e)
 
 
+# KENSEI CUSTOM — Verification-text leak stripper ──────────────────────────
+# Cheaper LLM models (deepseek-v4-flash, glm-5.1) run ad-hoc verification
+# scripts and append the results to their final response, AFTER the intended
+# summary + MEDIA: tag.  The delivery layer reads the last thing output, so
+# Discord receives "Ad-hoc verification: 16/16 PASS..." instead of the actual
+# summary.  This function truncates at the MEDIA: tag or [SILENT] marker and
+# also strips inline verification lines that appear before those markers.
+
+_VERIFICATION_LEAK_PATTERNS = [
+    re.compile(r'^[Aa]d-hoc verification\b', re.MULTILINE),
+    re.compile(r'hermes-verify-\S+', re.MULTILINE),
+    re.compile(r'\b\d+/\d+ PASS\b', re.MULTILINE),
+    re.compile(r'\b\d+ checks? passed\b', re.MULTILINE),
+    re.compile(r'all structural checks passed\b', re.MULTILINE),
+    re.compile(r'HTML report is well-formed\b', re.MULTILINE),
+    re.compile(r'dark-mode compliant\b', re.MULTILINE),
+    re.compile(r'no legacy Telegram tags\b', re.MULTILINE),
+    re.compile(r'verification complete.*0 errors\b', re.MULTILINE),
+    re.compile(r'Queue is valid.*pending is empty\b', re.MULTILINE),
+    re.compile(r'^##\s*[Aa]d-hoc verification\b', re.MULTILINE),
+]
+
+_MEDIA_TAG_RE = re.compile(r'^MEDIA:/\S+', re.MULTILINE)
+_SILENT_RE = re.compile(r'^\[SILENT\]\s*$', re.MULTILINE | re.IGNORECASE)
+
+
+def _strip_verification_leak(text: str) -> str:
+    """Remove verification-text leakage from LLM cron final_response.
+
+    Strategy (order matters):
+    1. If the text contains [SILENT], return [SILENT] only — anything after
+       is leaked verification noise.
+    2. If the text contains a MEDIA: tag, truncate to the end of that line —
+       the summary + MEDIA tag is the intended delivery, anything after is
+       verification noise.
+    3. If neither marker is present, strip individual lines matching known
+       verification-leak patterns.  This catches cases where the LLM runs
+       verification but never produces a MEDIA tag or [SILENT].
+    """
+    if not text or not text.strip():
+        return text
+
+    # 1 — [SILENT] truncation
+    # Truncate at the [SILENT] line, keeping the prefix + [SILENT] marker.
+    # This preserves any legitimate summary before [SILENT] and lets the
+    # downstream _is_cron_silence_response() handle the silence decision.
+    # We only strip verification noise that may appear AFTER [SILENT].
+    silent_match = _SILENT_RE.search(text)
+    if silent_match:
+        # Include the [SILENT] line itself in the truncated output
+        line_end = text.find("\n", silent_match.end())
+        if line_end == -1:
+            prefix = text[:silent_match.end()].rstrip()
+        else:
+            prefix = text[:line_end].rstrip()
+        return _strip_inline_verification(prefix) if prefix else "[SILENT]"
+
+    # 2 — MEDIA: tag truncation
+    media_match = _MEDIA_TAG_RE.search(text)
+    if media_match:
+        # Keep everything from the start through the end of the MEDIA: line,
+        # then strip any verification lines that appeared before the tag.
+        line_end = text.find("\n", media_match.end())
+        if line_end == -1:
+            # MEDIA: tag is the last line — strip inline from the prefix
+            prefix = text[:media_match.end()].rstrip()
+        else:
+            prefix = text[:line_end].rstrip()
+        return _strip_inline_verification(prefix)
+
+    # 3 — No marker: strip individual verification lines
+    return _strip_inline_verification(text)
+
+
+def _strip_inline_verification(text: str) -> str:
+    """Remove individual lines that match known verification-leak patterns."""
+    if not text:
+        return text
+    lines = text.split("\n")
+    cleaned = [
+        line
+        for line in lines
+        if not any(pat.search(line.strip()) for pat in _VERIFICATION_LEAK_PATTERNS)
+    ]
+    # If ALL lines were stripped, the output was pure verification noise.
+    # Return empty string so the delivery layer suppresses it (should_deliver
+    # check + soft-failure marking handle the rest).
+    return "\n".join(cleaned).rstrip()
+
+
 def run_one_job(job: dict, *, adapters=None, loop=None, verbose: bool = False) -> bool:
     """Run ONE due job end-to-end: execute → save output → deliver → mark.
 
@@ -2918,6 +3008,14 @@ def run_one_job(job: dict, *, adapters=None, loop=None, verbose: bool = False) -
         output_file = save_job_output(job["id"], output)
         if verbose:
             logger.info("Output saved to: %s", output_file)
+
+        # KENSEI CUSTOM — strip verification-text leakage from LLM cron output.
+        # Cheaper models (deepseek-v4-flash, glm-5.1) run ad-hoc verification
+        # scripts and append results AFTER the summary+MEDIA tag. The delivery
+        # layer reads the last thing output, so Discord receives verification
+        # text instead of the actual summary. This strip runs BEFORE delivery.
+        if success and final_response:
+            final_response = _strip_verification_leak(final_response)
 
         # Deliver the final response to the origin/target chat.
         # If the agent responded with [SILENT], skip delivery (but
