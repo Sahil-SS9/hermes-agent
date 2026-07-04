@@ -33,7 +33,7 @@ import requests
 # ──────────────────────────────────────────────────────────────────────
 
 try:
-    from engagement_x_poster import quote_tweet as _browser_qt, reply_to_tweet as _browser_reply, is_authenticated as _browser_auth
+    from engagement_x_poster import quote_tweet as _browser_qt, reply_to_tweet as _browser_reply, is_authenticated as _browser_auth, fetch_tweets_batch as _browser_fetch_batch
     _HAS_BROWSER_POSTER = True
 except ImportError:
     _HAS_BROWSER_POSTER = False
@@ -193,6 +193,9 @@ def _create_forum_thread(forum_id: str, name: str, content: str) -> Optional[str
         print(f"[engagement] Forum thread error: {exc}")
     return None
 
+
+# Max suggestions to generate per scan (top N by engagement, prevents LLM waste)
+MAX_SUGGESTIONS_PER_SCAN = 12
 
 # Max suggestions to deliver per run (prevents Discord flooding)
 MAX_DELIVER_PER_RUN = 5
@@ -620,79 +623,107 @@ def _auto_like_tweet(tweet_id: str) -> bool:
 
 
 def scan_and_suggest() -> List[Dict]:
-    """Main pipeline: scan target accounts, generate suggestions, save to JSON.
+    """Main pipeline: scan target accounts, rank by engagement, generate top N suggestions.
 
-    Returns the list of new suggestions generated.
+    Pre-analysis via browser scraper collects all raw tweets across all accounts,
+    filters low-engagement/bait, sorts by engagement descending, then generates
+    LLM suggestions only for the top MAX_SUGGESTIONS_PER_SCAN tweets.
+
+    Saves all new suggestions to JSON and returns them.
     """
     print(f"[engagement] Scanning {len(TARGET_ACCOUNTS)} target accounts...")
     all_suggestions = _load_suggestions()
-
-    # Track existing tweet IDs to avoid duplicates
     existing_ids = {s.get("tweet_id") for s in all_suggestions if s.get("tweet_id")}
 
+    # ─── Phase 1: Collect all raw tweets ───
+    all_raw_tweets: list[dict] = []
+
+    # Use browser scraper (zero API cost) when available
+    if _HAS_BROWSER_POSTER and _browser_auth():
+        print("[engagement] Using browser scraper (zero API cost)...")
+        accounts = [a for a in TARGET_ACCOUNTS if a != "Sahil_Saghir"]
+        account_tweets = _browser_fetch_batch(accounts, limit=POSTS_PER_ACCOUNT)
+        for acct, tweets in account_tweets.items():
+            for t in tweets:
+                t["author"] = acct  # ensure author is set
+                all_raw_tweets.append(t)
+    else:
+        # Fallback: per-account xurl
+        for account in TARGET_ACCOUNTS:
+            if account == "Sahil_Saghir":
+                continue
+            print(f"[engagement]  Fetching tweets from @{account} via xurl...")
+            tweets = fetch_recent_tweets(account)
+            for t in tweets:
+                t["author"] = account
+                all_raw_tweets.append(t)
+
+    # ─── Phase 2: Filter and rank ───
+    candidates = []
+    for tweet in all_raw_tweets:
+        tweet_id = tweet.get("id", "")
+        if tweet_id in existing_ids:
+            continue
+
+        # Skip low-engagement posts
+        if tweet.get("engagement", 0) < ENGAGEMENT_THRESHOLD:
+            continue
+
+        # Skip engagement bait
+        text = tweet.get("text", "")
+        bait_patterns = [
+            r"RT if", r"retweet if", r"like if", r"comment below",
+            r"follow for", r"tag someone", r"mention someone",
+        ]
+        if any(re.search(p, text, re.IGNORECASE) for p in bait_patterns):
+            continue
+
+        candidates.append(tweet)
+
+    # Sort by engagement descending, take top N
+    candidates.sort(key=lambda t: t.get("engagement", 0), reverse=True)
+    top_candidates = candidates[:MAX_SUGGESTIONS_PER_SCAN]
+
+    print(f"[engagement] Collected {len(all_raw_tweets)} raw tweets, "
+          f"{len(candidates)} eligible, generating suggestions for top {len(top_candidates)}")
+
+    # ─── Phase 3: Generate LLM suggestions for top candidates only ───
     new_suggestions = []
+    for tweet in top_candidates:
+        tweet_id = tweet.get("id", "")
+        account = tweet.get("author", "unknown")
 
-    # ─── Scan target accounts for quote/reply opportunities ───
-    for account in TARGET_ACCOUNTS:
-        # Skip own account
-        if account == "Sahil_Saghir":
-            continue
+        # Skip engagement bait filter (already done above, do quick text check)
+        text = tweet.get("text", "")
 
-        print(f"[engagement]  Fetching tweets from @{account}...")
-        tweets = fetch_recent_tweets(account)
+        # Generate quote tweet and reply via LLM
+        quote_text = _generate_quote_tweet(tweet)
+        reply_text = _generate_reply(tweet)
 
-        if not tweets:
-            continue
+        suggestion_id = str(uuid.uuid4())[:8]
+        suggestion = {
+            "id": suggestion_id,
+            "tweet_id": tweet_id,
+            "author": account,
+            "author_name": tweet.get("author_name", account),
+            "tweet_text": text,
+            "tweet_url": tweet.get("url", ""),
+            "engagement": tweet.get("engagement", 0),
+            "likes": tweet.get("likes", 0),
+            "replies": tweet.get("replies", 0),
+            "retweets": tweet.get("retweets", 0),
+            "category": _categorize_post(text),
+            "quote_tweet": quote_text,
+            "reply": reply_text,
+            "status": "pending",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
 
-        for tweet in tweets:
-            tweet_id = tweet.get("id", "")
-            if tweet_id in existing_ids:
-                continue
+        new_suggestions.append(suggestion)
+        existing_ids.add(tweet_id)
 
-            # Skip low-engagement posts
-            if tweet.get("engagement", 0) < ENGAGEMENT_THRESHOLD:
-                continue
-
-            # Skip engagement bait
-            text = tweet.get("text", "")
-            bait_patterns = [
-                r"RT if", r"retweet if", r"like if", r"comment below",
-                r"follow for", r"tag someone", r"mention someone",
-            ]
-            if any(re.search(p, text, re.IGNORECASE) for p in bait_patterns):
-                continue
-
-            # Generate quote tweet
-            quote_text = _generate_quote_tweet(tweet)
-
-            # Generate reply
-            reply_text = _generate_reply(tweet)
-
-            suggestion_id = str(uuid.uuid4())[:8]
-
-            suggestion = {
-                "id": suggestion_id,
-                "tweet_id": tweet_id,
-                "author": account,
-                "author_name": tweet.get("author_name", account),
-                "tweet_text": text,
-                "tweet_url": tweet.get("url", ""),
-                "engagement": tweet.get("engagement", 0),
-                "likes": tweet.get("likes", 0),
-                "replies": tweet.get("replies", 0),
-                "retweets": tweet.get("retweets", 0),
-                "category": _categorize_post(text),
-                "quote_tweet": quote_text,
-                "reply": reply_text,
-                "status": "pending",
-                "created_at": datetime.now(timezone.utc).isoformat(),
-            }
-
-            new_suggestions.append(suggestion)
-            existing_ids.add(tweet_id)
-
-            print(f"[engagement]    + Suggestion {suggestion_id}: @{account} "
-                  f"(engagement: {tweet['engagement']})")
+        print(f"[engagement]    + Suggestion {suggestion_id}: @{account} "
+              f"(engagement: {tweet['engagement']})")
 
     if new_suggestions:
         all_suggestions.extend(new_suggestions)
