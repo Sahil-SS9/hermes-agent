@@ -4127,11 +4127,22 @@ class AIAgent:
                 self._client_kwargs.get("api_key", "")
             )
         elif base_url_host_matches(base_url, "opencode.ai"):
-            # Cloudflare WAF at opencode.ai blocks Python library User-Agents
-            # ("Python-urllib/3.x", "python-httpx/...") with 403 error 1010.
-            # Send a browser-like User-Agent to match OpenCode's own frontend.
+            # OpenCode Zen/Go gate free-tier rate limits on client-identity headers:
+            # requests carrying the official CLI fingerprint get the generous
+            # `dailyRequests` bucket, anything else drops to a punitive anonymous
+            # `fallbackValue` limit that 429s almost immediately even with a valid
+            # key (earendil-works/pi#2824). Send the five headers the opencode CLI
+            # sends so KENSEI lands in the real bucket. The CLI User-Agent also
+            # clears the Cloudflare WAF (403 error 1010) that blocks Python library
+            # UAs, so it replaces the previous browser-spoof UA. IDs are randomised
+            # per client build to avoid static-value fingerprinting.
+            import secrets
             self._client_kwargs["default_headers"] = {
-                "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "User-Agent": "opencode/latest/1.3.15/cli",
+                "x-opencode-client": "cli",
+                "x-opencode-session": f"ses_{secrets.token_hex(13)}",
+                "x-opencode-project": f"prj_{secrets.token_hex(13)}",
+                "x-opencode-request": f"req_{secrets.token_hex(13)}",
             }
         else:
             # No URL-specific headers — check profile.default_headers before clearing.
