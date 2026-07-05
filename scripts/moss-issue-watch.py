@@ -8,13 +8,16 @@ Runs as a no_agent cron script. Outputs new activity for delivery.
 
 import json
 import os
+import re
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 STATE_FILE = os.path.expanduser("~/.hermes/data/moss-issue-watch.json")
 FIX_QUEUE_FILE = os.path.expanduser("~/.hermes/data/moss-fix-queue.json")
 MAX_QUEUE_SIZE = 20
+MIN_ISSUE_AGE_HOURS = 4  # Don't queue issues younger than this — avoids racing other contributors
+MERGED_PR_LOOKBACK_DAYS = 7  # Check for recently merged PRs referencing the same issue
 TARGET_REPOS = [
     "NousResearch/hermes-agent",
 ]
@@ -65,9 +68,9 @@ def classify_issue(issue):
     return None
 
 def has_linked_pr(repo, issue_number):
-    """Check if an issue already has a closing PR reference (linked or merged).
+    """Check if an issue already has a closing PR reference (linked, open, or recently merged).
 
-    Returns True if a PR exists that references this issue, False otherwise.
+    Returns (True, reason) if a PR exists, (False, None) otherwise.
     """
     # 1. Check via gh issue view for closing PR references
     result = subprocess.run(
@@ -79,22 +82,140 @@ def has_linked_pr(repo, issue_number):
         data = json.loads(result.stdout)
         refs = data.get("closedByPullRequestsReferences", {})
         if refs.get("totalCount", 0) > 0:
-            return True
+            return (True, "has closing PR reference")
 
-    # 2. Search for open PRs that reference this issue number
+    # 2. Search for open PRs that reference this issue number (title + body match)
     search_result = subprocess.run(
-        ["gh", "search", "prs", f"repo:{repo}", "is:open", f"\"#{issue_number}\"",
-         "--json", "number,title,state", "--limit", "10"],
+        ["gh", "search", "prs", "--repo", repo, "--state", "open", "--match", "title,body",
+         f"\"#{issue_number}\"",
+         "--json", "number,title", "--limit", "10"],
         capture_output=True, text=True, timeout=15
     )
     if search_result.returncode == 0:
         prs = json.loads(search_result.stdout)
-        for pr in prs:
-            title = pr.get("title", "")
-            if f"#{issue_number}" in title:
-                return True
+        if prs:  # Any PR matching the issue number search is a potential duplicate
+            pr_list = ", ".join(f"#{p['number']}" for p in prs)
+            return (True, f"open PR(s) {pr_list} reference this issue")
 
-    return False
+    # 3. Search for recently MERGED PRs that reference this issue — catches
+    #    fixes that landed on main but where the issue hasn't been closed yet.
+    #    This was the root cause of #54500 (duplicate of already-merged #55579)
+    #    and #56228 (subsumed by merged #57006).
+    since = (datetime.now(timezone.utc) - timedelta(days=MERGED_PR_LOOKBACK_DAYS)).strftime("%Y-%m-%d")
+    merged_result = subprocess.run(
+        ["gh", "search", "prs", "--repo", repo, "--merged", "--match", "title,body", "--updated", f">={since}",
+         f"\"#{issue_number}\"",
+         "--json", "number,title,closedAt", "--limit", "10"],
+        capture_output=True, text=True, timeout=15
+    )
+    if merged_result.returncode == 0:
+        merged_prs = json.loads(merged_result.stdout)
+        if merged_prs:  # Any merged PR matching the issue number is a duplicate
+            pr_list = ", ".join(f"#{p['number']}" for p in merged_prs)
+            return (True, f"merged PR(s) {pr_list} already fixed this issue")
+
+    return (False, None)
+
+
+def has_semantic_duplicate(repo, issue):
+    """Search for open or recently merged PRs that touch the same file/symbol,
+    even if they reference a different issue number.
+
+    This catches the Category A duplicates: same bug, different issue number.
+    Root cause of #58148 (dup of #50397) and #57959 (dup of #54887).
+
+    Returns (True, reason) if a likely duplicate PR exists, (False, None) otherwise.
+    """
+    body = issue.get("body", "") or ""
+    title = issue.get("title", "") or ""
+
+    # Extract potential source file references from the issue body
+    # Look for patterns like agent/foo.py, hermes_cli/bar.py, etc.
+    file_refs = set(re.findall(r'(?<!\w)((?:agent|hermes_cli|gateway|tests|plugins|cli|run_agent|dashboard)/[\w/]+\.py)', body))
+
+    # Extract key symbols mentioned (function/class names near "function", "method", "in")
+    # Look for backtick-quoted identifiers that look like Python symbols
+    symbol_refs = set(re.findall(r'`([a-z_][a-z0-9_]*(?:\.[a-z_][a-z0-9_]*)+)`', body, re.IGNORECASE))
+    # Filter to likely code symbols (at least 6 chars, contains underscore or dot)
+    symbol_refs = {s for s in symbol_refs if len(s) >= 6 and ('_' in s or '.' in s)}
+
+    # Build search queries — search by filename, symbol, or title keyword
+    search_terms = set()
+    for f in file_refs:
+        # Use the basename without extension as a search term
+        basename = os.path.basename(f).replace('.py', '')
+        if len(basename) >= 4:
+            search_terms.add(basename)
+    for s in symbol_refs:
+        # Use the last component of a dotted symbol
+        parts = s.split('.')
+        last = parts[-1]
+        if len(last) >= 4:
+            search_terms.add(last)
+
+    # Also extract meaningful keywords from the issue title itself.
+    # This catches cases where the duplicate PR title shares keywords with
+    # the issue title but doesn't mention the same source file.
+    # Root cause of #58148: issue title had "reasoning" + "empty" + "content",
+    # PR #50397 title had the same words, but no shared file reference.
+    title_words = set(re.findall(r'\b[a-z]{4,}\b', title.lower()))
+    generic_words = {"fix", "error", "crash", "when", "that", "this", "from", "with", "handle",
+                      "been", "have", "does", "will", "also", "into", "some", "issue", "bug"}
+    meaningful_title_words = {w for w in title_words if w not in generic_words and len(w) >= 5}
+    search_terms.update(meaningful_title_words)
+
+    if not search_terms:
+        return (False, None)
+
+    # Search for open PRs whose titles contain these terms
+    for term in list(search_terms)[:6]:  # Limit to 6 searches to avoid rate limits
+        result = subprocess.run(
+            ["gh", "search", "prs", "--repo", repo, "--state", "open", "--match", "title,body",
+             f"\"{term}\"",
+             "--json", "number,title", "--limit", "5"],
+            capture_output=True, text=True, timeout=15
+        )
+        if result.returncode != 0:
+            continue
+        prs = json.loads(result.stdout)
+        for pr in prs:
+            pr_title = pr.get("title", "").lower()
+            # Only flag as duplicate if the PR title shares the search term
+            # AND the issue title is semantically similar (shares a keyword)
+            if term.lower() in pr_title:
+                # Check for shared keywords between issue title and PR title
+                issue_words = set(re.findall(r'\b[a-z]{4,}\b', title.lower()))
+                pr_words = set(re.findall(r'\b[a-z]{4,}\b', pr_title))
+                overlap = issue_words & pr_words
+                # Exclude generic words that match everything
+                generic = {"fix", "error", "crash", "when", "that", "this", "from", "with", "handle"}
+                meaningful_overlap = overlap - generic
+                if len(meaningful_overlap) >= 2:
+                    return (True, f"open PR #{pr['number']} '{pr.get('title','')}' touches same code (term: {term})")
+
+        # Also check recently merged PRs
+        since = (datetime.now(timezone.utc) - timedelta(days=MERGED_PR_LOOKBACK_DAYS)).strftime("%Y-%m-%d")
+        merged_result = subprocess.run(
+            ["gh", "search", "prs", "--repo", repo, "--merged", "--match", "title,body", "--updated", f">={since}",
+             f"\"{term}\"",
+             "--json", "number,title,closedAt", "--limit", "5"],
+            capture_output=True, text=True, timeout=15
+        )
+        if merged_result.returncode != 0:
+            continue
+        merged_prs = json.loads(merged_result.stdout)
+        for pr in merged_prs:
+            pr_title = pr.get("title", "").lower()
+            if term.lower() in pr_title:
+                issue_words = set(re.findall(r'\b[a-z]{4,}\b', title.lower()))
+                pr_words = set(re.findall(r'\b[a-z]{4,}\b', pr_title))
+                overlap = issue_words & pr_words
+                generic = {"fix", "error", "crash", "when", "that", "this", "from", "with", "handle"}
+                meaningful_overlap = overlap - generic
+                if len(meaningful_overlap) >= 2:
+                    return (True, f"merged PR #{pr['number']} '{pr.get('title','')}' already fixed same area (term: {term})")
+
+    return (False, None)
 
 def get_recent_prs(repo):
     """Fetch recent PRs by tracked authors only. Uses --author filter at the API level."""
@@ -251,14 +372,43 @@ def main():
             if classification is None:
                 seen[key] = {"number": num, "title": issue["title"], "classification": "skipped", "seen_at": now}
                 continue
+
+            # MINIMUM AGE GATE — don't queue issues younger than MIN_ISSUE_AGE_HOURS.
+            # This gives the community time to self-organize and prevents racing
+            # other contributors who may already be working on a fix.
+            # Root cause of #58202 (raced #58201 by 45 seconds).
+            created_at = issue.get("createdAt", "")
+            if created_at:
+                try:
+                    created_dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+                    age_hours = (datetime.now(timezone.utc) - created_dt).total_seconds() / 3600
+                    if age_hours < MIN_ISSUE_AGE_HOURS:
+                        seen[key] = {"number": num, "title": issue["title"], "classification": "too_new",
+                                     "age_hours": round(age_hours, 1), "seen_at": now}
+                        continue
+                except (ValueError, TypeError):
+                    pass  # If we can't parse the date, don't block on age
+
             # Skip issues that already have a linked or open PR — prevents
             # the fix-pipeline from queuing issues that someone already
-            # addressed (the pipeline prompt says "skip any issue with an
-            # existing open PR by anyone" but the gate was text-only, not
-            # enforced programmatically. This is the programmatic gate.)
-            if has_linked_pr(repo, num):
-                seen[key] = {"number": num, "title": issue["title"], "classification": "has_pr", "seen_at": now}
+            # addressed. Now also checks recently MERGED PRs to catch fixes
+            # that landed on main but where the issue hasn't been closed yet.
+            has_pr, pr_reason = has_linked_pr(repo, num)
+            if has_pr:
+                seen[key] = {"number": num, "title": issue["title"], "classification": "has_pr",
+                             "skip_reason": pr_reason, "seen_at": now}
                 continue
+
+            # SEMANTIC DUPLICATE CHECK — search for open or recently merged PRs
+            # that touch the same file/symbol even if they reference a different
+            # issue number. Catches same-bug-different-issue duplicates.
+            # Root cause of #58148 (dup of #50397) and #57959 (dup of #54887).
+            has_dup, dup_reason = has_semantic_duplicate(repo, issue)
+            if has_dup:
+                seen[key] = {"number": num, "title": issue["title"], "classification": "has_dup",
+                             "skip_reason": dup_reason, "seen_at": now}
+                continue
+
             labels = [l["name"] for l in issue.get("labels", [])]
             priority = "P1" if "P1" in labels else ("P2" if "P2" in labels else "P3")
             seen[key] = {"number": num, "title": issue["title"], "classification": classification, "priority": priority, "url": issue["url"], "seen_at": now}
