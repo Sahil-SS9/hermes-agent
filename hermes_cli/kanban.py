@@ -425,6 +425,13 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
         metavar="KEY",
         help="Restrict to tasks with this current_step_key",
     )
+    p_list.add_argument(
+        "--epic",
+        default=None,
+        dest="epic_id",
+        metavar="EPIC_ID",
+        help="Filter by epic id (e.g. epic_plenishd, epic_coachos)",
+    )
 
     # --- show ---
     p_show = sub.add_parser("show", help="Show a task with comments + events")
@@ -685,6 +692,22 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
         required=True,
         help="Target board slug (e.g. apps, research, ops, content-lead)",
     )
+
+    # --- epics ---
+    p_epics = sub.add_parser("epics", help="Manage epics (list, show, create)")
+    epics_sub = p_epics.add_subparsers(dest="epics_action")
+
+    p_epics_list = epics_sub.add_parser("list", help="List all epics with task counts")
+    p_epics_list.add_argument("--board", default=None, help="Filter by board slug")
+
+    p_epics_show = epics_sub.add_parser("show", help="Show all tasks under an epic")
+    p_epics_show.add_argument("epic_id", help="Epic id to show")
+
+    p_epics_create = epics_sub.add_parser("create", help="Create a new epic")
+    p_epics_create.add_argument("--title", required=True, help="Epic title")
+    p_epics_create.add_argument("--description", default="", help="Epic description")
+    p_epics_create.add_argument("--board", default=None, help="Board slug for this epic")
+    p_epics_create.add_argument("--parent", default=None, help="Parent epic id (for sub-epics)")
 
     # --- tail ---
     p_tail = sub.add_parser("tail", help="Follow a task's event stream")
@@ -1020,6 +1043,7 @@ def kanban_command(args: argparse.Namespace) -> int:
             "promote-backlog":  _cmd_promote_backlog,
             "archive":  _cmd_archive,
             "move":     _cmd_move,
+            "epics":    _cmd_epics,
             "tail":     _cmd_tail,
             "dispatch": _cmd_dispatch,
             "daemon":   _cmd_daemon,
@@ -1561,6 +1585,7 @@ def _cmd_list(args: argparse.Namespace) -> int:
             workflow_template_id=args.workflow_template_id,
             current_step_key=args.current_step_key,
             theme=getattr(args, "theme", None),
+            epic_id=getattr(args, "epic_id", None),
         )
     if getattr(args, "json", False):
         print(json.dumps([_task_to_dict(t) for t in tasks], indent=2, ensure_ascii=False))
@@ -2510,6 +2535,164 @@ def _cmd_move(args: argparse.Namespace) -> int:
 
     print(f"Moved {task_id} from '{source_board}' to '{to_board}'")
     return 0
+
+
+def _cmd_epics(args: argparse.Namespace) -> int:
+    """Manage epics: list, show, create."""
+    import sqlite3 as _sqlite3
+    import time as _time
+    import glob as _glob
+    import os as _os
+
+    action = getattr(args, "epics_action", None)
+    if action is None:
+        print("usage: hermes kanban epics <list|show|create>", file=sys.stderr)
+        return 1
+
+    # Collect all board DB paths
+    all_dbs: list[tuple[str, str]] = [("default", str(kb.kanban_db_path(board="default")))]
+    boards_dir = _os.path.expanduser("~/.hermes/kanban/boards")
+    if _os.path.isdir(boards_dir):
+        for child in sorted(_os.listdir(boards_dir)):
+            child_path = _os.path.join(boards_dir, child, "kanban.db")
+            if _os.path.exists(child_path):
+                all_dbs.append((child, child_path))
+
+    if action == "list":
+        # List all epics with task counts by status
+        epic_data: dict[str, dict] = {}  # epic_id → {title, board, status, counts}
+
+        for board, db_path in all_dbs:
+            if not _os.path.exists(db_path):
+                continue
+            try:
+                conn = _sqlite3.connect(db_path)
+                conn.row_factory = _sqlite3.Row
+                cur = conn.cursor()
+
+                # Get epics
+                cur.execute("SELECT id, title, board_slug, status, parent_epic_id FROM epics")
+                for row in cur.fetchall():
+                    eid = row["id"]
+                    if eid not in epic_data:
+                        epic_data[eid] = {
+                            "title": row["title"],
+                            "board": row["board_slug"] or "",
+                            "status": row["status"],
+                            "parent": row["parent_epic_id"] or "",
+                            "counts": defaultdict(int),
+                        }
+
+                # Get task counts per epic
+                cur.execute(
+                    "SELECT epic_id, status, COUNT(*) as cnt FROM tasks "
+                    "WHERE epic_id IS NOT NULL GROUP BY epic_id, status"
+                )
+                for row in cur.fetchall():
+                    eid = row["epic_id"]
+                    if eid in epic_data:
+                        epic_data[eid]["counts"][row["status"]] += row["cnt"]
+
+                conn.close()
+            except Exception:
+                pass
+
+        if not epic_data:
+            print("No epics found.")
+            return 0
+
+        # Filter by board if requested
+        if getattr(args, "board", None):
+            epic_data = {k: v for k, v in epic_data.items() if v["board"] == args.board}
+
+        print(f"{'ID':<25} {'Title':<25} {'Board':<12} {'Status':<8} {'Tasks':>5} {'Done':>5} {'Active':>6} {'Backlog':>7}")
+        print("-" * 95)
+        for eid in sorted(epic_data.keys()):
+            e = epic_data[eid]
+            total = sum(e["counts"].values())
+            done = e["counts"].get("done", 0)
+            active = sum(e["counts"].get(s, 0) for s in ("running", "ready", "todo", "review", "in_progress"))
+            backlog = e["counts"].get("backlog", 0)
+            print(f"{eid:<25} {e['title'][:24]:<25} {e['board'][:11]:<12} {e['status']:<8} {total:>5} {done:>5} {active:>6} {backlog:>7}")
+
+        return 0
+
+    elif action == "show":
+        epic_id = args.epic_id
+        found = False
+        for board, db_path in all_dbs:
+            if not _os.path.exists(db_path):
+                continue
+            try:
+                conn = _sqlite3.connect(db_path)
+                conn.row_factory = _sqlite3.Row
+                cur = conn.cursor()
+
+                # Get epic info
+                cur.execute("SELECT * FROM epics WHERE id = ?", (epic_id,))
+                epic = cur.fetchone()
+                if epic:
+                    print(f"Epic: {epic['title']}")
+                    print(f"  ID: {epic['id']}")
+                    print(f"  Board: {epic['board_slug'] or 'N/A'}")
+                    print(f"  Status: {epic['status']}")
+                    if epic['description']:
+                        print(f"  Description: {epic['description'][:200]}")
+                    print()
+
+                # Get tasks
+                cur.execute(
+                    "SELECT id, title, status, assignee, priority FROM tasks "
+                    "WHERE epic_id = ? ORDER BY status, priority DESC",
+                    (epic_id,),
+                )
+                tasks = cur.fetchall()
+                if tasks:
+                    found = True
+                    print(f"Tasks on {board} ({len(tasks)}):")
+                    for t in tasks:
+                        print(f"  [{t['status']:10s}] [P{t['priority']}] {t['id']} — {t['title'][:60]} ({t['assignee'] or '-'})")
+                    print()
+                conn.close()
+            except Exception:
+                pass
+
+        if not found:
+            print(f"No tasks found for epic '{epic_id}'")
+            return 1
+        return 0
+
+    elif action == "create":
+        import uuid
+        title = args.title
+        description = args.description
+        board_slug = args.board or ""
+        parent = args.parent
+        now = int(_time.time())
+        epic_id = f"epic_{uuid.uuid4().hex[:8]}"
+
+        # Create on the active board (or all boards for consistency)
+        created_on = []
+        for board, db_path in all_dbs:
+            if not _os.path.exists(db_path):
+                continue
+            try:
+                conn = _sqlite3.connect(db_path)
+                conn.execute(
+                    "INSERT OR IGNORE INTO epics (id, title, description, board_slug, status, parent_epic_id, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, 'active', ?, ?, ?)",
+                    (epic_id, title, description, board_slug, parent, now, now),
+                )
+                conn.commit()
+                created_on.append(board)
+                conn.close()
+            except Exception:
+                pass
+
+        print(f"Created epic {epic_id} '{title}' on boards: {', '.join(created_on)}")
+        return 0
+
+    return 1
 
 
 def _cmd_tail(args: argparse.Namespace) -> int:

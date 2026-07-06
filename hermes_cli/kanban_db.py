@@ -2955,6 +2955,7 @@ def list_tasks(
     workflow_template_id: Optional[str] = None,
     current_step_key: Optional[str] = None,
     theme: Optional[str] = None,
+    epic_id: Optional[str] = None,
 ) -> list[Task]:
     query = "SELECT * FROM tasks WHERE 1=1"
     params: list[Any] = []
@@ -2981,6 +2982,9 @@ def list_tasks(
     if theme is not None:
         query += " AND theme = ?"
         params.append(theme)
+    if epic_id is not None:
+        query += " AND epic_id = ?"
+        params.append(epic_id)
     if not include_archived and status != "archived":
         query += " AND status != 'archived'"
     if order_by is not None:
