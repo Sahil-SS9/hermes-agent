@@ -9,11 +9,13 @@ import type { RpcResult } from '../lib/rpc.js'
 import type { Theme } from '../theme.js'
 import type {
   ApprovalReq,
+  AskUserQuestionsReq,
   ClarifyReq,
   ConfirmReq,
   DetailsMode,
   Msg,
   PanelSection,
+  PromptOptimizationReq,
   SecretReq,
   SectionVisibility,
   SessionInfo,
@@ -143,6 +145,7 @@ export interface OverlayState {
   pager: null | PagerState
   petPicker: boolean
   pluginsHub: boolean
+  promptOptimization: PromptOptimizationReq | null
   secret: null | SecretReq
   sessions: boolean
   skillsHub: boolean

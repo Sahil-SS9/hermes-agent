@@ -74,6 +74,8 @@ Examples:
     hermes validate-config         Validate configuration (exit non-zero on warnings)
     hermes doctor                  Check configuration and dependencies with optional fixes
     hermes security [audit]        Supply-chain vulnerability scan
+    hermes console                Open the safe Hermes command console
+    hermes update                 Update to latest version
     hermes dashboard              Start web UI dashboard (port 9119)
     hermes dashboard --stop       Stop running dashboard processes
     hermes dashboard --status     List running dashboard processes

@@ -408,7 +408,7 @@ async def test_shutdown_notification_sent_to_active_sessions():
         platform=Platform.TELEGRAM, chat_id="home-42", name="Home",
     )
     source = make_restart_source(chat_id="999", chat_type="dm")
-    session_key = f"agent:main:telegram:dm:999"
+    session_key = "agent:main:telegram:dm:999"
     runner._running_agents[session_key] = MagicMock()
 
     await runner._notify_active_sessions_of_shutdown()
