@@ -3747,7 +3747,12 @@ def test_dispatch_review_skips_unassigned(kanban_home):
 def test_dispatch_review_counts_toward_max_spawn(
     kanban_home, all_assignees_spawnable,
 ):
-    """Review spawns count against max_spawn alongside ready tasks."""
+    """Review spawns use a separate concurrency lane, not the same max_spawn.
+
+    With max_spawn=2, ready tasks get up to 2 spawns and review tasks get
+    their own lane (max(1, max_spawn // 2) = 1). Total: 3. This is by design
+    (Phase 2 P2-1) so review and work cannot starve each other.
+    """
     spawns = []
 
     def fake_spawn(task, workspace, board=None):
@@ -3761,9 +3766,9 @@ def test_dispatch_review_counts_toward_max_spawn(
         t3 = kb.create_task(conn, title="review", assignee="alice")
         _set_task_status(conn, t3, "review")
         res = kb.dispatch_once(conn, spawn_fn=fake_spawn, max_spawn=2)
-    # Only 2 should spawn (ready tasks get priority in the loop)
-    assert len(res.spawned) == 2
-    assert len(spawns) == 2
+    # 2 ready + 1 review (separate lane) = 3 total
+    assert len(res.spawned) == 3
+    assert len(spawns) == 3
 
 
 def test_dispatch_review_spawns_when_ready_empty(
@@ -4513,13 +4518,20 @@ def test_write_txn_post_commit_check_fires_every_call(tmp_path):
     conn.close()
 
 
-def test_connect_sets_wal_autocheckpoint_100(tmp_path):
-    """connect() sets wal_autocheckpoint to 100."""
+def test_connect_sets_wal_autocheckpoint_passive(tmp_path):
+    """connect() sets wal_autocheckpoint to 0 (passive mode).
+
+    Auto-checkpoint is intentionally disabled to prevent the WAL checkpoint
+    race that was corrupting index B-tree pages when concurrent writer
+    processes triggered auto-checkpoint. The gateway dispatcher instead
+    runs a manual PRAGMA wal_checkpoint(TRUNCATE) after each tick from a
+    single thread, and a safety-net cron checkpoints every 5 min.
+    """
     from hermes_cli.kanban_db import connect
     db = tmp_path / "test.db"
     conn = connect(db_path=db)
     val = conn.execute("PRAGMA wal_autocheckpoint").fetchone()[0]
-    assert val == 100
+    assert val == 0
     conn.close()
 
 

@@ -2022,6 +2022,88 @@ def list_boards(include_archived: bool = Query(False)):
     return {"boards": boards, "current": current}
 
 
+@router.get("/epics")
+def list_epics(board: Optional[str] = Query(None)):
+    """Return all epics with task counts by status.
+
+    Kanban v2: epic-level grouping for JIRA-style visibility.
+    Scans all board DBs (or the specified board only).
+    """
+    import glob as _glob
+    all_dbs = []
+    if board is None:
+        default_path = kanban_db.kanban_db_path(board="default")
+        all_dbs.append(("default", str(default_path)))
+        boards_dir = Path.home() / ".hermes" / "kanban" / "boards"
+        if boards_dir.is_dir():
+            for child in sorted(boards_dir.iterdir()):
+                child_db = child / "kanban.db"
+                if child_db.exists():
+                    all_dbs.append((child.name, str(child_db)))
+    else:
+        all_dbs.append((board, str(kanban_db.kanban_db_path(board=board))))
+
+    from collections import defaultdict
+    epic_data = {}
+
+    for bslug, db_path in all_dbs:
+        if not Path(db_path).exists():
+            continue
+        try:
+            conn = sqlite3.connect(db_path)
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+
+            cur.execute("SELECT id, title, board_slug, status, parent_epic_id, description FROM epics")
+            for row in cur.fetchall():
+                eid = row["id"]
+                if eid not in epic_data:
+                    epic_data[eid] = {
+                        "id": eid,
+                        "title": row["title"],
+                        "board_slug": row["board_slug"] or "",
+                        "status": row["status"],
+                        "parent_epic_id": row["parent_epic_id"] or "",
+                        "description": row["description"] or "",
+                        "counts": defaultdict(int),
+                    }
+
+            cur.execute(
+                "SELECT epic_id, status, COUNT(*) as cnt FROM tasks "
+                "WHERE epic_id IS NOT NULL GROUP BY epic_id, status"
+            )
+            for row in cur.fetchall():
+                eid = row["epic_id"]
+                if eid in epic_data:
+                    epic_data[eid]["counts"][row["status"]] += row["cnt"]
+
+            conn.close()
+        except Exception:
+            pass
+
+    epics = []
+    for eid in sorted(epic_data.keys()):
+        e = epic_data[eid]
+        counts = dict(e["counts"])
+        total = sum(counts.values())
+        epics.append({
+            "id": e["id"],
+            "title": e["title"],
+            "board_slug": e["board_slug"],
+            "status": e["status"],
+            "parent_epic_id": e["parent_epic_id"],
+            "description": e["description"],
+            "total": total,
+            "done": counts.get("done", 0),
+            "active": sum(counts.get(s, 0) for s in ("running", "ready", "todo", "review", "in_progress")),
+            "backlog": counts.get("backlog", 0),
+            "blocked": counts.get("blocked", 0),
+            "archived": counts.get("archived", 0),
+        })
+
+    return {"epics": epics}
+
+
 @router.post("/boards")
 def create_board_endpoint(payload: CreateBoardBody):
     """Create a new board. Idempotent — ``slug`` collision returns existing."""
