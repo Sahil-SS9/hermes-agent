@@ -16331,15 +16331,21 @@ def main(
                                     _exit_code = _RL_CODE
                                 except Exception:
                                     _exit_code = 1
-                        # Use os._exit instead of sys.exit: kanban workers share
-                        # resources (state.db, kanban.db lock files, log FDs)
-                        # across concurrent subprocesses. sys.exit triggers
-                        # atexit._run_exitfuncs → _run_cleanup → MCP/terminal/
-                        # browser/memory shutdown, which contends on those
-                        # shared resources and deadlocks workers. Use the same
-                        # os._exit path already established for KeyboardInterrupt
-                        # (#28181) — the dispatcher's zombie reaper cleans up.
-                        os._exit(_exit_code)
+                        # Use os._exit instead of sys.exit ONLY for kanban
+                        # workers: they share resources (state.db, kanban.db
+                        # lock files, log FDs) across concurrent subprocesses,
+                        # and sys.exit triggers atexit._run_exitfuncs →
+                        # _run_cleanup → MCP/terminal/browser/memory shutdown,
+                        # which contends on those shared resources and
+                        # deadlocks workers. Same os._exit path already
+                        # established for KeyboardInterrupt (#28181) — the
+                        # dispatcher's zombie reaper cleans up after them.
+                        # Plain (non-kanban) quiet-mode callers have no such
+                        # contention risk and should get normal atexit
+                        # cleanup, not a skipped shutdown.
+                        if os.environ.get("HERMES_KANBAN_TASK"):
+                            os._exit(_exit_code)
+                        sys.exit(_exit_code)
 
                 # Exit with error code if credentials or agent init fails
                 os._exit(1)

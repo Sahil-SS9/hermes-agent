@@ -4535,6 +4535,25 @@ def test_connect_sets_wal_autocheckpoint_passive(tmp_path):
     conn.close()
 
 
+def test_connect_fast_path_also_sets_wal_autocheckpoint_passive(tmp_path):
+    """The cached-path branch of connect() (path already in
+    _INITIALIZED_PATHS) must set the same passive wal_autocheckpoint=0 as
+    the first-connect path. Regression guard: these two branches drifted
+    out of sync once already (#50353 reintroduced =100 on the fast path
+    while the slow path stayed at =0), silently re-enabling the WAL
+    checkpoint race that corrupts index B-tree pages for every connection
+    after the first one in a process.
+    """
+    from hermes_cli.kanban_db import connect
+    db = tmp_path / "test.db"
+    first = connect(db_path=db)
+    first.close()
+    second = connect(db_path=db)  # now hits the _INITIALIZED_PATHS fast path
+    val = second.execute("PRAGMA wal_autocheckpoint").fetchone()[0]
+    assert val == 0
+    second.close()
+
+
 def test_write_txn_check_reads_correct_header_fields(tmp_path):
     """Synthetic DB file with mismatched header page_count triggers the check."""
     import struct

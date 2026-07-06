@@ -74,6 +74,7 @@ def make_restart_runner(
     runner._restart_command_source = None
     runner._restart_drain_timeout = DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT
     runner._stop_task = None
+    runner._cron_stop_event = None
     runner._busy_input_mode = "interrupt"
     runner._update_prompt_pending = {}
     runner._voice_mode = {}

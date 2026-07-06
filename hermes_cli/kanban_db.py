@@ -1821,7 +1821,12 @@ def connect(
                 from hermes_state import apply_wal_with_fallback
                 apply_wal_with_fallback(conn, db_label=f"kanban.db ({path.name})")
                 conn.execute("PRAGMA synchronous=FULL")
-                conn.execute("PRAGMA wal_autocheckpoint=100")
+                # Must match the passive-checkpoint value the slow path below
+                # sets on first connect (0, not 100) — this pragma is
+                # per-connection, so a fresh Connection object here silently
+                # re-enables the auto-checkpoint race that corrupts index
+                # B-tree pages if it drifts from the slow path's value.
+                conn.execute("PRAGMA wal_autocheckpoint=0")
                 conn.execute("PRAGMA foreign_keys=ON")
                 conn.execute("PRAGMA secure_delete=ON")
                 conn.execute("PRAGMA cell_size_check=ON")

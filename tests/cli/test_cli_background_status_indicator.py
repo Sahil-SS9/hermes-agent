@@ -21,6 +21,7 @@ def _make_cli():
     """Bare-metal HermesCLI for snapshot/build tests (no __init__ side effects)."""
     cli_obj = HermesCLI.__new__(HermesCLI)
     cli_obj.model = "anthropic/claude-opus-4.6"
+    cli_obj.provider = None
     cli_obj.agent = None
     cli_obj._background_tasks = {}
     # The snapshot reads session_start to compute duration; supply a stub.
@@ -45,6 +46,7 @@ def test_snapshot_safe_when_background_tasks_attr_missing():
     """Older HermesCLI instances (tests with __new__, etc.) may lack the attr."""
     cli_obj = HermesCLI.__new__(HermesCLI)
     cli_obj.model = "x"
+    cli_obj.provider = None
     cli_obj.agent = None
     cli_obj.session_start = datetime.now()
     # No _background_tasks at all — must not raise.
