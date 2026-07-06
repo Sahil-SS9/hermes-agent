@@ -80,6 +80,11 @@ TARGET_ACCOUNTS = [
     "Sahil_Saghir",
 ]
 
+# Allow env var override for batched scanning (ENGAGEMENT_BATCH_ACCOUNTS=acct1,acct2,...)
+_batch_override = os.getenv("ENGAGEMENT_BATCH_ACCOUNTS", "")
+if _batch_override:
+    TARGET_ACCOUNTS = [a.strip() for a in _batch_override.split(",") if a.strip()]
+
 # Minimum engagement threshold (likes + replies + retweets) to consider a post
 ENGAGEMENT_THRESHOLD = 10
 
