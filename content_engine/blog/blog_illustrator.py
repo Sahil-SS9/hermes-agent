@@ -54,14 +54,37 @@ def _record_style(style_id: str) -> None:
 CODEX_IMAGES_DIR = Path.home() / ".codex" / "generated_images"
 
 
+# Substrings that mean the ChatGPT/Codex image quota is exhausted (both the raw
+# HTTP 429 form and the friendly weekly-cap CLI message). A capped run is NOT a
+# per-image failure — the whole batch should defer, not count attempts.
+_CODEX_CAP_SIGNALS = (
+    "usage_limit_reached",
+    "hit your usage limit",
+    "usage limit has been reached",
+    "resets_in_seconds",
+)
+
+
+class CodexCapExceeded(Exception):
+    """Raised (when raise_on_cap=True) when Codex reports its usage cap."""
+
+
+def _output_shows_cap(text: str) -> bool:
+    low = (text or "").lower()
+    return any(sig in low for sig in _CODEX_CAP_SIGNALS)
+
+
 def _generate_codex_image(full_prompt: str, out_path: str,
                           timeout: int = 300,
-                          retry_timeout: int = 360) -> Optional[str]:
+                          retry_timeout: int = 360,
+                          raise_on_cap: bool = False) -> Optional[str]:
     """Generate an image via Codex CLI and copy it to out_path.
 
     Codex generates internally then we copy the newest image out of
     ~/.codex/generated_images/. Retries once with a longer timeout.
-    Returns out_path on success, None on failure.
+    Returns out_path on success, None on failure. When raise_on_cap is set and
+    Codex reports its usage cap, raises CodexCapExceeded so batch callers can
+    defer instead of burning retries (a capped 429 does not consume quota).
     """
     for attempt, current_timeout in enumerate([timeout, retry_timeout], 1):
         before_ts = time.time()
@@ -79,6 +102,12 @@ def _generate_codex_image(full_prompt: str, out_path: str,
         except Exception as exc:
             print(f"[blog_illustrator] codex execution error: {exc}")
             continue
+
+        if _output_shows_cap(result.stdout) or _output_shows_cap(result.stderr):
+            print("[blog_illustrator] Codex usage cap reached")
+            if raise_on_cap:
+                raise CodexCapExceeded("Codex image usage cap reached")
+            return None
 
         img = _find_latest_codex_image(after_ts=before_ts)
         if not img or not Path(img).exists():
@@ -194,6 +223,7 @@ def illustrate(
     out_dir: Optional[Path] = None,
     max_sections: Optional[int] = None,
     workdir: Optional[str] = None,
+    raise_on_cap: bool = False,
 ) -> dict:
     """Generate an art-directed hero + section image set via Codex CLI.
 
@@ -227,7 +257,7 @@ def illustrate(
     # ── Hero ────────────────────────────────────────────────
     hero_out = str(out_path / "hero.png")
     hero_prompt = compose_prompt(brief["hero_prompt"], brief)
-    gen = _generate_codex_image(hero_prompt, hero_out)
+    gen = _generate_codex_image(hero_prompt, hero_out, raise_on_cap=raise_on_cap)
     if gen and Path(gen).exists():
         result["hero_path"] = gen
         _generate_webp(gen)
@@ -243,7 +273,7 @@ def illustrate(
             concept = section_prompts.get(heading) or _extract_section_text(body_lines, heading) or heading
             section_out = str(out_path / f"section_{idx:02d}.png")
             prompt = compose_prompt(concept, brief)
-            gen_sec = _generate_codex_image(prompt, section_out)
+            gen_sec = _generate_codex_image(prompt, section_out, raise_on_cap=raise_on_cap)
             if gen_sec and Path(gen_sec).exists():
                 result["section_paths"][heading] = gen_sec
                 _generate_webp(gen_sec)

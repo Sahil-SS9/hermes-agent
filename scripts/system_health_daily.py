@@ -264,7 +264,11 @@ def check_stale_crons() -> dict | None:
             continue
         last = j.get("last_run_at")
         if not last:
-            # Never run — but skip future-scheduled one-shot crons
+            # Never run — but skip jobs whose first fire time has not arrived yet.
+            # Two flavours of "schedule hasn't fired yet":
+            #   (a) one-shot with future run_at, or
+            #   (b) recurring cron with next_run_at still in the future
+            #       (e.g. a weekly job created mid-week after the weekly fire time).
             schedule = j.get("schedule", {})
             if isinstance(schedule, dict) and schedule.get("kind") == "once":
                 run_at = schedule.get("run_at", "")
@@ -273,6 +277,19 @@ def check_stale_crons() -> dict | None:
                         run_dt = dt.datetime.fromisoformat(run_at)
                         if run_dt > n:
                             continue  # Future one-shot — not stale yet
+                    except (ValueError, TypeError):
+                        pass
+            elif isinstance(schedule, dict):
+                # Recurring cron: check stored next_run_at. If it is in the
+                # future, the schedule has not yet had a chance to fire — the
+                # job is not stale, only the watchdog's clock-vs-created_at
+                # metric is misleading.
+                next_run = j.get("next_run_at", "")
+                if next_run:
+                    try:
+                        next_dt = dt.datetime.fromisoformat(next_run)
+                        if next_dt > n:
+                            continue  # First scheduled fire still in the future
                     except (ValueError, TypeError):
                         pass
             # Never run but enabled > 24h

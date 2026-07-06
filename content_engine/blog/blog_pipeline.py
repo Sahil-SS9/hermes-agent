@@ -37,7 +37,47 @@ from blog.exclusions import ExcludedContentError, assert_allowed
 
 # Path for tracking posts with failed images.
 FAILED_IMAGES_PATH = Path(__file__).parent.parent / "blog_topics" / "failed_images.jsonl"
+# Full draft (title/description/body/tier/tags) is saved here when images fail so
+# the retry cron can regenerate the FULL art-directed image set (hero + sections)
+# rather than a thin slug-only image. Nothing imageless is ever published.
+PENDING_DRAFTS_DIR = Path(__file__).parent.parent / "blog_topics" / "pending_images"
 STALE_THRESHOLD_DAYS = 7
+
+# Keys assemble()/illustrate() need to rebuild a post from a held draft.
+_DRAFT_PERSIST_KEYS = (
+    "title", "description", "body_md", "slug", "tier", "tags",
+    "format", "source", "stream",
+)
+
+
+def _save_pending_draft(draft: dict, stream: str) -> None:
+    """Persist the full draft so a later retry can regenerate quality images."""
+    slug = draft.get("slug", "")
+    if not slug:
+        return
+    PENDING_DRAFTS_DIR.mkdir(parents=True, exist_ok=True)
+    payload = {k: draft.get(k) for k in _DRAFT_PERSIST_KEYS if draft.get(k) is not None}
+    payload["stream"] = stream
+    (PENDING_DRAFTS_DIR / f"{slug}.json").write_text(json.dumps(payload, indent=2) + "\n")
+
+
+def _load_pending_draft(slug: str) -> Optional[dict]:
+    """Load a persisted draft for retry; None if it was never saved (legacy)."""
+    path = PENDING_DRAFTS_DIR / f"{slug}.json"
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def _delete_pending_draft(slug: str) -> None:
+    path = PENDING_DRAFTS_DIR / f"{slug}.json"
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
 
 
 def _track_failed_image(slug: str, stream: str, error: str) -> None:
@@ -198,6 +238,9 @@ def run_stream(stream: str, repo: Optional[str] = None,
         slug = draft.get("slug", "")
         error = "All image generation attempts failed (hero + sections)"
         _track_failed_image(slug, stream, error)
+        # Persist the full draft so the retry cron can regenerate the complete
+        # art-directed set (hero + sections), not a thin slug-only image.
+        _save_pending_draft(draft, stream)
         release(reservation_token)
         return {
             "status": "failed_images", "stream": stream,
@@ -237,15 +280,17 @@ def run_stream(stream: str, repo: Optional[str] = None,
 
 
 def retry_failed_images(slug: str, stream: str,
-                        repo: Optional[str] = None) -> dict:
-    """Re-attempt image generation for a post in the failed_images tracking.
+                        repo: Optional[str] = None,
+                        raise_on_cap: bool = False) -> dict:
+    """Re-attempt image generation for one held post, then assemble + stage it.
 
-    Re-runs illustrate with the draft's title/description. On success,
-    re-assembles, re-stages, and removes from the tracking file. On failure,
-    increments the attempt count.
+    Uses the persisted full draft (body + headings) so the regenerated set is
+    the full art-directed hero + sections, not a thin slug-only image. On
+    success: re-assembles, re-stages, clears both trackers. On failure:
+    increments the attempt count. With raise_on_cap=True, a Codex usage cap
+    propagates (CodexCapExceeded) so a batch caller can defer.
 
-    Returns:
-        {"status": "ok"|"failed_images", ...}
+    Returns {"status": "ok"|"failed_images"|"no_draft"|"not_found", ...}
     """
     repo_path = repo or str(SAHILBLOG_REPO)
     entries = _get_failed_entries()
@@ -253,16 +298,14 @@ def retry_failed_images(slug: str, stream: str,
     if not entry:
         return {"status": "not_found", "slug": slug}
 
-    # Reconstruct a minimal draft for illustration.
-    draft = {
-        "title": slug.replace("-", " ").title(),
-        "description": "",
-        "body_md": "",
-        "slug": slug,
-        "stream": stream,
-    }
+    draft = _load_pending_draft(slug)
+    if not draft:
+        # Legacy entry with no persisted draft — cannot rebuild quality images.
+        return {"status": "no_draft", "slug": slug,
+                "note": "no persisted draft; re-run the stream to regenerate"}
+    draft.setdefault("stream", stream)
 
-    images = illustrate(draft)
+    images = illustrate(draft, raise_on_cap=raise_on_cap)
     hero_ok = images.get("hero_path") is not None
     sections_ok = bool(images.get("section_paths"))
 
@@ -270,9 +313,76 @@ def retry_failed_images(slug: str, stream: str,
         _track_failed_image(slug, stream, "Retry: all images still failing")
         return {"status": "failed_images", "slug": slug}
 
-    # Success — remove from tracking.
+    # Success — assemble, stage, and clear from both trackers.
+    mdx_path = assemble(draft, images, repo=repo_path)
+    try:
+        staged_slug = stage_draft(str(mdx_path), repo=repo_path)
+    except ExcludedContentError as exc:
+        return {"status": "skipped_excluded", "slug": slug, "reason": str(exc)}
     _remove_from_failed(slug)
-    return {"status": "ok", "slug": slug, "hero_path": images.get("hero_path")}
+    _delete_pending_draft(slug)
+    return {"status": "ok", "slug": staged_slug,
+            "hero_path": images.get("hero_path")}
+
+
+def retry_all_pending_images(repo: Optional[str] = None) -> dict:
+    """Holistic retry: process EVERY held post, deferring if Codex is capped.
+
+    Codex-cap-aware: the first cap signal (CodexCapExceeded) stops the whole run
+    and returns status "deferred" — no attempt counts are burned, so held posts
+    survive intact until the cap resets. Otherwise each held post is retried,
+    assembled, and staged. Legacy entries without a persisted draft are reported
+    so they can be regenerated by re-running the stream.
+
+    Returns {"status": "ok"|"deferred"|"idle", "recovered": [...], ...}
+    """
+    from blog.blog_illustrator import CodexCapExceeded
+
+    entries = _get_failed_entries()
+    if not entries:
+        return {"status": "idle", "recovered": [], "still_failed": [],
+                "no_draft": []}
+
+    recovered: list[str] = []
+    still_failed: list[str] = []
+    no_draft: list[str] = []
+    pruned: list[str] = []
+
+    for entry in entries:
+        slug = entry.get("slug", "")
+        stream = entry.get("stream", "ai")
+        if not slug:
+            continue
+        try:
+            res = retry_failed_images(slug, stream, repo=repo, raise_on_cap=True)
+        except CodexCapExceeded:
+            return {
+                "status": "deferred", "reason": "codex_capped",
+                "recovered": recovered, "still_failed": still_failed,
+                "no_draft": no_draft, "pruned": pruned,
+                "pending": [e.get("slug") for e in entries
+                            if e.get("slug") not in recovered],
+            }
+        status = res.get("status")
+        if status == "ok":
+            recovered.append(slug)
+        elif status == "no_draft":
+            # Legacy entry with an unrecoverable draft. Give it a grace window
+            # to be re-picked by the router; prune once abandoned (stale) so it
+            # doesn't report forever.
+            if _is_stale(entry):
+                _remove_from_failed(slug)
+                _delete_pending_draft(slug)
+                pruned.append(slug)
+            else:
+                no_draft.append(slug)
+        else:
+            still_failed.append(slug)
+
+    return {
+        "status": "ok", "recovered": recovered,
+        "still_failed": still_failed, "no_draft": no_draft, "pruned": pruned,
+    }
 
 
 def run_all(streams: tuple = BLOG_STREAMS, repo: Optional[str] = None) -> dict:
@@ -298,7 +408,20 @@ def _cli():
                         help="Stream to run (default: all)")
     parser.add_argument("--repo", default=None,
                         help="Path to SahilBlog repo (default: config.SAHILBLOG_REPO)")
+    parser.add_argument("--retry", action="store_true",
+                        help="Retry all held (failed-image) posts; defers if Codex is capped")
     args = parser.parse_args()
+
+    if args.retry:
+        result = retry_all_pending_images(repo=args.repo)
+        print(f"retry_all_pending_images: {result['status']}")
+        if result.get("reason"):
+            print(f"  reason: {result['reason']}")
+        for key in ("recovered", "still_failed", "no_draft", "pruned", "pending"):
+            if result.get(key):
+                print(f"  {key}: {', '.join(result[key])}")
+        # Deferred (capped) is not an error — the run simply waits for reset.
+        return 0 if result["status"] in ("ok", "idle", "deferred") else 1
 
     if args.stream == "all":
         result = run_all(repo=args.repo)

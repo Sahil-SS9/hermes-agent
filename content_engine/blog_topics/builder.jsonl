@@ -11,3 +11,4 @@
 {"topic_id": "builder-prompt-optimizer", "title_hint": "A multichannel prompt optimiser: treating prompts as versioned assets, not magic strings", "tags": ["prompting", "tooling", "evaluation"], "priority": 9}
 {"topic_id": "builder-memlock", "title_hint": "MemLock: the concept behind guarding a memory store from concurrent corruption", "tags": ["agent-memory", "reliability", "concurrency"], "priority": 9}
 {"topic_id": "builder-toolaria-versions-research", "title_hint": "Toolaria: a running log of tool versions and the research that prompted each change", "tags": ["tooling", "research", "kensei"], "priority": 9}
+{"topic_id": "research-2607.01709", "title_hint": "COMFYCLAW: building an agentic skill evolution pipeline for image generation workflows", "tags": ["research-paper", "paper-synthesis", "skill-evolution", "image-generation"], "priority": 7, "curated": true, "source": "research-paper", "source_url": "https://arxiv.org/abs/2607.01709"}

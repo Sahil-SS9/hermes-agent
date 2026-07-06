@@ -19,7 +19,9 @@
 #   ./kill-orphan-mcps.sh          # dry-run (print what would be killed)
 #   ./kill-orphan-mcps.sh --apply  # actually kill
 #
-# Hermes upstream bug #15275 — interactive sessions spawn MCPs that orphan on exit
+# Bug: MCP processes orphan when Hermes sessions exit (no lifecycle cleanup)
+# Full RCA: ~/.hermes/kanban/boards/ops/workspaces/t_27c06998/bug-15275-root-cause-analysis.md
+# Upstream: #57228 (reconnect leak), #40343 (bg processes survive exit)
 
 set -euo pipefail
 

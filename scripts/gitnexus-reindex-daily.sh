@@ -18,5 +18,5 @@ if [ "$HEAD_COMMIT" == "$INDEXED_COMMIT" ]; then
 fi
 
 echo "Re-indexing KenseiAgent at $HEAD_COMMIT (was $INDEXED_COMMIT)"
-"$GITNEXUS" analyze "$REPO" --force 2>&1
+timeout 280 "$GITNEXUS" analyze "$REPO" --force 2>&1
 echo "GitNexus re-index complete at $(date '+%d/%m/%y %H:%M:%S')"
