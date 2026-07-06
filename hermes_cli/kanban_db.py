@@ -927,6 +927,13 @@ class Task:
     # Optional flat tag for grouping related work (e.g. "atm10").
     # Not a hierarchy; not validated against an allow-list.
     theme: Optional[str] = None
+    # Kanban v2: epic grouping. Nullable FK to epics.id. NULL = ungrouped.
+    epic_id: Optional[str] = None
+    # Kanban v2: timestamp when task entered 'done' status. Used by
+    # auto-archive cron (done→archived after 14 days).
+    done_at: Optional[int] = None
+    # Kanban v2: timestamp when task was auto-archived by the cron.
+    archived_at: Optional[int] = None
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "Task":
@@ -1010,6 +1017,9 @@ class Task:
                 row["session_id"] if "session_id" in keys else None
             ),
             theme=row["theme"] if "theme" in keys else None,
+            epic_id=row["epic_id"] if "epic_id" in keys else None,
+            done_at=row["done_at"] if "done_at" in keys else None,
+            archived_at=row["archived_at"] if "archived_at" in keys else None,
         )
 
 
@@ -1192,7 +1202,31 @@ CREATE TABLE IF NOT EXISTS tasks (
     pipeline_stage       TEXT,
     -- Phase A: pipeline mode ('full' or 'express'; NULL = full). Express
     -- skips PRD/Council/Tech Review. Migrated onto existing boards too.
-    pipeline_mode        TEXT
+    pipeline_mode        TEXT,
+    -- Kanban v2: epic grouping. Nullable FK to epics.id. NULL = ungrouped.
+    epic_id              TEXT,
+    -- Kanban v2: timestamp when task entered 'done' status. Used by the
+    -- auto-archive cron to move done→archived after 14 days. Backfilled
+    -- from completed_at/updated_at on migration for existing done tasks.
+    done_at              INTEGER,
+    -- Kanban v2: timestamp when task was auto-archived by the cron.
+    -- NULL for manually archived or non-archived tasks.
+    archived_at          INTEGER
+);
+
+-- Kanban v2: epics table for JIRA-style epic/feature grouping.
+-- Hybrid model: app-level epic (parent_epic_id=NULL) with optional
+-- sub-epics for major features (parent_epic_id points to parent).
+CREATE TABLE IF NOT EXISTS epics (
+    id              TEXT PRIMARY KEY,
+    title           TEXT NOT NULL,
+    description     TEXT,
+    board_slug      TEXT,
+    status          TEXT NOT NULL DEFAULT 'active',
+    parent_epic_id  TEXT,
+    created_at      INTEGER NOT NULL,
+    updated_at      INTEGER NOT NULL,
+    FOREIGN KEY (parent_epic_id) REFERENCES epics(id)
 );
 
 CREATE TABLE IF NOT EXISTS task_links (
@@ -2099,6 +2133,47 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
         # pre-pipeline). Used by the dispatcher to route tasks to the
         # correct gate function.
         _add_column_if_missing(conn, "tasks", "pipeline_stage", "pipeline_stage TEXT")
+
+    # ── Kanban v2: epic grouping + auto-archive columns ──────────────
+    if "epic_id" not in cols:
+        _add_column_if_missing(conn, "tasks", "epic_id", "epic_id TEXT")
+    if "done_at" not in cols:
+        _add_column_if_missing(conn, "tasks", "done_at", "done_at INTEGER")
+    if "archived_at" not in cols:
+        _add_column_if_missing(conn, "tasks", "archived_at", "archived_at INTEGER")
+
+    # Backfill done_at for existing done tasks using completed_at or
+    # updated_at as a proxy. This is a one-shot migration — subsequent
+    # transitions to 'done' will set done_at explicitly. Guard against
+    # boards/test DBs that lack completed_at and/or updated_at (empty
+    # boards created by older code, minimal test schemas).
+    cols_after = {row["name"] for row in conn.execute("PRAGMA table_info(tasks)")}
+    proxy_expr = None
+    if "completed_at" in cols_after and "updated_at" in cols_after:
+        proxy_expr = "COALESCE(completed_at, updated_at)"
+    elif "completed_at" in cols_after:
+        proxy_expr = "completed_at"
+    elif "updated_at" in cols_after:
+        proxy_expr = "updated_at"
+    if proxy_expr:
+        conn.execute(
+            f"UPDATE tasks SET done_at = {proxy_expr} "
+            "WHERE status = 'done' AND done_at IS NULL"
+        )
+
+    # Epics table for JIRA-style epic/feature grouping.
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS epics ("
+        " id TEXT PRIMARY KEY,"
+        " title TEXT NOT NULL,"
+        " description TEXT,"
+        " board_slug TEXT,"
+        " status TEXT NOT NULL DEFAULT 'active',"
+        " parent_epic_id TEXT,"
+        " created_at INTEGER NOT NULL,"
+        " updated_at INTEGER NOT NULL,"
+        " FOREIGN KEY (parent_epic_id) REFERENCES epics(id))"
+    )
 
     # Indexes over additive ``tasks`` columns must be created after the
     # columns exist. Keeping them in SCHEMA_SQL breaks legacy boards: SQLite
@@ -4648,13 +4723,14 @@ def complete_task(
                    SET status       = 'done',
                        result       = ?,
                        completed_at = ?,
+                       done_at      = ?,
                        claim_lock   = NULL,
                        claim_expires= NULL,
                        worker_pid   = NULL
                  WHERE id = ?
                    AND status IN ('running', 'ready', 'blocked')
                 """,
-                (result, now, task_id),
+                (result, now, now, task_id),
             )
         else:
             cur = conn.execute(
@@ -4663,6 +4739,7 @@ def complete_task(
                    SET status       = 'done',
                        result       = ?,
                        completed_at = ?,
+                       done_at      = ?,
                        claim_lock   = NULL,
                        claim_expires= NULL,
                        worker_pid   = NULL
@@ -4670,7 +4747,7 @@ def complete_task(
                    AND status IN ('running', 'ready', 'blocked')
                    AND current_run_id = ?
                 """,
-                (result, now, task_id, int(expected_run_id)),
+                (result, now, now, task_id, int(expected_run_id)),
             )
         if cur.rowcount != 1:
             return False
