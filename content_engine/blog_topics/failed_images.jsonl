@@ -10,3 +10,4 @@
 {"slug": "lead-and-sub-team-agent-profiles", "stream": "builder", "date": "2026-07-06", "attempts": 3, "last_error": "All image generation attempts failed (hero + sections)", "first_failure": "2026-07-04"}
 {"slug": "agent-maturity-model-why-capability-is", "stream": "ai", "date": "2026-07-05", "attempts": 1, "last_error": "All image generation attempts failed (hero + sections)", "first_failure": "2026-07-05"}
 {"slug": "the-agent-maturity-model-why-your", "stream": "ai", "date": "2026-07-06", "attempts": 1, "last_error": "All image generation attempts failed (hero + sections)", "first_failure": "2026-07-06"}
+{"slug": "the-agent-maturity-model-why-capability", "stream": "ai", "date": "2026-07-06", "attempts": 1, "last_error": "All image generation attempts failed (hero + sections)", "first_failure": "2026-07-06"}
