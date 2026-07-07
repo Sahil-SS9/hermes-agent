@@ -3445,8 +3445,24 @@ _VERIFICATION_LEAK_PATTERNS = [
     re.compile(r'(is )?(already )?clean(ed)? up\b.*harmless', re.IGNORECASE),
     re.compile(r'(deletion )?pending approval\b', re.IGNORECASE),
     re.compile(r'(already )?documented in\b.*brain\b', re.IGNORECASE),
-    re.compile(r'\b\d+ (pre-existing|old|earlier) (errors|issues)\b', re.IGNORECASE),
-    re.compile(r'(none )?introduced by this run\b', re.IGNORECASE),
+    re.compile(r'\\b\\d+ (pre-existing|old|earlier) (errors|issues)\\b', re.IGNORECASE),
+    re.compile(r'(none )?introduced by this run\\b', re.IGNORECASE),
+    # 2026-07-07 v2 — caught in live cron output AFTER the v1 patterns.
+    # These cover phrasings that the existing adjacency patterns miss:
+    #   - "Holding off on verification per the creative/visual work rule"
+    #   - "linters" (was only matching "linters held off" before)
+    #   - "waiting for your feedback" (model defers to user)
+    #   - "Concrete blocker for automated verification"
+    #   - "creative/visual" (with slash between words)
+    re.compile(r'[Hh]olding off on verification', re.MULTILINE),
+    re.compile(r'\blinters?\b', re.IGNORECASE),
+    re.compile(r'waiting for your feedback', re.IGNORECASE),
+    re.compile(r'[Cc]oncrete [Bb]locker', re.IGNORECASE),
+    re.compile(r'(creative|visual)\s*/\s*(work|artifact|rule)', re.IGNORECASE),
+    # Catch-all: if the entire response is one paragraph that mentions
+    # "verification" and mentions "report"/"HTML"/"file" without any
+    # emoji, bullet, or MEDIA tag — it's almost certainly leakage.
+    re.compile(r'^[^\\n]{30,}(verification).*(report|HTML|artifact|file|lint)', re.IGNORECASE | re.MULTILINE),
 ]
 
 _MEDIA_TAG_RE = re.compile(r'^MEDIA:/\S+', re.MULTILINE)
@@ -3663,8 +3679,44 @@ def run_one_job(job: dict, *, adapters=None, loop=None, verbose: bool = False) -
             # AFTER the summary+MEDIA tag. The delivery layer reads the last thing
             # output, so Discord receives verification text instead of the actual
             # summary. This strip runs BEFORE delivery.
+            # When the strip returns empty, we treat it as intentional silence
+            # (not a failure) because the model completed successfully — it just
+            # filled its response with verification noise.
+            stripped_to_silent = False
             if success and final_response:
-                final_response = _strip_verification_leak(final_response)
+                stripped = _strip_verification_leak(final_response)
+                if stripped != final_response and not stripped.strip():
+                    stripped_to_silent = True
+                    # Log as deliberate silence so the cron shows ok status
+                    logger.info(
+                        "Job '%s': _strip_verification_leak caught verification-only "
+                        "output — treating as [SILENT] (suppressed %d chars)",
+                        job.get("name", job["id"]), len(final_response),
+                    )
+                    final_response = SILENT_MARKER
+                else:
+                    final_response = stripped
+
+            # HARDENING: if an LLM cron produced text but forgot to include a
+            # MEDIA: tag or [SILENT] marker, the output is likely raw content
+            # flooding Discord. Truncate long text-only responses to a
+            # safe summary with a warning.
+            if (success and final_response
+                    and not job.get("no_agent")
+                    and "MEDIA:" not in final_response
+                    and SILENT_MARKER not in final_response.upper()
+                    and len(final_response.split("\n")) > 8):
+                logger.warning(
+                    "Job '%s': text-only response with %d lines, no MEDIA tag — "
+                    "likely flooding. Truncating to first 6 lines + warning.",
+                    job.get("name", job["id"]), len(final_response.split("\n")),
+                )
+                lines = final_response.split("\n")
+                final_response = (
+                    "\n".join(lines[:6])
+                    + "\n\n⚠️ Output truncated — cron response had no MEDIA attachment. "
+                    "The LLM likely dumped content inline instead of using summary+MEDIA."
+                )
 
             # Deliver the final response to the origin/target chat.
             # If the agent responded with [SILENT], skip delivery (but
@@ -3700,7 +3752,10 @@ def run_one_job(job: dict, *, adapters=None, loop=None, verbose: bool = False) -
         # Treat empty final_response as a soft failure so last_status
         # is not "ok" — the agent ran but produced nothing useful.
         # (issue #8585)
-        if success and not final_response.strip():
+        # EXCEPTION: stripped_to_silent means _strip_verification_leak
+        # intentionally emptied the response (all verification noise).
+        # That's a successful silent run, not a failure.
+        if success and not final_response.strip() and not stripped_to_silent:
             success = False
             error = "Agent completed but produced empty response (model error, timeout, or misconfiguration)"
 
