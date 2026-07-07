@@ -212,10 +212,19 @@ def classify_task(title, body):
         'update doc', 'add column', 'bump version', 'cleanup',
         'orphan', 'stale', 'disk', 'lock', 'skill activation',
     ]
-
-    tier = 'full'  # default: most triage tasks need full pipeline
+    # Short keywords like 'lock' match substrings (e.g. inside
+    # 'blocked'), causing false tier=fast for NEEDS HUMAN tasks.
+    SHORT_KWS = {'lock', 'disk'}
+    _combined = title_lower + ' ' + body_lower
+    tier = 'full'
     for kw in fast_keywords:
-        if kw in title_lower or kw in body_lower:
+        if kw in SHORT_KWS:
+            # Use word-boundary match for short keywords
+            import re
+            if re.search(r'\b' + re.escape(kw) + r'\b', _combined):
+                tier = 'fast'
+                break
+        elif kw in _combined:
             tier = 'fast'
             break
 
@@ -298,8 +307,29 @@ def main():
                 else:
                     errors.append({'id': task_id, 'board': board, 'title': title, 'error': 'promote to research failed'})
             else:
-                # Fast tier: promote to 'todo' (existing behavior)
-                if promote_task(task_id, board):
+                # Fast tier: promote to 'todo' via SQL (hermes kanban promote
+                # only accepts 'todo'/'blocked', not 'triage')
+                db_path = _get_board_db(board)
+                promoted_ok = False
+                if db_path and os.path.exists(db_path):
+                    try:
+                        conn = sqlite3.connect(db_path)
+                        if write_lock is not None:
+                            with write_lock(conn):
+                                conn.execute(
+                                    "UPDATE tasks SET status='todo', updated_at=strftime('%s','now') WHERE id=? AND status='triage'",
+                                    (task_id,))
+                                conn.commit()
+                        else:
+                            conn.execute(
+                                "UPDATE tasks SET status='todo', updated_at=strftime('%s','now') WHERE id=? AND status='triage'",
+                                (task_id,))
+                            conn.commit()
+                        conn.close()
+                        promoted_ok = True
+                    except Exception:
+                        pass
+                if promoted_ok:
                     _set_task_tier(board, task_id, tier)
                     if routed_assignee:
                         _set_task_assignee(board, task_id, routed_assignee)
@@ -308,7 +338,34 @@ def main():
                     errors.append({'id': task_id, 'board': board, 'title': title, 'error': 'promote failed'})
         else:
             reason = f"Needs Sahil's decision: {title[:120]}"
-            if block_task(task_id, board, reason):
+            # block_task CLI only accepts 'running'/'ready' — triage
+            # tasks must be transitioned directly via SQL, then
+            # commented via CLI (which works on any status)
+            db_path = _get_board_db(board)
+            if db_path and os.path.exists(db_path):
+                try:
+                    conn = sqlite3.connect(db_path)
+                    if write_lock is not None:
+                        with write_lock(conn):
+                            conn.execute(
+                                "UPDATE tasks SET status='blocked', updated_at=strftime('%s','now') WHERE id=? AND status='triage'",
+                                (task_id,))
+                            conn.commit()
+                    else:
+                        conn.execute(
+                            "UPDATE tasks SET status='blocked', updated_at=strftime('%s','now') WHERE id=? AND status='triage'",
+                            (task_id,))
+                        conn.commit()
+                    conn.close()
+                    blocked_ok = True
+                except Exception:
+                    blocked_ok = False
+            else:
+                blocked_ok = False
+            # Add comment via CLI (works on any status)
+            comment_cmd = ['hermes', 'kanban', '--board', board, 'comment', task_id, reason]
+            subprocess.run(comment_cmd, capture_output=True, text=True, timeout=30)
+            if blocked_ok:
                 _set_task_tier(board, task_id, tier)
                 pending_tasks.append({
                     'id': task_id,
