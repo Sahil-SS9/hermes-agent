@@ -1,11 +1,12 @@
 {
   "history": [
-    "pixel-art",
-    "signal-hud",
+    "baoyu-infographic",
+    "chromatic-institute",
     "saga-noir",
+    "signal-hud",
     "ninth-observatory",
-    "mythic-tech-codex",
-    "chromatic-institute"
+    "mythic-tech-codex"
   ],
-  "updated_at": "2026-07-06T12:03:16+0100"
+  "updated_at": "2026-07-07T19:20:30+0100",
+  "x_article_style_idx": 14
 }

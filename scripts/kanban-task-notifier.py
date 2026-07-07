@@ -18,22 +18,53 @@ from pathlib import Path
 # ── Paths ──────────────────────────────────────────────────────────────────
 KANBAN_BASE = Path.home() / '.hermes' / 'kanban'
 BOARDS_DIR = KANBAN_BASE / 'boards'
+DEFAULT_DB = KANBAN_BASE / 'kanban.db'  # back-compat: default board lives here
 STATE_FILE = Path.home() / '.hermes' / 'data' / 'kanban-notifier-state.json'
 WRITE_LOCK = KANBAN_BASE / 'kanban-write.lock'
 
 # ── Helpers ────────────────────────────────────────────────────────────────
 
 
-def discover_boards() -> list[str]:
-    """Return sorted list of board slugs (subdirs under boards/ that have a
-    kanban.db)."""
-    if not BOARDS_DIR.is_dir():
-        return []
-    boards = []
-    for entry in sorted(BOARDS_DIR.iterdir()):
-        if entry.is_dir() and (entry / 'kanban.db').is_file():
-            boards.append(entry.name)
-    return boards
+def discover_boards() -> list[tuple[str, Path]]:
+    """Return list of (slug, db_path) pairs to scan.
+
+    Mirrors the resolution used by `hermes kanban ...` (see
+    `hermes_cli/kanban.py:2556` and `hermes_cli/kanban_db.py:kanban_db_path`):
+
+    - The ``default`` board lives at ``<root>/kanban.db`` (back-compat path).
+    - All other boards live at ``<root>/kanban/boards/<slug>/kanban.db``.
+
+    Entries whose DB does not exist on disk are skipped — the ``default``
+    DB is created on demand by the kanban CLI and may not exist on a fresh
+    install or after a partial migration. Entries that share the same
+    underlying path (alias boards) are deduped.
+    """
+    seen: set[Path] = set()
+    result: list[tuple[str, Path]] = []
+
+    def _add(slug: str, path: Path) -> None:
+        try:
+            resolved = path.resolve()
+        except OSError:
+            return
+        if resolved in seen:
+            return
+        seen.add(resolved)
+        result.append((slug, path))
+
+    # Default board first (matches `hermes kanban` board ordering).
+    if DEFAULT_DB.is_file():
+        _add('default', DEFAULT_DB)
+
+    if BOARDS_DIR.is_dir():
+        for entry in sorted(BOARDS_DIR.iterdir()):
+            if not entry.is_dir():
+                continue
+            db = entry / 'kanban.db'
+            if db.is_file():
+                _add(entry.name, db)
+
+    return result
 
 
 def load_state() -> dict[str, list[str]]:
@@ -61,10 +92,18 @@ def is_write_locked() -> bool:
     return WRITE_LOCK.is_file()
 
 
-def fetch_ready_tasks(board: str) -> list[dict]:
-    """Query a single board for ready+assigned tasks. Returns list of dicts."""
-    db_path = BOARDS_DIR / board / 'kanban.db'
+def fetch_ready_tasks(board: str, db_path: Path) -> list[dict]:
+    """Query a single board for ready+assigned tasks. Returns list of dicts.
+
+    ``db_path`` is the resolved path to the board's kanban.db (see
+    :func:`discover_boards`). Empty or zero-byte files are skipped — the
+    kanban CLI creates the default board's DB on demand, and on a fresh
+    install the placeholder file may be 0 bytes before the first task is
+    created.
+    """
     if not db_path.is_file():
+        return []
+    if db_path.stat().st_size == 0:
         return []
 
     conn = sqlite3.connect(f'file:{db_path}?mode=ro', uri=True)
@@ -127,8 +166,20 @@ def main() -> None:
     state = load_state()
     new_messages: list[str] = []
 
-    for board in boards:
-        tasks = fetch_ready_tasks(board)
+    for board, db_path in boards:
+        try:
+            tasks = fetch_ready_tasks(board, db_path)
+        except sqlite3.DatabaseError as exc:
+            # A single corrupt/migrating board must not take down the whole
+            # notifier — log to stderr and continue with the remaining boards.
+            # This is the silent-failure pattern that previously surfaced as
+            # `code 1` Tracebacks on cron start.
+            print(
+                f'[kanban-task-notifier] skipping {board}: {type(exc).__name__}: {exc}',
+                file=sys.stderr,
+            )
+            continue
+
         known = set(state.get(board, []))
 
         for task in tasks:
