@@ -99,11 +99,15 @@ def scan_script(text: str) -> list[str]:
 def scan_prompt(text: str) -> list[str]:
     """Prompts legitimately quote forbidden patterns as examples/prohibitions
     ("No Telegram HTML tags (<b>...)"). Flag a pattern only when the match is NOT
-    in a negation/example context."""
+    in a negation/example context or inside a fenced code block."""
+    # Strip fenced code blocks (```...```) before scanning — HTML templates
+    # inside code blocks are file-generation instructions, not Discord-visible.
+    import re as _re
+    stripped = _re.sub(r'```[a-z]*\n.*?```', '', text or '', flags=_re.DOTALL)
     hits: list[str] = []
     for name, rx in BAD_PATTERNS.items():
-        for mobj in rx.finditer(text or ''):
-            ctx = (text or '')[max(0, mobj.start() - 50):mobj.start()]
+        for mobj in rx.finditer(stripped):
+            ctx = stripped[max(0, mobj.start() - 50):mobj.start()]
             if not NEGATION_CTX.search(ctx):
                 hits.append(name)
                 break

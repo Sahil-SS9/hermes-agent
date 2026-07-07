@@ -13,6 +13,12 @@
 # ================================================================
 set -euo pipefail
 
+# no_agent cron contract: empty stdout on success = silent delivery.
+# Buffer all stdout; only emit if there are failures.
+_OUTPUT_BUFFER=$(mktemp)
+exec 3>&1 4>&2
+exec 1>"$_OUTPUT_BUFFER" 2>&4
+
 MANIFEST="$HOME/.hermes/kensei/fork-patches.yaml"
 REPO="$HOME/repos/KenseiAgent"
 
@@ -228,21 +234,23 @@ if [ -n "$current_name" ] && [ -n "$current_check" ]; then
 fi
 
 # ── Summary ──
-echo ""
-echo "──────────────────────────────────────────────"
-echo -e "Total:  $TOTAL"
-echo -e "Passed: ${GREEN}$PASSED${NC}"
-echo -e "Failed: ${RED}$FAILED${NC}"
-
+# no_agent cron contract: empty stdout on success = silent delivery.
+# Only emit buffered stdout when there are failures.
 if [ "$FAILED" -gt 0 ]; then
+    # Restore stdout and print the full buffer
+    exec 1>&3 2>&4
+    cat "$_OUTPUT_BUFFER"
     echo ""
     echo -e "${RED}=== FAILURES ===${NC}"
     echo -e "$FAILURES"
     echo ""
     echo -e "${YELLOW}Restore reference: ${NC}~/.hermes/skills/devops/hermes-update/references/known-fork-patches.md"
     echo -e "${YELLOW}Add new check:     ${NC}$MANIFEST"
+    rm -f "$_OUTPUT_BUFFER"
     exit 1
 fi
 
-echo -e "${GREEN}All $PASSED fork customisations intact.${NC}"
+# Success — silent (log to stderr only)
+echo "All $PASSED fork customisations intact." >&4
+rm -f "$_OUTPUT_BUFFER"
 exit 0

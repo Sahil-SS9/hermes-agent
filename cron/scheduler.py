@@ -3412,6 +3412,41 @@ _VERIFICATION_LEAK_PATTERNS = [
     re.compile(r'Queue is valid.*pending is empty\b', re.MULTILINE),
     re.compile(r'^##\s*[Aa]d-hoc verification\b', re.MULTILINE),
     re.compile(r'^\*{0,2}[Aa]d-hoc verification\s+passed\b', re.MULTILINE),
+    # 2026-07-07 — broader patterns observed in live cron output from
+    # deepseek-v4-flash, glm-5.1, kimi-k2.6.  These LLMs run ad-hoc
+    # verification after producing their HTML file but then emit the
+    # verification results as their ENTIRE final response (no MEDIA tag,
+    # no summary).  The patterns below catch the common phrasings.
+    re.compile(r'HTML (validates?|is) (clean|well-formed)', re.IGNORECASE),
+    re.compile(r'cron-output-lint\.py\b.*\b(passes?|no issues?|clean)', re.IGNORECASE),
+    re.compile(r'(No |no )?(new )?issues? introduced\b', re.IGNORECASE),
+    re.compile(r'(The |the )?(HTML |html )?(report|file) is (a )?(creative|visual|static)', re.IGNORECASE),
+    re.compile(r'(The |the )?test suite runs?\b', re.IGNORECASE),
+    re.compile(r'(No |no )(applicable |new )?test(s)? exist(s)?\b', re.IGNORECASE),
+    re.compile(r'(The |the )?(changed )?file is (a )?static HTML', re.IGNORECASE),
+    re.compile(r'(Verification|verification) (complete|results?)\b', re.IGNORECASE),
+    re.compile(r'(pre-existing|unrelated) (issue|lint)\b', re.IGNORECASE),
+    re.compile(r'(is )?already (verified|in|on) (the )?(MEDIA_DELIVERY|safe)', re.IGNORECASE),
+    re.compile(r'\b\d+[, ]?\d* (bytes?|KB|MB) (readable|exists?|written)\b', re.IGNORECASE),
+    re.compile(r'(dark-mode|color-scheme) (CSS )?(compliant|correct)', re.IGNORECASE),
+    re.compile(r'(The )?(only )?lint issue\b.*\b(pre-existing|unrelated)\b', re.IGNORECASE),
+    re.compile(r'(temp|debug) (script|file)s? (in|under) /tmp\b', re.IGNORECASE),
+    re.compile(r'(is )?(creative|visual) (work|artifact)', re.IGNORECASE),
+    re.compile(r'linters? (are |is )?held off\b', re.IGNORECASE),
+    re.compile(r'(user )?review or commit time\b', re.IGNORECASE),
+    re.compile(r'(no |No )?raw HTML (tags )?in (the )?Discord', re.IGNORECASE),
+    re.compile(r'(My |my )?(mailbox-cleaner|output|cron) (output )?(has|have) no lint', re.IGNORECASE),
+    re.compile(r'\b\d+ tags?, 0 errors\b', re.IGNORECASE),
+    re.compile(r'HTML parsed cleanly\b', re.IGNORECASE),
+    re.compile(r'(static HTML|cron HTML) (report|artifact|output|deliver)', re.IGNORECASE),
+    re.compile(r'(No |no )?(test in this suite|applicable test|test exists)\b', re.IGNORECASE),
+    re.compile(r'(concrete )?blocker (is |for )?(automated )?verification\b', re.IGNORECASE),
+    re.compile(r'No (new )?code (was )?added to (the )?production\b', re.IGNORECASE),
+    re.compile(r'(is )?(already )?clean(ed)? up\b.*harmless', re.IGNORECASE),
+    re.compile(r'(deletion )?pending approval\b', re.IGNORECASE),
+    re.compile(r'(already )?documented in\b.*brain\b', re.IGNORECASE),
+    re.compile(r'\b\d+ (pre-existing|old|earlier) (errors|issues)\b', re.IGNORECASE),
+    re.compile(r'(none )?introduced by this run\b', re.IGNORECASE),
 ]
 
 _MEDIA_TAG_RE = re.compile(r'^MEDIA:/\S+', re.MULTILINE)
@@ -3462,8 +3497,67 @@ def _strip_verification_leak(text: str) -> str:
             prefix = text[:line_end].rstrip()
         return _strip_inline_verification(prefix)
 
-    # 3 — No marker: strip individual verification lines
-    return _strip_inline_verification(text)
+    # 3 — No marker: strip individual verification lines, then apply a
+    # heuristic to catch free-form narration that doesn't match any known
+    # pattern.  When the LLM produces ONLY verification prose (no [SILENT],
+    # no MEDIA:, no Discord-summary structure), the output is noise even
+    # if individual lines don't match a known pattern.  We detect this by
+    # checking whether any remaining line looks like a legitimate Discord
+    # summary line (starts with an emoji, a bullet, a heading, or contains
+    # a link).  If none do, suppress the entire output.
+    stripped = _strip_inline_verification(text)
+    if not stripped:
+        # All lines matched verification patterns — pure noise.
+        return ""
+    # Heuristic: check if ANY remaining line looks like a LEGITIMATE Discord
+    # summary.  We need to distinguish real summary bullets from verification-
+    # evidence bullets (which look like: `- ls -la /path/...` or
+    # `- Path is under ...`).
+    # Real summary lines: emoji headers, bullets with actual content (not
+    # commands/paths), markdown headings, MEDIA: tag, URLs, or short factual
+    # headlines.
+    _SUMMARY_LINE_RE = re.compile(
+        r'^(👉|📡|🔍|🧠|🔀|✍|📋|🛑|⚠|🔴|🟢|📊|🤖|💡|🚀|📝|✅|❌|#\s|>\s|MEDIA:)',
+        re.MULTILINE,
+    )
+    # A bullet line is a summary if it's NOT a shell command / file path /
+    # verification evidence line.
+    _BULLET_RE = re.compile(r'^(\*|•|-)\s+', re.MULTILINE)
+    _VERIF_BULLET_RE = re.compile(
+        r'^(?:\*|•|-)\s+'
+        r'(?:`|ls |cat |grep |test |find |Path |File |Verified|No raw|'
+        r'dark-mode|MEDIA_DELIVERY|cron-output|HTML |The )',
+        re.MULTILINE,
+    )
+    _URL_RE = re.compile(r'https?://\S+', re.MULTILINE)
+
+    has_summary = bool(_SUMMARY_LINE_RE.search(stripped) or _URL_RE.search(stripped))
+    if not has_summary:
+        # Check for non-verification bullet lines
+        for line in stripped.split("\n"):
+            if _BULLET_RE.match(line) and not _VERIF_BULLET_RE.match(line):
+                has_summary = True
+                break
+    if has_summary:
+        return stripped
+    # No summary-like structure and no URL — this is likely pure narration.
+    # Only suppress if the text reads like verification/meta-commentary
+    # (mentions lint, test, HTML, verification, cron, output, etc.).
+    _NARRATION_KEYWORDS = re.compile(
+        r'\b(lint|test|verification|HTML report|cron output|Discord|'
+        r'safe root|deliver|media|artifact|static|creative|visual|'
+        r'pre-existing|unrelated|no issues|pipeline|byte|KB|MB|'
+        r'tags?, 0 errors|parsed cleanly|well-formed|compliant)\b',
+        re.IGNORECASE,
+    )
+    if _NARRATION_KEYWORDS.search(stripped):
+        logger.info(
+            "cron: suppressing verification narration "
+            "(no [SILENT], no MEDIA:, no summary structure): %s",
+            stripped[:200],
+        )
+        return ""
+    return stripped
 
 
 def _strip_inline_verification(text: str) -> str:

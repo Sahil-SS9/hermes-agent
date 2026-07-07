@@ -31,7 +31,13 @@ def get_branches():
     for line in raw.strip().split("\n"):
         parts = line.split("|")
         if len(parts) == 2:
-            branches.append({"name": parts[0], "last_commit": parts[1]})
+            # Convert YYYY-MM-DD to DD/MM/YYYY for UK date format
+            date_parts = parts[1].split("-")
+            if len(date_parts) == 3:
+                uk_date = f"{date_parts[2]}/{date_parts[1]}/{date_parts[0]}"
+            else:
+                uk_date = parts[1]
+            branches.append({"name": parts[0], "last_commit": uk_date})
     return branches
 
 def get_issue_status(issue_num):
