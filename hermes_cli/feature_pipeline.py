@@ -488,13 +488,27 @@ def check_human_approved(conn: "sqlite3.Connection", task_id: str, stage: str) -
 
     Looks for ``human_approved`` events in the events table.
     The stage field in the event payload must match the current stage.
+    The approval must have been granted AFTER the task entered this stage
+    (guards against stale approval from a previous cycle being reused).
     """
+    # Find the timestamp when the task entered the current stage
+    entered = conn.execute(
+        "SELECT created_at FROM task_events "
+        "WHERE task_id = ? AND kind = 'pipeline_advanced' "
+        "AND json_extract(payload, '$.to_stage') = ? "
+        "ORDER BY created_at DESC LIMIT 1",
+        (task_id, stage),
+    ).fetchone()
+    entered_at = entered[0] if entered else 0
+
+    # Approval must exist AND be newer than the stage entry
     row = conn.execute(
         "SELECT 1 FROM task_events "
         "WHERE task_id = ? AND kind = 'human_approved' "
         "AND json_extract(payload, '$.stage') = ? "
+        "AND created_at > ? "
         "ORDER BY created_at DESC LIMIT 1",
-        (task_id, stage),
+        (task_id, stage, entered_at),
     ).fetchone()
     return row is not None
 

@@ -284,27 +284,47 @@ def process_board(board_dir: Path, state: dict) -> list[str]:
     return new_completions
 
 
+def _process_root_board(db_path: Path, state: dict) -> list[str]:
+    """Process the default board (root kanban.db, not under boards/).
+
+    Same logic as process_board but takes a direct db path instead of a
+    board directory (which has no subdir structure for the default board).
+    """
+    _parent_dir = db_path.parent  # ~/.hermes/kanban/
+    # Monkey-patch process_board to use a temp directory
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        # Symlink the DB so process_board's db_path resolution works
+        (tmp / "kanban.db").symlink_to(db_path.resolve())
+        return process_board(tmp, state)
+
+
 def main():
     state = load_state()
     new_completions: list[str] = []
 
-    if not BOARDS_ROOT.exists():
-        logger.info("Boards root %s does not exist; nothing to do", BOARDS_ROOT)
-        return
+    if BOARDS_ROOT.exists():
+        for board_dir in sorted(BOARDS_ROOT.iterdir()):
+            if not board_dir.is_dir():
+                continue
+            if board_dir.name.startswith("quarantine-"):
+                continue
+            try:
+                new_completions.extend(process_board(board_dir, state))
+            except Exception as exc:
+                logger.warning("Unexpected error processing %s: %s", board_dir, exc)
+    else:
+        logger.info("Boards root %s does not exist", BOARDS_ROOT)
 
-    for board_dir in sorted(BOARDS_ROOT.iterdir()):
-        if not board_dir.is_dir():
-            continue
-        # Skip our own quarantine directories
-        if board_dir.name.startswith("quarantine-"):
-            continue
+    # Scan the default board (root kanban.db, not under boards/)
+    _default_db = Path(os.path.expanduser("~/.hermes/kanban.db"))
+    if _default_db.exists() and not _is_db_corrupt(_default_db):
         try:
-            new_completions.extend(process_board(board_dir, state))
+            _default_board = _default_db.parent  # ~/.hermes/kanban/
+            new_completions.extend(_process_root_board(_default_db, state))
         except Exception as exc:
-            # Last-resort guard: even if process_board itself raises (e.g. unexpected
-            # OSError, write_lock deadlock), keep going. The whole point of this
-            # refactor is that one bad board cannot kill the cron.
-            logger.warning("Unexpected error processing %s: %s", board_dir, exc)
+            logger.warning("Error processing default board: %s", exc)
 
     save_state(state)
 
