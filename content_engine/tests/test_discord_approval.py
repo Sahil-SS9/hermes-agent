@@ -13,6 +13,7 @@ import pytest
 @pytest.fixture(autouse=True)
 def isolated_approval_tracker(tmp_path, monkeypatch):
     monkeypatch.setattr("blog.blog_approval.TRACKER_PATH", tmp_path / "pending_approvals.jsonl")
+    monkeypatch.setattr("blog.blog_approval.PREVIEWS_DIR", tmp_path / "previews")
 
 
 def _make_mdx(tmp_path: Path, slug: str, title: str = "Test Article") -> str:

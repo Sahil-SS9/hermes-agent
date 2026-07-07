@@ -218,13 +218,9 @@ def run_reply_suggestions(dry_run: bool = False) -> List[Dict]:
             print(f"    Would generate 2-5 reply suggestions per high-value post")
         return []
     
-    # TODO: Wire xurl here when activated
-    # from xurl import fetch_user_timeline
-    # for account in TARGET_ACCOUNTS:
-    #     posts = fetch_user_timeline(account, limit=10)
-    #     for post in posts:
-    #         replies = suggest_replies_for_post(post, account)
-    #         suggestions.extend(replies)
+    # Not yet wired. x_scout.py and engagement_suggester.py already use xurl
+    # for timeline fetching — mirror that pattern here when this pipeline is
+    # activated.
     
     print("Reply suggestion pipeline ready. Wire xurl to activate.")
     return suggestions

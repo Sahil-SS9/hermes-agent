@@ -19,6 +19,7 @@ from typing import Optional
 logger = logging.getLogger("blog_approval")
 
 TRACKER_PATH = Path(__file__).resolve().parent.parent / "blog_topics" / "pending_approvals.jsonl"
+PREVIEWS_DIR = Path(__file__).resolve().parent.parent / "previews"
 APPROVAL_CHANNEL = "#blog-management"
 
 # ── State management ──────────────────────────────────────────────
@@ -147,7 +148,7 @@ def _generate_preview(slug: str, mdx_path: str = "") -> str:
             if not post:
                 return ""
             html = build_preview_html(**post)
-        out_dir = Path(__file__).resolve().parent.parent / "previews"
+        out_dir = PREVIEWS_DIR
         out_dir.mkdir(parents=True, exist_ok=True)
         out_path = out_dir / f"{slug}.html"
         out_path.write_text(html, encoding="utf-8")
@@ -397,7 +398,7 @@ def handle_discord_command(text: str) -> dict:
                 status="pending",
                 embed_images=True,
             )
-            out_dir = Path(__file__).resolve().parent.parent / "previews"
+            out_dir = PREVIEWS_DIR
             out_dir.mkdir(parents=True, exist_ok=True)
             out_path = out_dir / f"{slug}-light.html"
             out_path.write_text(html, encoding="utf-8")

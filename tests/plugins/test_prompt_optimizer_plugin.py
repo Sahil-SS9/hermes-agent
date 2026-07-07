@@ -31,7 +31,7 @@ from types import SimpleNamespace
 import pytest
 
 
-PLUGIN_DIR = Path("/home/kensei/.hermes/plugins/prompt-optimizer")
+PLUGIN_DIR = Path(__file__).resolve().parents[2] / "plugins" / "prompt-optimizer"
 
 
 # ---------------------------------------------------------------------------

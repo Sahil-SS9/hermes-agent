@@ -9039,7 +9039,6 @@ def _apply_yaml_config(yaml_cfg: dict, discord_cfg: dict) -> dict | None:
         v = discord_cfg.get(k) if k in discord_cfg else _discord_extra.get(k)
         if v is not None:
             extra_out[k] = v
-    return extra_out if extra_out else None
 
     # ── Upstream: liveness probe knobs ──
     # liveness probe knobs: detect zombie clients behind dead proxies/NATs and
@@ -9052,6 +9051,22 @@ def _apply_yaml_config(yaml_cfg: dict, discord_cfg: dict) -> dict | None:
     lft = discord_cfg.get("liveness_failure_threshold")
     if lft is not None and not os.getenv("HERMES_DISCORD_LIVENESS_FAILURE_THRESHOLD"):
         os.environ["HERMES_DISCORD_LIVENESS_FAILURE_THRESHOLD"] = str(lft)
+
+    # allow_bots / max_bot_hops: bot-to-bot co-working. Top-level preferred,
+    # falls back to extra.* (mirrors reply_to_mode above).
+    allow_bots_cfg = (
+        discord_cfg["allow_bots"] if "allow_bots" in discord_cfg
+        else _discord_extra.get("allow_bots")
+    )
+    if allow_bots_cfg is not None and not os.getenv("DISCORD_ALLOW_BOTS"):
+        os.environ["DISCORD_ALLOW_BOTS"] = str(allow_bots_cfg).lower()
+    max_bot_hops_cfg = (
+        discord_cfg["max_bot_hops"] if "max_bot_hops" in discord_cfg
+        else _discord_extra.get("max_bot_hops")
+    )
+    if max_bot_hops_cfg is not None and not os.getenv("DISCORD_MAX_BOT_HOPS"):
+        os.environ["DISCORD_MAX_BOT_HOPS"] = str(max_bot_hops_cfg)
+
     return extra_out if extra_out else None
 
 

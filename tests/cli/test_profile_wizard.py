@@ -77,14 +77,14 @@ def test_export_json_and_js(tmp_path: Path):
 def test_provider_rows_match_model_setup_order_and_active_focus_markers():
     entries = profile_wizard._provider_entries()
 
-    assert entries[0].tui_desc == "Nous Portal (Nous Research subscription)"
-    assert entries[1].tui_desc == "OpenRouter (100+ models, pay-per-use)"
-    assert entries[2].tui_desc == "NovitaAI (AI-native cloud: Model API, Agent Sandbox, GPU Cloud)"
-    assert entries[5].slug == "openai-codex"
-    assert entries[-1].tui_desc == "Ollama Cloud (cloud-hosted open models — ollama.com)"
+    assert entries[0].tui_desc == "Nous Portal (Everything your agent needs, 300+ models with bundled tool use)"
+    assert entries[1].tui_desc == "OpenRouter (Pay-per-use API aggregator)"
+    assert entries[3].tui_desc == "NovitaAI (Cloud: Model API, Agent Sandbox, GPU Cloud)"
+    assert entries[6].slug == "openai-codex"
+    assert entries[-1].tui_desc == "Ollama Cloud (Cloud-hosted open models, ollama.com)"
 
-    row = profile_wizard._format_provider_row(entries[5], focused=True, active=True)
-    unfocused = profile_wizard._format_provider_row(entries[2], focused=False, active=False)
+    row = profile_wizard._format_provider_row(entries[6], focused=True, active=True)
+    unfocused = profile_wizard._format_provider_row(entries[3], focused=False, active=False)
 
     assert row.startswith(" → (●) OpenAI Codex")
     assert row.endswith("← currently active")

@@ -1497,6 +1497,27 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                     spinner.stop(cute_msg)
                 elif agent._should_emit_quiet_tool_messages():
                     agent._vprint(f"  {cute_msg}")
+        # ── KENSEI CUSTOM: config_set tool (agent can switch modes via RPC bridge) ──
+        elif function_name == "config_set":
+            def _execute(next_args: dict) -> Any:
+                from tui_gateway.server import handle_request as _gw_handle
+                key = next_args.get("key", "")
+                value = next_args.get("value", "")
+                session_id = getattr(agent, "session_id", "") or ""
+                result = _gw_handle({
+                    "method": "config.set",
+                    "params": {"key": key, "value": value, "session_id": session_id},
+                })
+                return json.dumps(result or {}, ensure_ascii=False)
+            function_result, function_args = _run_agent_tool_execution_middleware(
+                agent,
+                function_name=function_name,
+                function_args=function_args,
+                effective_task_id=effective_task_id,
+                tool_call_id=getattr(tool_call, "id", "") or "",
+                execute=_execute,
+            )
+        # ── END KENSEI CUSTOM ──
         elif agent._context_engine_tool_names and function_name in agent._context_engine_tool_names:
             # Context engine tools (lcm_grep, lcm_describe, lcm_expand, etc.)
             spinner = None

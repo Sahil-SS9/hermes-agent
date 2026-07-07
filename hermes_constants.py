@@ -893,15 +893,29 @@ def is_container() -> bool:
                 return True
     except OSError:
         pass
-    # cgroup v2: /proc/1/cgroup is just "0::/" with no marker. The container
-    # runtime still shows up in the mount table (overlay rootfs, runtime mount
-    # paths), so scan mountinfo as a last resort.
+    # cgroup v2: /proc/1/cgroup is just "0::/" with no marker. A containerised
+    # process's OWN root filesystem is almost always an overlay mount managed
+    # by the runtime, so check the root ("/") mount entry specifically rather
+    # than scanning the whole table: a host that merely RUNS Docker/containerd
+    # (common on any dev/ops box) has plenty of "containerd"/"docker" mount
+    # entries for the *other* containers it manages (e.g.
+    # /var/lib/docker/rootfs/overlayfs/<id>), and a substring scan over the
+    # full file false-positives on those even though the host's own root is a
+    # normal ext4/xfs mount (see NousResearch/hermes-agent#58214).
     try:
         with open("/proc/self/mountinfo", "r", encoding="utf-8") as f:
-            mountinfo = f.read()
-            if any(marker in mountinfo for marker in ("kubepods", "containerd", "crio")):
-                _container_detected = True
-                return True
+            for line in f:
+                fields = line.split(" - ", 1)
+                if len(fields) != 2:
+                    continue
+                left = fields[0].split()
+                if len(left) < 5 or left[4] != "/":
+                    continue
+                fs_type = fields[1].split()[0] if fields[1].split() else ""
+                if fs_type in ("overlay", "overlayfs"):
+                    _container_detected = True
+                    return True
+                break  # root mount found and it isn't an overlay — done
     except OSError:
         pass
     _container_detected = False
