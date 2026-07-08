@@ -10,11 +10,17 @@ RUNNER="/home/kensei/.hermes/scripts/gitnexus-reindex-runner.sh"
 LOG_DIR="/home/kensei/.hermes/logs/gitnexus"
 mkdir -p "$LOG_DIR"
 
-# Get current HEAD (full SHA for comparison)
+# Get current HEAD (full SHA)
 HEAD_COMMIT=$(cd "$REPO" && git rev-parse HEAD)
 
-# Check if index is stale
-INDEXED_COMMIT=$("$GITNEXUS" status --json 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('lastCommit',''))" 2>/dev/null || echo "unknown")
+# Check if index is stale — read from registry.json (has full SHA)
+INDEXED_COMMIT=$(python3 -c "
+import json
+d = json.load(open('/home/kensei/.gitnexus/registry.json'))
+for r in d:
+    if r['name'] == 'KenseiAgent':
+        print(r.get('lastCommit', ''))
+" 2>/dev/null || echo "unknown")
 
 if [ "$HEAD_COMMIT" == "$INDEXED_COMMIT" ]; then
     # Index is current — silent
@@ -23,7 +29,7 @@ fi
 
 # Check if full rebuild needed (previous run crashed)
 NEEDS_FULL=false
-if "$GITNEXUS" status --json 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); exit(0 if d.get('incrementalInProgress') else 1)" 2>/dev/null; then
+if "$GITNEXUS" status 2>/dev/null | grep -q "incrementalInProgress"; then
     NEEDS_FULL=true
 fi
 

@@ -19,7 +19,7 @@ from typing import Optional
 logger = logging.getLogger("blog_approval")
 
 TRACKER_PATH = Path(__file__).resolve().parent.parent / "blog_topics" / "pending_approvals.jsonl"
-PREVIEWS_DIR = Path(__file__).resolve().parent.parent / "previews"
+PREVIEWS_DIR = Path.home() / ".hermes" / "reports" / "blog-previews"
 APPROVAL_CHANNEL = "#blog-management"
 
 # ── State management ──────────────────────────────────────────────

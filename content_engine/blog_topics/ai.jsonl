@@ -51,3 +51,7 @@
 {"topic_id": "manual-7636", "title_hint": "New Concept", "tags": [], "priority": 10}
 {"topic_id": "manual-2056", "title_hint": "New Concept", "tags": [], "priority": 10}
 {"topic_id": "research-2606.31612", "title_hint": "Active state memory for AI agents: combining Sibyl-Memory with ATMem for deterministic state awareness", "tags": ["research-paper", "paper-synthesis", "agent-memory", "state-tracking"], "priority": 6, "curated": true, "source": "paper-synthesis", "source_url": "https://arxiv.org/abs/2606.31612"}
+{"topic_id": "manual-1107", "title_hint": "New Concept", "tags": [], "priority": 10}
+{"topic_id": "manual-1692", "title_hint": "New Concept", "tags": [], "priority": 10}
+{"topic_id": "manual-9303", "title_hint": "New Concept", "tags": [], "priority": 10}
+{"topic_id": "manual-4780", "title_hint": "New Concept", "tags": [], "priority": 10}
