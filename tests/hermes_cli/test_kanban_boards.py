@@ -557,3 +557,92 @@ class TestCLI:
         res = _cli(["boards", "list", "--json"], env_extra=env)
         slugs = [b["slug"] for b in json.loads(res.stdout)]
         assert "rmme" not in slugs
+
+
+class TestCrossBoardTaskCommands:
+    """Task-id commands must find a task even when the active-board pointer
+    is stale — regression coverage for the same bug class fixed in
+    hermes_cli.feature's sign-off/reject/advance/status (connect_for_task).
+    """
+
+    def _make_stale_pointer_task(self, tmp_path, title="cross-board task"):
+        """Create board 'elsewhere', a task on it, then leave the active
+        pointer on 'default' — the exact stale-pointer shape that broke
+        `hermes kanban archive` in production."""
+        env = {"HERMES_HOME": str(tmp_path)}
+        _cli(["boards", "create", "elsewhere"], env_extra=env)
+        r = _cli(
+            ["--board", "elsewhere", "create", title, "--assignee", "dev", "--json"],
+            env_extra=env,
+        )
+        assert r.returncode == 0, r.stderr
+        tid = json.loads(r.stdout)["id"]
+        # Active pointer stays on 'default' — no --board passed from here on.
+        return env, tid
+
+    def test_show_finds_task_on_other_board(self, tmp_path):
+        env, tid = self._make_stale_pointer_task(tmp_path)
+        r = _cli(["show", tid, "--json"], env_extra=env)
+        assert r.returncode == 0, r.stderr
+        assert json.loads(r.stdout)["task"]["id"] == tid
+
+    def test_archive_finds_task_on_other_board(self, tmp_path):
+        env, tid = self._make_stale_pointer_task(tmp_path)
+        r = _cli(["archive", tid], env_extra=env)
+        assert r.returncode == 0, r.stderr
+        assert f"Archived {tid}" in r.stdout
+
+    def test_comment_finds_task_on_other_board(self, tmp_path):
+        env, tid = self._make_stale_pointer_task(tmp_path)
+        r = _cli(["comment", tid, "hello from default"], env_extra=env)
+        assert r.returncode == 0, r.stderr
+        show = _cli(["show", tid, "--json"], env_extra=env)
+        comments = json.loads(show.stdout)["comments"]
+        assert any("hello from default" in c["body"] for c in comments)
+
+    def test_block_finds_task_on_other_board(self, tmp_path):
+        env, tid = self._make_stale_pointer_task(tmp_path)
+        r = _cli(["block", tid, "waiting on review"], env_extra=env)
+        assert r.returncode == 0, r.stderr
+
+    def test_assign_finds_task_on_other_board(self, tmp_path):
+        env, tid = self._make_stale_pointer_task(tmp_path)
+        r = _cli(["assign", tid, "octacon"], env_extra=env)
+        assert r.returncode == 0, r.stderr
+        assert "Assigned" in r.stdout
+
+    def test_complete_finds_task_on_other_board(self, tmp_path):
+        env, tid = self._make_stale_pointer_task(tmp_path)
+        r = _cli(["complete", tid], env_extra=env)
+        assert r.returncode == 0, r.stderr
+        assert f"Completed {tid}" in r.stdout
+
+    def test_claim_finds_task_on_other_board(self, tmp_path):
+        env, tid = self._make_stale_pointer_task(tmp_path)
+        r = _cli(["claim", tid], env_extra=env)
+        assert r.returncode == 0, r.stderr
+        assert f"Claimed {tid}" in r.stdout
+
+    def test_edit_finds_task_on_other_board(self, tmp_path):
+        env, tid = self._make_stale_pointer_task(tmp_path)
+        assert _cli(["complete", tid], env_extra=env).returncode == 0
+        r = _cli(["edit", tid, "--result", "backfilled"], env_extra=env)
+        assert r.returncode == 0, r.stderr
+        assert f"Edited {tid}" in r.stdout
+
+    def test_schedule_finds_task_on_other_board(self, tmp_path):
+        env, tid = self._make_stale_pointer_task(tmp_path)
+        r = _cli(["schedule", tid, "waiting on time"], env_extra=env)
+        assert r.returncode == 0, r.stderr
+        assert f"Scheduled {tid}" in r.stdout
+
+    def test_archive_reports_missing_task_cleanly(self, tmp_path):
+        """No board anywhere has this id — must still fail cleanly, not crash.
+
+        main.py's dispatcher doesn't propagate return codes today (see
+        test_board_flag_rejects_unknown above), so assert on the
+        user-visible stderr signal rather than the exit code.
+        """
+        env = {"HERMES_HOME": str(tmp_path)}
+        r = _cli(["archive", "t_doesnotexist"], env_extra=env)
+        assert "cannot archive" in r.stderr

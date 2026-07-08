@@ -295,6 +295,54 @@ class TestCLICommands:
         stage = "spec"
         assert stage not in HUMAN_GATE_STAGES
 
+    def test_signoff_finds_task_on_non_active_board(self, kanban_home):
+        """sign-off must find a task even when the active-board pointer is stale.
+
+        Regression test: cmd_feature_signoff/reject/advance/status all
+        resolved their DB connection via get_current_board() with no
+        fallback, so a task created on one board while <root>/kanban/current
+        pointed at a different board was invisible to the CLI ("Task not
+        found") even though it genuinely existed.
+        """
+        import argparse
+        import datetime as _dt
+
+        from hermes_cli import kanban_db as kb
+        from hermes_cli.feature import cmd_feature_signoff
+
+        kb.create_board("research")
+        with kb.connect(board="research") as conn:
+            ts = _dt.datetime.now(_dt.timezone.utc).isoformat()
+            conn.execute(
+                "INSERT INTO tasks (id, title, status, pipeline_stage, tier, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                ("t_stale_board", "Cross-board task", "sign_off", "sign_off", "full", ts),
+            )
+            conn.commit()
+
+        # Active-board pointer left on a *different* board, simulating a
+        # stale <root>/kanban/current from an unrelated session.
+        kb.set_current_board("default")
+
+        rc = cmd_feature_signoff(argparse.Namespace(task_id="t_stale_board", note="approved"))
+        assert rc == 0
+
+        with kb.connect(board="research") as conn:
+            row = conn.execute(
+                "SELECT 1 FROM task_events WHERE task_id = ? AND kind = 'human_approved'",
+                ("t_stale_board",),
+            ).fetchone()
+        assert row is not None
+
+    def test_signoff_task_not_found_on_any_board(self, kanban_home):
+        """sign-off still reports a clean error when the task truly doesn't exist anywhere."""
+        import argparse
+
+        from hermes_cli.feature import cmd_feature_signoff
+
+        rc = cmd_feature_signoff(argparse.Namespace(task_id="t_does_not_exist", note=None))
+        assert rc == 1
+
 
 # ---------------------------------------------------------------------------
 # Integration — human gate pipeline walk

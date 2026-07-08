@@ -21,6 +21,7 @@ from typing import Optional
 
 from hermes_cli.kanban_db import (
     connect,
+    connect_for_task,
     create_task,
     get_task,
     promote_task,
@@ -128,8 +129,7 @@ def cmd_feature_status(args: argparse.Namespace) -> int:
     if task_id:
         # Show status for a specific task
         try:
-            with connect() as conn:
-                task = get_task(conn, task_id)
+            with connect_for_task(task_id) as (conn, task):
                 if not task:
                     print(f"Task not found: {task_id}", file=sys.stderr)
                     return 1
@@ -183,8 +183,7 @@ def cmd_feature_advance(args: argparse.Namespace) -> int:
     force = args.force
 
     try:
-        with connect() as conn:
-            task = get_task(conn, task_id)
+        with connect_for_task(task_id) as (conn, task):
             if not task:
                 print(f"Task not found: {task_id}", file=sys.stderr)
                 return 1
@@ -364,8 +363,7 @@ def cmd_feature_signoff(args: argparse.Namespace) -> int:
     note = args.note
 
     try:
-        with connect() as conn:
-            task = get_task(conn, task_id)
+        with connect_for_task(task_id) as (conn, task):
             if not task:
                 print(f"Task not found: {task_id}", file=sys.stderr)
                 return 1
@@ -395,8 +393,7 @@ def cmd_feature_reject(args: argparse.Namespace) -> int:
     reason = args.reason
 
     try:
-        with connect() as conn:
-            task = get_task(conn, task_id)
+        with connect_for_task(task_id) as (conn, task):
             if not task:
                 print(f"Task not found: {task_id}", file=sys.stderr)
                 return 1

@@ -1624,8 +1624,7 @@ def _cmd_show(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
-    with kb.connect_closing() as conn:
-        task = kb.get_task(conn, args.task_id)
+    with kb.connect_for_task(args.task_id) as (conn, task):
         if not task:
             print(f"no such task: {args.task_id}", file=sys.stderr)
             return 1
@@ -1789,7 +1788,10 @@ def _cmd_show(args: argparse.Namespace) -> int:
 
 def _cmd_assign(args: argparse.Namespace) -> int:
     profile = None if args.profile.lower() in {"none", "-", "null"} else args.profile
-    with kb.connect_closing() as conn:
+    with kb.connect_for_task(args.task_id) as (conn, task):
+        if not task:
+            print(f"no such task: {args.task_id}", file=sys.stderr)
+            return 1
         ok = kb.assign_task(conn, args.task_id, profile)
     if not ok:
         print(f"no such task: {args.task_id}", file=sys.stderr)
@@ -1799,8 +1801,8 @@ def _cmd_assign(args: argparse.Namespace) -> int:
 
 
 def _cmd_reclaim(args: argparse.Namespace) -> int:
-    with kb.connect_closing() as conn:
-        ok = kb.reclaim_task(
+    with kb.connect_for_task(args.task_id) as (conn, task):
+        ok = task is not None and kb.reclaim_task(
             conn, args.task_id,
             reason=getattr(args, "reason", None),
         )
@@ -1816,8 +1818,8 @@ def _cmd_reclaim(args: argparse.Namespace) -> int:
 
 def _cmd_reassign(args: argparse.Namespace) -> int:
     profile = None if args.profile.lower() in {"none", "-", "null"} else args.profile
-    with kb.connect_closing() as conn:
-        ok = kb.reassign_task(
+    with kb.connect_for_task(args.task_id) as (conn, task):
+        ok = task is not None and kb.reassign_task(
             conn, args.task_id, profile,
             reclaim_first=bool(getattr(args, "reclaim", False)),
             reason=getattr(args, "reason", None),
@@ -1969,14 +1971,22 @@ def _cmd_diagnostics(args: argparse.Namespace) -> int:
 
 
 def _cmd_link(args: argparse.Namespace) -> int:
-    with kb.connect_closing() as conn:
+    # task_links is a same-board join table, so resolve the connection from
+    # whichever board parent_id actually lives on (see connect_for_task).
+    with kb.connect_for_task(args.parent_id) as (conn, parent):
+        if not parent:
+            print(f"no such task: {args.parent_id}", file=sys.stderr)
+            return 1
         kb.link_tasks(conn, args.parent_id, args.child_id)
     print(f"Linked {args.parent_id} -> {args.child_id}")
     return 0
 
 
 def _cmd_unlink(args: argparse.Namespace) -> int:
-    with kb.connect_closing() as conn:
+    with kb.connect_for_task(args.parent_id) as (conn, parent):
+        if not parent:
+            print(f"No such link: {args.parent_id} -> {args.child_id}", file=sys.stderr)
+            return 1
         ok = kb.unlink_tasks(conn, args.parent_id, args.child_id)
     if not ok:
         print(f"No such link: {args.parent_id} -> {args.child_id}", file=sys.stderr)
@@ -1986,14 +1996,12 @@ def _cmd_unlink(args: argparse.Namespace) -> int:
 
 
 def _cmd_claim(args: argparse.Namespace) -> int:
-    with kb.connect_closing() as conn:
+    with kb.connect_for_task(args.task_id) as (conn, existing):
+        if existing is None:
+            print(f"no such task: {args.task_id}", file=sys.stderr)
+            return 1
         task = kb.claim_task(conn, args.task_id, ttl_seconds=args.ttl)
         if task is None:
-            # Report why
-            existing = kb.get_task(conn, args.task_id)
-            if existing is None:
-                print(f"no such task: {args.task_id}", file=sys.stderr)
-                return 1
             print(
                 f"cannot claim {args.task_id}: status={existing.status} "
                 f"lock={existing.claim_lock or '(none)'}",
@@ -2017,7 +2025,10 @@ def _cmd_comment(args: argparse.Namespace) -> int:
             suffix = f"\n\n[trimmed to {args.max_len} chars by --max-len]"
             body = body[: max(0, args.max_len - len(suffix))].rstrip() + suffix
     author = args.author or _profile_author()
-    with kb.connect_closing() as conn:
+    with kb.connect_for_task(args.task_id) as (conn, task):
+        if not task:
+            print(f"no such task: {args.task_id}", file=sys.stderr)
+            return 1
         kb.add_comment(conn, args.task_id, author, body)
     print(f"Comment added to {args.task_id}")
     return 0
@@ -2091,9 +2102,12 @@ def _cmd_complete(args: argparse.Namespace) -> int:
             print(f"kanban: --metadata: {exc}", file=sys.stderr)
             return 2
     failed: list[str] = []
-    with kb.connect_closing() as conn:
-        for tid in ids:
-            if not kb.complete_task(
+    for tid in ids:
+        # Each id is resolved to its own board independently — a batch
+        # can't share one connection if the ids aren't all on the active
+        # board (see connect_for_task).
+        with kb.connect_for_task(tid) as (conn, task):
+            if not task or not kb.complete_task(
                 conn, tid,
                 result=args.result,
                 summary=summary,
@@ -2118,8 +2132,8 @@ def _cmd_edit(args: argparse.Namespace) -> int:
         except (ValueError, json.JSONDecodeError) as exc:
             print(f"kanban: --metadata: {exc}", file=sys.stderr)
             return 2
-    with kb.connect_closing() as conn:
-        if not kb.edit_completed_task_result(
+    with kb.connect_for_task(args.task_id) as (conn, task):
+        if not task or not kb.edit_completed_task_result(
             conn,
             args.task_id,
             result=args.result,
@@ -2141,8 +2155,12 @@ def _cmd_block(args: argparse.Namespace) -> int:
     author = _profile_author()
     ids = [args.task_id] + list(getattr(args, "ids", None) or [])
     failed: list[str] = []
-    with kb.connect_closing() as conn:
-        for tid in ids:
+    for tid in ids:
+        with kb.connect_for_task(tid) as (conn, task):
+            if not task:
+                failed.append(tid)
+                print(f"cannot block {tid}", file=sys.stderr)
+                continue
             if reason:
                 kb.add_comment(conn, tid, author, f"BLOCKED: {reason}")
             if not kb.block_task(
@@ -2177,8 +2195,12 @@ def _cmd_schedule(args: argparse.Namespace) -> int:
     author = _profile_author()
     ids = [args.task_id] + list(getattr(args, "ids", None) or [])
     failed: list[str] = []
-    with kb.connect_closing() as conn:
-        for tid in ids:
+    for tid in ids:
+        with kb.connect_for_task(tid) as (conn, task):
+            if not task:
+                failed.append(tid)
+                print(f"cannot schedule {tid}", file=sys.stderr)
+                continue
             if reason:
                 kb.add_comment(conn, tid, author, f"SCHEDULED: {reason}")
             if not kb.schedule_task(
@@ -2227,8 +2249,12 @@ def _cmd_unblock(args: argparse.Namespace) -> int:
         reason = reason.strip() or None
     author = _profile_author() if reason else None
     failed: list[str] = []
-    with kb.connect_closing() as conn:
-        for tid in ids:
+    for tid in ids:
+        with kb.connect_for_task(tid) as (conn, task):
+            if not task:
+                failed.append(tid)
+                print(f"cannot unblock {tid} (not blocked/scheduled?)", file=sys.stderr)
+                continue
             if reason:
                 kb.add_comment(conn, tid, author, f"UNBLOCK: {reason}")
             if not kb.unblock_task(conn, tid):
@@ -2251,8 +2277,8 @@ def _cmd_escalate(args: argparse.Namespace) -> int:
         reason = reason.strip() or None
     author = _profile_author()
     failed: list[str] = []
-    with kb.connect_closing() as conn:
-        for tid in ids:
+    for tid in ids:
+        with kb.connect_for_task(tid) as (conn, task):
             try:
                 if reason and not clearing:
                     kb.add_comment(conn, tid, author, f"ESCALATE: {reason}")
@@ -2261,10 +2287,10 @@ def _cmd_escalate(args: argparse.Namespace) -> int:
                 failed.append(tid)
                 print(f"cannot escalate {tid}: {e}", file=sys.stderr)
                 continue
-            if clearing:
-                print(f"Cleared escalation on {tid}")
-            else:
-                print(f"Escalated {tid} -> {target}" + (f": {reason}" if reason else ""))
+        if clearing:
+            print(f"Cleared escalation on {tid}")
+        else:
+            print(f"Escalated {tid} -> {target}" + (f": {reason}" if reason else ""))
     return 0 if not failed else 1
 
 
@@ -2329,17 +2355,18 @@ def _cmd_archive(args: argparse.Namespace) -> int:
         print("at least one task_id is required", file=sys.stderr)
         return 1
     failed: list[str] = []
-    with kb.connect_closing() as conn:
-        if purge_ids:
-            for tid in purge_ids:
-                if not kb.delete_archived_task(conn, tid):
+    if purge_ids:
+        for tid in purge_ids:
+            with kb.connect_for_task(tid) as (conn, task):
+                if not task or not kb.delete_archived_task(conn, tid):
                     failed.append(tid)
                     print(f"cannot delete {tid} (must already be archived)", file=sys.stderr)
                 else:
                     print(f"Deleted {tid}")
-            return 0 if not failed else 1
-        for tid in ids:
-            if not kb.archive_task(conn, tid):
+        return 0 if not failed else 1
+    for tid in ids:
+        with kb.connect_for_task(tid) as (conn, task):
+            if not task or not kb.archive_task(conn, tid):
                 failed.append(tid)
                 print(f"cannot archive {tid}", file=sys.stderr)
             else:

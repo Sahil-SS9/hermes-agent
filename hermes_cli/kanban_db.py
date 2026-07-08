@@ -3033,6 +3033,46 @@ def get_task(conn: sqlite3.Connection, task_id: str) -> Optional[Task]:
     return Task.from_row(row) if row else None
 
 
+def _find_task_board(task_id: str) -> Optional[str]:
+    """Return the slug of the board ``task_id`` lives on, active board first."""
+    active = get_current_board()
+    with connect_closing(board=active) as conn:
+        if get_task(conn, task_id) is not None:
+            return active
+    for meta in list_boards():
+        slug = meta["slug"]
+        if slug == active:
+            continue
+        with connect_closing(board=slug) as conn:
+            if get_task(conn, task_id) is not None:
+                return slug
+    return None
+
+
+@contextlib.contextmanager
+def connect_for_task(task_id: str):
+    """Open a connection scoped to whichever board ``task_id`` actually lives on.
+
+    Task IDs are drawn independently per board (see ``_new_task_id`` —
+    ``secrets.token_hex(4)`` with no cross-board collision check, and
+    ``test_tasks_do_not_leak_across_boards`` enshrines per-board isolation
+    as intentional), so a caller that only ever queries the "active" board
+    (``get_current_board()``) can miss a task that lives elsewhere — e.g.
+    after ``<root>/kanban/current`` is left pointing at a board switched to
+    in an unrelated session. ``hermes feature sign-off/reject/advance``
+    hit exactly this: task genuinely exists, active-board pointer is
+    stale, lookup returns "Task not found".
+
+    Tries the active board first (cheap, the common case), then falls
+    back to scanning ``list_boards()``. Yields ``(conn, task)`` — ``task``
+    is ``None``, and ``conn`` is on the active board, if not found on any
+    board. Connection is always closed on exit.
+    """
+    board = _find_task_board(task_id) or get_current_board()
+    with connect_closing(board=board) as conn:
+        yield conn, get_task(conn, task_id)
+
+
 # Canonical sort-order mappings for ``hermes kanban list --sort``.
 # Each value is a raw SQL fragment appended after ``ORDER BY``.
 VALID_SORT_ORDERS: dict[str, str] = {
@@ -9710,6 +9750,15 @@ def _dispatch_once_locked(
                         conn, row["id"], signal_type="audit_conditional",
                         followup_id=new_id,
                     )
+            elif stage == "decompose" and not dry_run:
+                child_ids = _create_decompose_child_tasks(
+                    conn, row["id"], artifact_dir,
+                )
+                if child_ids:
+                    _append_event(
+                        conn, row["id"], "decompose_children_created",
+                        {"child_ids": child_ids},
+                    )
             next_stage = get_next_stage(stage, mode)
             if not dry_run:
                 with write_txn(conn):
@@ -10323,6 +10372,91 @@ def _create_audit_followup_task(
             "Failed to create audit follow-up task for %s: %s", parent_id, exc
         )
         return None
+
+
+def _parse_decompose_children(artifact_dir: str) -> list[str]:
+    """Extract child task titles from decompose-output.md's Child Tasks section.
+
+    The artifact is prose, not a structured schema (validate_decompose_artifact
+    only checks marker presence) — this pulls '- '/'* ' bullet lines between
+    the Child Tasks heading and the next section, tolerating the same
+    heading variants the gate accepts.
+    """
+    path = os.path.join(artifact_dir, "decompose-output.md")
+    try:
+        with open(path) as f:
+            content = f.read()
+    except OSError:
+        return []
+    in_section = False
+    titles: list[str] = []
+    for line in content.splitlines():
+        stripped = line.strip()
+        lowered = stripped.lower()
+        if not in_section:
+            if "child tasks" in lowered:
+                in_section = True
+            continue
+        if lowered.startswith("#") or any(
+            marker in lowered for marker in
+            ("acceptance criteria", "test plan", "test strategy", "order:")
+        ):
+            break
+        if stripped.startswith(("-", "*")) and not stripped.startswith("**"):
+            title = stripped.lstrip("-*").strip()
+            if title.startswith("[") and "]" in title:
+                title = title.split("]", 1)[1].strip()
+            if title:
+                titles.append(title)
+    return titles
+
+
+def _create_decompose_child_tasks(
+    conn: sqlite3.Connection, parent_id: str, artifact_dir: str,
+) -> list[str]:
+    """Create real child kanban tasks from the decompose stage's artifact.
+
+    validate_decompose_artifact only checked that decompose-output.md
+    contained a '## Child Tasks' section — it never created task rows, so
+    the pipeline reported decompose as passed with zero child tasks
+    actually existing on the board. Mirrors _create_audit_followup_task's
+    pattern: runs inline in the gate-pass branch of dispatch_once, links
+    children via task_links (through create_task's ``parents=``).
+
+    idempotency_key makes re-running this for the same parent (e.g. a
+    dispatcher retry before the stage transition commits) a no-op instead
+    of spawning duplicates — see #kensei-memory-stack-duplicate-children.
+    """
+    try:
+        parent = conn.execute(
+            "SELECT id, title, tier FROM tasks WHERE id = ?", (parent_id,)
+        ).fetchone()
+        if not parent:
+            return []
+        titles = _parse_decompose_children(artifact_dir)
+        new_ids = []
+        for i, title in enumerate(titles):
+            new_id = create_task(
+                conn,
+                title=title,
+                body=(
+                    f"## Problem\nChild task decomposed from {parent_id} "
+                    f"({parent['title']}).\n\n"
+                    f"See full decomposition in decompose-output.md under {parent_id}."
+                ),
+                tier=parent["tier"],
+                board=None,
+                parents=[parent_id],
+                idempotency_key=f"decompose:{parent_id}:{i}",
+            )
+            new_ids.append(new_id)
+        return new_ids
+    except Exception as exc:
+        import logging
+        logging.getLogger(__name__).exception(
+            "Failed to create decompose child tasks for %s: %s", parent_id, exc
+        )
+        return []
 
 
 def _record_bypass_record(

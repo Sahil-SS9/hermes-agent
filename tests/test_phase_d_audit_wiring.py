@@ -389,6 +389,51 @@ class TestAuditFollowupTask:
         assert result is None
 
 
+class TestDecomposeChildTasks:
+    """decompose stage creates real child kanban rows, not just a text marker."""
+
+    @pytest.mark.parametrize("heading", [
+        "## Child Tasks", "# Child Tasks", "Child Tasks:", "**Child Tasks**",
+    ])
+    def test_parser_accepts_all_gate_heading_variants(self, tmp_path, heading):
+        from hermes_cli import kanban_db as kb
+        artifact_dir = tmp_path / "artifact"
+        artifact_dir.mkdir()
+        (artifact_dir / "decompose-output.md").write_text(
+            f"{heading}\n- WS-1: build the thing\n- WS-2: test the thing\n\n"
+            "## Acceptance Criteria\n- not a child\n"
+        )
+        titles = kb._parse_decompose_children(str(artifact_dir))
+        assert titles == ["WS-1: build the thing", "WS-2: test the thing"]
+
+    def test_parser_returns_empty_on_missing_artifact(self, tmp_path):
+        from hermes_cli import kanban_db as kb
+        assert kb._parse_decompose_children(str(tmp_path / "nope")) == []
+
+    def test_create_children_returns_empty_on_missing_parent(self, conn, tmp_path):
+        from hermes_cli import kanban_db as kb
+        result = kb._create_decompose_child_tasks(conn, "nonexistent", str(tmp_path))
+        assert result == []
+
+    def test_create_children_links_to_parent(self, conn, kanban_home):
+        from hermes_cli import kanban_db as kb
+        parent_id = kb.create_task(
+            conn, title="Parent feature", assignee="octacon", tier="full",
+            body="## Problem\nx\n## Success Criteria\ny", triage=True,
+        )
+        artifact_dir = kanban_home / "feature-artifacts" / parent_id
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        (artifact_dir / "decompose-output.md").write_text(
+            "## Child Tasks\n- WS-1: a\n- WS-2: b\n\n## Acceptance Criteria\n- x\n"
+        )
+        new_ids = kb._create_decompose_child_tasks(conn, parent_id, str(artifact_dir))
+        assert len(new_ids) == 2
+        assert set(new_ids) == set(kb.child_ids(conn, parent_id))
+        for cid in new_ids:
+            child = kb.get_task(conn, cid)
+            assert child.tier == "full"  # inherited from parent
+
+
 # ---------------------------------------------------------------------------
 # D10: Dispatcher handles new stages
 # ---------------------------------------------------------------------------
@@ -447,6 +492,39 @@ class TestDispatcherNewStages:
         # Task should now be in execute
         task = kb.get_task(conn, tid)
         assert task.pipeline_stage == "execute"
+        # Real child task rows must exist, linked to the parent — the gate
+        # only checks for a '## Child Tasks' marker in the artifact text,
+        # it doesn't create rows itself; dispatch_once does that separately.
+        children = [kb.get_task(conn, cid) for cid in kb.child_ids(conn, tid)]
+        assert [c.title for c in children] == ["WS-1: x"]
+        assert children[0].tier == task.tier  # inherited from parent
+
+    def test_decompose_children_not_duplicated_on_redispatch(self, conn, kanban_home):
+        """A second dispatch_once tick before the stage moves on must not
+        spawn duplicate child tasks (the near-duplicate-tasks incident this
+        guards against)."""
+        from hermes_cli import kanban_db as kb
+        tid = kb.create_task(
+            conn, title="decompose-redispatch",
+            assignee="octacon",
+            body="## Problem\nx\n## Success Criteria\ny", triage=True,
+        )
+        conn.execute(
+            "UPDATE tasks SET status = ?, pipeline_stage = ?, pipeline_mode = ? WHERE id = ?",
+            ("decompose", "decompose", "full", tid),
+        )
+        artifact_dir = kanban_home / "feature-artifacts" / tid
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        (artifact_dir / "decompose-output.md").write_text(
+            "# Decomposition\n\n"
+            "## Child Tasks\n- WS-1: x\n- WS-2: y\n\n"
+            "## Acceptance Criteria\n- WS-1: AC1\n\n"
+            "## Test Plan\n- Unit: WS-1 tests\n"
+        )
+        new_ids_1 = kb._create_decompose_child_tasks(conn, tid, str(artifact_dir))
+        new_ids_2 = kb._create_decompose_child_tasks(conn, tid, str(artifact_dir))
+        assert new_ids_1 == new_ids_2
+        assert len(kb.child_ids(conn, tid)) == 2
 
     def test_passthrough_stage_execute_auto_advances(self, conn, kanban_home):
         from hermes_cli import kanban_db as kb
