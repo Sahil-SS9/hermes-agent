@@ -44,7 +44,7 @@ def get_open_issues(repo):
     result = subprocess.run(
         ["gh", "issue", "list", "--repo", repo, "--state", "open",
          "--json", "number,title,labels,createdAt,url,body",
-         "--limit", "30"],
+         "--limit", "50"],
         capture_output=True, text=True, timeout=30
     )
     if result.returncode != 0:
@@ -55,12 +55,18 @@ def get_open_issues(repo):
 def classify_issue(issue):
     labels = [l["name"] for l in issue.get("labels", [])]
     body = issue.get("body", "").lower()
+    title = issue.get("title", "").lower()
     if "type/feature" in labels and len(body) < 100:
         return None
     if "type/bug" in labels:
         return "bug"
     if "type/security" in labels:
         return "security"
+    # Detect [Bug] in title even without type/bug label — many upstream issues
+    # use the [Bug] prefix but don't have the type/bug label applied yet.
+    # This was the root cause of 304 bug issues being silently skipped.
+    if title.startswith("[bug]") or "[bug]:" in title:
+        return "bug"
     if "needs-repro" in labels:
         if "steps to reproduce" in body or "reproduction" in body:
             return "bug"
@@ -430,7 +436,10 @@ def main():
     html_parts = []
 
     # Write fixable bugs to pipeline queue
-    fixable = [iss for iss in new_issues if iss["classification"] == "bug" and iss["priority"] in ("P1", "P2")]
+    # Accept P1, P2, and P3 bugs — most upstream issues default to P3 when
+    # no priority label is applied. Filtering P3 out caused the pipeline to
+    # starve (0 pending items for 4+ days).
+    fixable = [iss for iss in new_issues if iss["classification"] in ("bug", "security")]
     if fixable:
         queue_state = {"updated_at": now, "pending": []}
         if os.path.exists(FIX_QUEUE_FILE):
