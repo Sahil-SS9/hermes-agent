@@ -244,12 +244,18 @@ def illustrate(
     body_md = draft.get("body_md", "")
     headings = _extract_h2_headings(body_md)[:max_sections] if max_sections > 0 else []
 
-    # One art brief for the whole post (LLM), with deterministic fallback.
+    # One art brief for the whole post (LLM). HARD FAIL if unavailable.
+    # The fallback_brief produces generic, article-disconnected images with no
+    # palette, motif, or per-section art direction. Silently using it shipped
+    # dozens of terrible images to production. Now we stop and report instead.
     recent = _load_recent_styles()
     brief = build_art_brief(draft, headings, recent_styles=recent)
     if brief is None:
-        print("[blog_illustrator] art brief LLM unavailable — using fallback brief")
-        brief = fallback_brief(draft, headings, recent_styles=recent)
+        print("[blog_illustrator] ⚠️  ART DIRECTOR FAILED — refusing to generate images.")
+        print("[blog_illustrator] The LLM art brief is mandatory. Fallback brief produces")
+        print("[blog_illustrator] generic images with no article-specific art direction.")
+        print(f"[blog_illustrator] SKIPPED: {draft.get('title', '?')}")
+        return result
     print(f"[blog_illustrator] art brief: style={brief['style']} "
           f"palette={brief.get('palette','')[:60]!r} motif={brief.get('motif','')[:60]!r}")
     _record_style(brief["style"])

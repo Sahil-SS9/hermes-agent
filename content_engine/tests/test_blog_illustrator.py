@@ -155,8 +155,13 @@ def test_default_max_sections_from_config(monkeypatch, tmp_path):
     assert len(images["section_paths"]) <= 2
 
 
-def test_falls_back_to_deterministic_brief(monkeypatch, tmp_path):
-    """When the LLM brief returns None, the fallback brief still drives images."""
+def test_hard_fails_when_art_director_unavailable(monkeypatch, tmp_path):
+    """When the LLM brief returns None, illustration hard-stops (no fallback).
+
+    The fallback_brief was removed because it produced generic, article-
+    disconnected images with no palette/motif/per-section art direction.
+    The illustrator must now refuse to generate instead of shipping bad images.
+    """
     monkeypatch.setattr(bi, "build_art_brief",
                         lambda draft, headings, recent_styles=None, llm=None: None)
     prompts = []
@@ -167,8 +172,8 @@ def test_falls_back_to_deterministic_brief(monkeypatch, tmp_path):
     monkeypatch.setattr(bi, "_generate_codex_image", fake_generate)
     monkeypatch.setattr(bi, "_generate_webp", lambda p: p)
     images = bi.illustrate(_DRAFT, out_dir=tmp_path, max_sections=1)
-    assert images["hero_path"] is not None
-    assert len(prompts) == 2  # hero + 1 section
+    assert images["hero_path"] is None
+    assert len(prompts) == 0  # no images generated
 
 
 def test_records_style_to_rotation_state(monkeypatch, tmp_path):

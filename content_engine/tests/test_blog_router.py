@@ -129,8 +129,11 @@ def test_gather_candidates_builder_uses_activity_collector(monkeypatch):
     ids = {c["topic_id"] for c in cands}
     # Framework seeds present.
     assert any(i.startswith("fw-") for i in ids), "Framework seeds should be present"
-    # Builder's own backlog queue (builder.jsonl) is now wired in.
-    assert any(i.startswith("builder-") for i in ids), "Builder queue should be present"
+    # Builder's own backlog queue (builder.jsonl) is now wired in. Do not rely
+    # on a topic-id prefix: curated builder backlog items can come from research
+    # synthesis, repo activity, or manual queue sources.
+    builder_queue_ids = {c["topic_id"] for c in br._read_manual_queue("builder")}
+    assert ids & builder_queue_ids, "Builder queue should be present"
     # The activity signal is still present.
     assert "gh1" in ids, "Activity signal should still be present"
 

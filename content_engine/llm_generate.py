@@ -397,10 +397,15 @@ _FREE_FALLBACK_CHAIN = [
     {"base": "https://ollama.com/v1", "model": "gpt-oss:120b", "provider": "ollama"},
 ]
 
-# Long-form / factual tier (articles + blog): stronger Ollama-Cloud models.
+# Long-form / factual tier (articles + blog): stronger models with fallback.
+# Primary: ollama-cloud (glm-5.2/deepseek). Secondary: opencode-go.
+# Final fallback: Gemini's OpenAI-compatible endpoint. If all fail, callers
+# such as the art_director hard-stop rather than silently degrading.
 _LONGFORM_CHAIN = [
     {"base": "https://ollama.com/v1", "model": "glm-5.2", "provider": "ollama"},
     {"base": "https://ollama.com/v1", "model": "deepseek-v4-flash", "provider": "ollama"},
+    {"base": "https://opencode.ai/zen/go/v1", "model": "minimax-m3", "provider": "opencode"},
+    {"base": "https://generativelanguage.googleapis.com/v1beta/openai", "model": "gemini-2.5-flash", "provider": "gemini"},
 ]
 
 
@@ -418,6 +423,10 @@ def _key_for(provider: str) -> str:
         return os.getenv("OPENAI_API_KEY", "").strip()
     if provider == "ollama":
         return os.getenv("OLLAMA_API_KEY", "").strip()
+    if provider == "gemini":
+        return (os.getenv("GEMINI_API_KEY", "")
+                or os.getenv("GOOGLE_AI_API_KEY", "")
+                or os.getenv("GOOGLE_API_KEY", "")).strip()
     return _opencode_key()
 
 
@@ -438,7 +447,12 @@ def _llm_configs(longform: bool = False) -> list[dict]:
     base = os.getenv("CONTENT_LLM_BASE_URL", "").strip().rstrip("/")
     model = os.getenv("CONTENT_LLM_MODEL", "").strip()
     if base and model:
-        provider = "ollama" if "ollama.com" in base else ("openai" if "openai.com" in base else "opencode")
+        provider = (
+            "ollama" if "ollama.com" in base else
+            "openai" if "openai.com" in base else
+            "gemini" if "generativelanguage.googleapis.com" in base else
+            "opencode"
+        )
         configs.append({"base": base, "model": model, "key": _key_for(provider)})
         seen.add((base, model))
 

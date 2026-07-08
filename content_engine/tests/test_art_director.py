@@ -1,7 +1,5 @@
-"""Tests for blog.art_director — one art brief per article."""
+"""Tests for blog.art_director — one rich art brief per article."""
 import json
-
-import pytest
 
 import blog.art_director as ad
 
@@ -18,6 +16,9 @@ _HEADINGS = ["The mechanism"]
 def _good_brief_json():
     return json.dumps({
         "style": "ninth-observatory",
+        "layout": "architectural cross-section with labelled chambers",
+        "text_policy": "labels",
+        "text_elements": ["API", "LOCAL", "CROSSOVER"],
         "palette": "slate, brass, amber",
         "motif": "converging rails",
         "art_direction": "vast architectural space, one warm focal light.",
@@ -32,6 +33,9 @@ def test_build_art_brief_parses_valid_llm_output():
     brief = ad.build_art_brief(_DRAFT, _HEADINGS, llm=lambda s, u: _good_brief_json())
     assert brief is not None
     assert brief["style"] == "ninth-observatory"
+    assert brief["layout"]
+    assert brief["text_policy"] == "labels"
+    assert brief["text_elements"] == ["API", "LOCAL", "CROSSOVER"]
     assert brief["palette"]
     assert brief["hero_prompt"]
     assert brief["section_prompts"]["The mechanism"]
@@ -77,22 +81,30 @@ def test_full_article_in_user_prompt():
         captured["user"] = user
         return _good_brief_json()
     ad.build_art_brief(_DRAFT, _HEADINGS, llm=spy)
-    assert "Hardware amortises" in captured["user"]  # body, not just title
+    assert "Hardware amortises" in captured["user"]
     assert "The mechanism" in captured["user"]
 
 
-def test_compose_prompt_includes_shared_direction():
+def test_compose_prompt_includes_shared_direction_and_labels():
     brief = {
-        "style": "ninth-observatory", "palette": "slate, brass",
-        "motif": "rails", "art_direction": "vast hall.",
-        "hero_prompt": "x", "section_prompts": {},
+        "style": "ninth-observatory",
+        "layout": "architectural cross-section",
+        "text_policy": "labels",
+        "text_elements": ["API", "LOCAL"],
+        "palette": "slate, brass",
+        "motif": "rails",
+        "art_direction": "vast hall.",
+        "hero_prompt": "x",
+        "section_prompts": {},
     }
     p = ad.compose_prompt("two curves crossing", brief)
     assert "The Ninth Observatory" in p
     assert "slate, brass" in p
     assert "rails" in p
     assert "two curves crossing" in p
-    assert "No text" in p  # global rules appended
+    assert "Text is allowed" in p
+    assert "API" in p and "LOCAL" in p
+    assert "Creative Concept Direction" in p
 
 
 def test_fallback_brief_picks_unused_style():
@@ -105,10 +117,74 @@ def test_fallback_brief_picks_unused_style():
 
 
 def test_section_prompts_mapped_by_order_tolerant_of_drift():
-    # LLM returns fewer section prompts than headings — extras just absent.
     payload = json.loads(_good_brief_json())
-    payload["section_prompts"] = []  # none returned
+    payload["section_prompts"] = []
     brief = ad.build_art_brief(
         _DRAFT, ["The mechanism"], llm=lambda s, u: json.dumps(payload))
     assert brief is not None
     assert brief["section_prompts"] == {}
+
+
+def test_style_catalogue_includes_missing_workflow_and_design_modes():
+    expected = {
+        "baoyu-article-illustrator",
+        "baoyu-infographic",
+        "baoyu-comic",
+        "technical-diorama",
+        "data-atlas",
+        "typographic-poster-design",
+        "vintage-print-atelier",
+        "photographic-realism",
+        "pixel-art",
+        "signal-hud",
+    }
+    assert expected.issubset(ad.STYLE_IDS)
+
+
+def test_art_director_system_prompt_uses_creative_concept_direction_and_baoyu():
+    captured = {}
+    def spy(system, user):
+        captured["system"] = system
+        return _good_brief_json()
+
+    ad.build_art_brief(_DRAFT, _HEADINGS, llm=spy)
+    system = captured["system"]
+    assert "Creative Concept Direction" in system
+    assert "5-12 concrete interacting elements" in system
+    assert "Baoyu" in system
+    assert "21 layout" in system or "21 layout families" in system
+
+
+def test_text_capable_styles_do_not_inherit_blanket_text_ban():
+    brief = {
+        "style": "typographic-poster-design",
+        "layout": "Swiss grid poster",
+        "text_policy": "typography",
+        "text_elements": ["EVALS BEFORE VIBES"],
+        "palette": "black, cream, signal red",
+        "motif": "red proof stamp",
+        "art_direction": "poster-grade hierarchy.",
+        "hero_prompt": "x",
+        "section_prompts": {},
+    }
+    p = ad.compose_prompt("a poster built from the title phrase", brief)
+    assert "Typography is the image" in p
+    assert "EVALS BEFORE VIBES" in p
+    assert "No text" not in p
+
+
+def test_no_text_styles_still_ban_readable_text():
+    brief = {
+        "style": "photographic-realism",
+        "layout": "documentary still",
+        "text_policy": "none",
+        "text_elements": ["SHOULD NOT APPEAR"],
+        "palette": "muted office grey",
+        "motif": "paper audit trail",
+        "art_direction": "grounded.",
+        "hero_prompt": "x",
+        "section_prompts": {},
+    }
+    p = ad.compose_prompt("a real office scene", brief)
+    assert "No readable text" in p
+    assert "SHOULD NOT APPEAR" not in p
