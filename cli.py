@@ -7954,6 +7954,18 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             save_config_value("model.default", result.new_model)
             if result.provider_changed:
                 save_config_value("model.provider", result.target_provider)
+            # A resolved base_url is always safe to write. Clearing is only
+            # safe when the provider actually changed; otherwise re-picking a
+            # model on the SAME custom/named endpoint could null out a working
+            # base_url the user configured elsewhere (same regression already
+            # hit and fixed in hermes_cli/web_server.py:_apply_main_model_assignment).
+            # A stale base_url surviving a genuine provider change is the
+            # 2026-07-08 incident this fix addresses (same class of bug as
+            # tui_gateway/server.py:_persist_model_switch, #48305).
+            if result.base_url:
+                save_config_value("model.base_url", result.base_url)
+            elif result.provider_changed:
+                save_config_value("model.base_url", None)
             _cprint("    Saved to config.yaml (--global)")
         else:
             _cprint("    (session only — add --global to persist)")
@@ -8266,6 +8278,18 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             save_config_value("model.default", result.new_model)
             if result.provider_changed:
                 save_config_value("model.provider", result.target_provider)
+            # A resolved base_url is always safe to write. Clearing is only
+            # safe when the provider actually changed; otherwise re-picking a
+            # model on the SAME custom/named endpoint could null out a working
+            # base_url the user configured elsewhere (same regression already
+            # hit and fixed in hermes_cli/web_server.py:_apply_main_model_assignment).
+            # A stale base_url surviving a genuine provider change is the
+            # 2026-07-08 incident this fix addresses (same class of bug as
+            # tui_gateway/server.py:_persist_model_switch, #48305).
+            if result.base_url:
+                save_config_value("model.base_url", result.base_url)
+            elif result.provider_changed:
+                save_config_value("model.base_url", None)
             _cprint("    Saved to config.yaml")
         else:
             _cprint("    (session only — add --global to persist)")
