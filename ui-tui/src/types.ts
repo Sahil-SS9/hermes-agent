@@ -173,6 +173,7 @@ export interface SessionInfo {
   agent_mode?: string
   cwd?: string
   fast?: boolean
+  install_warning?: string
   lazy?: boolean
   mcp_servers?: McpServerStatus[]
   model: string

@@ -6,6 +6,7 @@
 .env
 .env.*
 *.key
+.op.env
 *.pem
 *.p12
 auth.json
