@@ -646,6 +646,98 @@ class TestSessionLifecycle:
         finally:
             db.close()
 
+    def test_fresh_db_with_trigram_disabled_via_env_var(self, tmp_path, monkeypatch):
+        """HERMES_DISABLE_FTS_TRIGRAM=1 must skip creating the trigram index."""
+        monkeypatch.setenv("HERMES_DISABLE_FTS_TRIGRAM", "1")
+
+        db = SessionDB(db_path=tmp_path / "state.db")
+        try:
+            assert db._fts_enabled is True
+            assert db._trigram_available is False
+            assert db._fts_table_exists("messages_fts") is True
+            assert db._fts_table_exists("messages_fts_trigram") is False
+
+            db.create_session(session_id="s1", source="cli")
+            db.append_message("s1", role="user", content="hello with trigram disabled")
+            assert len(db.search_messages("hello")) == 1
+        finally:
+            db.close()
+
+    def test_existing_trigram_dropped_when_disabled_via_env_var(
+        self, tmp_path, monkeypatch
+    ):
+        """Regression: an existing trigram index must be dropped, not regrown,
+        once HERMES_DISABLE_FTS_TRIGRAM=1 is set — otherwise the trigger-repair
+        path in _init_schema rebuilds it in full on every restart."""
+        db_path = tmp_path / "state.db"
+        seeded = SessionDB(db_path=db_path)
+        try:
+            seeded.create_session(session_id="s1", source="cli")
+            seeded.append_message("s1", role="user", content="already indexed by trigram")
+            assert seeded._fts_table_exists("messages_fts_trigram") is True
+        finally:
+            seeded.close()
+
+        monkeypatch.setenv("HERMES_DISABLE_FTS_TRIGRAM", "1")
+        reopened = SessionDB(db_path=db_path)
+        try:
+            assert reopened._trigram_available is False
+            assert reopened._fts_table_exists("messages_fts_trigram") is False
+            # Base FTS and existing data must survive the drop untouched.
+            assert reopened._fts_table_exists("messages_fts") is True
+            assert len(reopened.get_messages("s1")) == 1
+            assert len(reopened.search_messages("already indexed")) == 1
+        finally:
+            reopened.close()
+
+    def test_base_fts_rebuilds_after_trigger_repair_with_trigram_disabled(
+        self, tmp_path, monkeypatch
+    ):
+        """Trigger repair must still rebuild base FTS when trigram is disabled
+        by config, mirroring the trigram-unavailable-at-runtime case above."""
+        db_path = tmp_path / "state.db"
+        seeded = SessionDB(db_path=db_path)
+        try:
+            seeded.create_session(session_id="s1", source="cli")
+            seeded.append_message("s1", role="user", content="already indexed")
+            for trigger in (
+                "messages_fts_insert",
+                "messages_fts_delete",
+                "messages_fts_update",
+            ):
+                seeded._conn.execute(f"DROP TRIGGER IF EXISTS {trigger}")
+            seeded._conn.commit()
+            seeded.append_message("s1", role="assistant", content="repair only base needle")
+        finally:
+            seeded.close()
+
+        monkeypatch.setenv("HERMES_DISABLE_FTS_TRIGRAM", "1")
+        restored = SessionDB(db_path=db_path)
+        try:
+            assert restored._fts_enabled is True
+            assert restored._trigram_available is False
+            assert restored._fts_table_exists("messages_fts_trigram") is False
+            assert len(restored.search_messages("needle")) == 1
+        finally:
+            restored.close()
+
+    def test_cjk_search_falls_back_to_like_when_trigram_disabled_via_env_var(
+        self, tmp_path, monkeypatch
+    ):
+        """CJK queries must fall back to LIKE when trigram is off by config,
+        same as when it's unavailable at the SQLite build level."""
+        monkeypatch.setenv("HERMES_DISABLE_FTS_TRIGRAM", "1")
+        db = SessionDB(db_path=tmp_path / "state.db")
+        try:
+            db.create_session(session_id="s1", source="cli")
+            db.append_message("s1", role="user", content="大别山项目计划书")
+
+            results = db.search_messages("大别山")
+            assert len(results) == 1
+            assert "大别山" in results[0]["snippet"]
+        finally:
+            db.close()
+
 
 # =========================================================================
 # Message storage
