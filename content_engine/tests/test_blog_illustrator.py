@@ -176,6 +176,32 @@ def test_hard_fails_when_art_director_unavailable(monkeypatch, tmp_path):
     assert len(prompts) == 0  # no images generated
 
 
+
+def test_art_brief_log_includes_seed_and_layout(monkeypatch, tmp_path, capsys):
+    def fake_brief(draft, headings, recent_styles=None, llm=None):
+        return {
+            "style": "baoyu-infographic",
+            "selection_seed": "abc123seed000000",
+            "layout": "bento-grid comparison matrix",
+            "palette": "cream, teal, black",
+            "motif": "numbered cards",
+            "art_direction": "dense information design.",
+            "hero_prompt": "hero",
+            "section_prompts": {},
+            "text_policy": "labels",
+            "text_elements": ["A"],
+        }
+    monkeypatch.setattr(bi, "build_art_brief", fake_brief)
+    monkeypatch.setattr(bi, "_generate_codex_image",
+                        lambda prompt, out_path, **kw: (Path(out_path).write_text("x"), out_path)[1])
+    monkeypatch.setattr(bi, "_generate_webp", lambda p: p)
+
+    bi.illustrate(_DRAFT, out_dir=tmp_path, max_sections=0)
+    out = capsys.readouterr().out
+    assert "style=baoyu-infographic" in out
+    assert "seed=abc123seed000000" in out
+    assert "layout='bento-grid comparison matrix'" in out
+
 def test_records_style_to_rotation_state(monkeypatch, tmp_path):
     monkeypatch.setattr(bi, "_generate_codex_image",
                         lambda prompt, out_path, **kw: (Path(out_path).write_text("x"), out_path)[1])

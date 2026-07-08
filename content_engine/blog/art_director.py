@@ -283,14 +283,18 @@ def _article_blob(draft: dict) -> str:
     ]).lower()
 
 
-def _stable_rng(draft: dict):
+def _selection_seed(draft: dict) -> str:
+    """Stable selector seed for debugging/reproducibility logs."""
     seed_src = "|".join([
         str(draft.get("title", "")),
         str(draft.get("description", "")),
         str(draft.get("stream", "")),
     ])
-    digest = hashlib.sha256(seed_src.encode("utf-8")).hexdigest()[:16]
-    return random.Random(int(digest, 16))
+    return hashlib.sha256(seed_src.encode("utf-8")).hexdigest()[:16]
+
+
+def _stable_rng(draft: dict):
+    return random.Random(int(_selection_seed(draft), 16))
 
 
 def _fit_score(style_id: str, draft: dict) -> float:
@@ -513,6 +517,7 @@ def _validate(brief: dict, headings: list[str], draft: Optional[dict] = None,
     if not hero:
         return None
 
+    selection_seed = _selection_seed(draft) if draft is not None else ""
     if draft is not None:
         style = _choose_style(
             draft,
@@ -554,6 +559,7 @@ def _validate(brief: dict, headings: list[str], draft: Optional[dict] = None,
         "style": style,
         "layout": layout,
         "layout_variants": layout_variants,
+        "selection_seed": selection_seed,
         "style_candidates": _style_candidates(draft or {}, style, brief.get("style_candidates") or []) if draft is not None else [style],
         "style_native_compiler": _native_compiler_for(style),
         "text_policy": text_policy,
@@ -658,6 +664,7 @@ def fallback_brief(draft: dict, headings: list[str],
         "style": style,
         "layout": layout,
         "layout_variants": layout_variants,
+        "selection_seed": _selection_seed(draft),
         "style_candidates": _style_candidates(draft, style, []),
         "style_native_compiler": _native_compiler_for(style),
         "text_policy": text_policy,

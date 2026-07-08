@@ -37,6 +37,8 @@ def test_build_art_brief_parses_valid_llm_output():
     assert brief["style"] in {"ninth-observatory", "technical-diorama", "baoyu-infographic"}
     assert brief["layout"]
     assert brief["layout_variants"]
+    assert brief["selection_seed"] == ad._selection_seed(_DRAFT)
+    assert len(brief["selection_seed"]) == 16
     assert brief["style_candidates"]
     assert brief["style_native_compiler"].startswith("Redraft")
     assert brief["text_policy"] == "labels"
@@ -117,6 +119,7 @@ def test_fallback_brief_picks_unused_style():
     brief = ad.fallback_brief(_DRAFT, _HEADINGS, recent_styles=recent)
     assert brief["style"] in ad.STYLE_IDS
     assert brief["style"] not in recent
+    assert brief["selection_seed"] == ad._selection_seed(_DRAFT)
     assert brief["hero_prompt"]
     assert set(brief["section_prompts"].keys()) == set(_HEADINGS)
 
@@ -257,6 +260,7 @@ def test_sampler_is_stable_but_varies_across_articles():
     chosen = []
     for title in articles:
         draft = {"title": title, "description": title, "body_md": title, "stream": "ai"}
+        assert ad._selection_seed(draft) == ad._selection_seed(draft)
         first = ad._choose_style(draft, "mythic-tech-codex", [], candidates)
         second = ad._choose_style(draft, "mythic-tech-codex", [], candidates)
         assert first == second

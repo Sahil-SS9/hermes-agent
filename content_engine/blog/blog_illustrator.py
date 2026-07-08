@@ -257,6 +257,8 @@ def illustrate(
         print(f"[blog_illustrator] SKIPPED: {draft.get('title', '?')}")
         return result
     print(f"[blog_illustrator] art brief: style={brief['style']} "
+          f"seed={brief.get('selection_seed', 'n/a')} "
+          f"layout={brief.get('layout', '')[:80]!r} "
           f"palette={brief.get('palette','')[:60]!r} motif={brief.get('motif','')[:60]!r}")
     _record_style(brief["style"])
 
