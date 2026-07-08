@@ -8903,6 +8903,12 @@ if DISCORD_AVAILABLE:
 _DISCORD_CHANNEL_TYPE_PROBE_CACHE: Dict[str, bool] = {}
 _DISCORD_STANDALONE_JSON_BODY_LIMIT_BYTES = 1 * 1024 * 1024
 _DISCORD_STANDALONE_ERROR_BODY_LIMIT_BYTES = 8 * 1024
+# Per-route 429s on the standalone text-send path are almost always sub-second
+# (Discord's own retry_after). Honouring it inline avoids losing the message to
+# cron's tick-based retry queue, which waits ~2min between attempts and burns
+# the fixed retry budget on a limit that would have cleared in well under a
+# second. Capped so a global/unexpected limit can't stall the send path.
+_DISCORD_STANDALONE_MAX_INLINE_RETRY_SECONDS = 3.0
 
 
 def _remember_channel_is_forum(chat_id: str, is_forum: bool) -> None:
@@ -9038,6 +9044,52 @@ async def _standalone_read_json_limited(resp: Any, limit_bytes: int) -> dict:
         return {}
     data = json.loads(body.decode(_standalone_response_encoding(resp), "replace"))
     return data if isinstance(data, dict) else {}
+
+
+async def _standalone_post_json_with_429_retry(
+    session, url: str, *, headers: dict, payload: dict, req_kw: dict, error_label: str,
+):
+    """POST JSON to a Discord endpoint, retrying once inline on a 429.
+
+    Discord's per-route retry_after is almost always sub-second. Honouring it
+    here avoids losing the request to cron's tick-based retry queue, which
+    waits ~2min between attempts and burns its fixed 3-attempt budget on a
+    limit that would have cleared in well under a second (2026-07-08
+    incident: a production cron delivery was dropped this way). Non-429
+    errors are returned immediately, same as before this fix existed.
+
+    Returns (data, error): on success ``data`` is the parsed JSON body and
+    ``error`` is None; on failure ``data`` is None and ``error`` is the
+    message the caller should return as ``{"error": error}``.
+    """
+    async with session.post(url, headers=headers, json=payload, **req_kw) as resp:
+        if resp.status == 429:
+            body = await _standalone_read_text_limited(resp, _DISCORD_STANDALONE_ERROR_BODY_LIMIT_BYTES)
+            retry_after = 1.0
+            try:
+                retry_after = min(
+                    _DISCORD_STANDALONE_MAX_INLINE_RETRY_SECONDS,
+                    max(0.1, float(json.loads(body).get("retry_after", retry_after))),
+                )
+            except Exception:
+                pass
+            logger.warning(
+                "%s rate-limited (429); retrying once in %.2fs", error_label, retry_after,
+            )
+            await asyncio.sleep(retry_after)
+            async with session.post(url, headers=headers, json=payload, **req_kw) as retry_resp:
+                if retry_resp.status not in {200, 201}:
+                    retry_body = await _standalone_read_text_limited(
+                        retry_resp, _DISCORD_STANDALONE_ERROR_BODY_LIMIT_BYTES,
+                    )
+                    return None, f"{error_label} ({retry_resp.status}): {retry_body}"
+                data = await _standalone_read_json_limited(retry_resp, _DISCORD_STANDALONE_JSON_BODY_LIMIT_BYTES)
+                return data, None
+        if resp.status not in {200, 201}:
+            body = await _standalone_read_text_limited(resp, _DISCORD_STANDALONE_ERROR_BODY_LIMIT_BYTES)
+            return None, f"{error_label} ({resp.status}): {body}"
+        data = await _standalone_read_json_limited(resp, _DISCORD_STANDALONE_JSON_BODY_LIMIT_BYTES)
+        return data, None
 
 
 async def _standalone_send(
@@ -9181,28 +9233,21 @@ async def _standalone_send(
                     else:
                         # No media — simple JSON POST creates the thread with
                         # just the text starter.
-                        async with session.post(
-                            thread_url,
+                        data, thread_err = await _standalone_post_json_with_429_retry(
+                            session, thread_url,
                             headers=json_headers,
-                            json={
+                            payload={
                                 "name": thread_name,
                                 "message": {
                                     "content": message,
                                     **({"components": _blog_approval_components_for_message(message)} if _blog_approval_components_for_message(message) else {}),
                                 },
                             },
-                            **_req_kw,
-                        ) as resp:
-                            if resp.status not in {200, 201}:
-                                body = await _standalone_read_text_limited(
-                                    resp,
-                                    _DISCORD_STANDALONE_ERROR_BODY_LIMIT_BYTES,
-                                )
-                                return {"error": f"Discord forum thread creation error ({resp.status}): {body}"}
-                            data = await _standalone_read_json_limited(
-                                resp,
-                                _DISCORD_STANDALONE_JSON_BODY_LIMIT_BYTES,
-                            )
+                            req_kw=_req_kw,
+                            error_label="Discord forum thread creation error",
+                        )
+                        if thread_err is not None:
+                            return {"error": thread_err}
 
                 thread_id_created = data.get("id")
                 starter_msg_id = (data.get("message") or {}).get("id", thread_id_created)
@@ -9226,17 +9271,13 @@ async def _standalone_send(
                 blog_components = _blog_approval_components_for_message(message)
                 if blog_components:
                     payload["components"] = blog_components
-                async with session.post(url, headers=json_headers, json=payload, **_req_kw) as resp:
-                    if resp.status not in {200, 201}:
-                        body = await _standalone_read_text_limited(
-                            resp,
-                            _DISCORD_STANDALONE_ERROR_BODY_LIMIT_BYTES,
-                        )
-                        return {"error": f"Discord API error ({resp.status}): {body}"}
-                    last_data = await _standalone_read_json_limited(
-                        resp,
-                        _DISCORD_STANDALONE_JSON_BODY_LIMIT_BYTES,
-                    )
+                last_data, send_err = await _standalone_post_json_with_429_retry(
+                    session, url,
+                    headers=json_headers, payload=payload, req_kw=_req_kw,
+                    error_label="Discord API error",
+                )
+                if send_err is not None:
+                    return {"error": send_err}
 
             # Send each media file as a separate multipart upload
             for media_path, _is_voice in media_files:

@@ -395,12 +395,41 @@ def _restore_or_build_system_prompt(agent, system_message, conversation_history)
         try:
             agent._session_db.update_system_prompt(agent.session_id, agent._cached_system_prompt)
         except Exception as exc:
-            logger.warning(
-                "Session DB update_system_prompt failed for session %s: "
-                "%s. Subsequent turns will rebuild the system prompt and "
-                "miss the prefix cache.",
-                agent.session_id, exc,
-            )
+            # update_system_prompt already retries internally (15 attempts,
+            # 20-150ms jitter; see SessionDB._execute_write). Under a genuine
+            # thundering herd (several cron sessions starting on the same
+            # tick, e.g. a shared top-of-hour schedule) that budget can still
+            # be exhausted, so this re-enters the same 15-attempt call once
+            # more after a longer pause (worst case ~5s total) rather than
+            # touching the shared _execute_write path used by every other
+            # write in the system.
+            retried = False
+            retry_exc = None
+            if "locked" in str(exc).lower() or "busy" in str(exc).lower():
+                time.sleep(0.3 + random.uniform(0, 0.2))
+                try:
+                    agent._session_db.update_system_prompt(agent.session_id, agent._cached_system_prompt)
+                    retried = True
+                except Exception as retry_err:
+                    retry_exc = retry_err
+            if retried:
+                logger.debug(
+                    "Session DB update_system_prompt recovered on retry for session %s "
+                    "(original error: %s)",
+                    agent.session_id, exc,
+                )
+            else:
+                logger.warning(
+                    "Session DB update_system_prompt failed for session %s: "
+                    "%s. Subsequent turns will rebuild the system prompt and "
+                    "miss the prefix cache.",
+                    agent.session_id, exc,
+                )
+                if retry_exc is not None:
+                    logger.debug(
+                        "Session DB update_system_prompt retry also failed for session %s: %s",
+                        agent.session_id, retry_exc,
+                    )
 
 
 def _stored_prompt_matches_runtime(agent, prompt: str) -> bool:
