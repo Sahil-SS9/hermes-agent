@@ -67,6 +67,7 @@ for slug, db_path in sorted(BOARDS.items()):
             SELECT id, title, assignee, priority, status_reason,
                    created_at, updated_at,
                    consecutive_failures, max_retries,
+                   escalation_target, block_kind,
                    substr(body, 1, 500) as body_snippet
             FROM tasks
             WHERE status = 'blocked'
@@ -88,6 +89,29 @@ for slug, db_path in sorted(BOARDS.items()):
         age = now - updated
         if age < ESCALATION_AGE:
             continue
+        # Skip tasks owned by a human (escalation_target set). These are
+        # decision-needed / awaiting a person — the unblocker must not
+        # auto-process them (t_3bfbe7f4). Surface them only if explicitly
+        # escalated, never routine-unblock.
+        escalation_target = row["escalation_target"]
+        if escalation_target:
+            blocked_tasks.append({
+                "board": slug,
+                "id": row["id"],
+                "title": row["title"],
+                "assignee": row["assignee"] or "unassigned",
+                "priority": row["priority"] or 0,
+                "age_seconds": age,
+                "age_hours": round(age / 3600.0, 1),
+                "consecutive_failures": row["consecutive_failures"] or 0,
+                "max_retries": row["max_retries"],
+                "status_reason": row["status_reason"] or "",
+                "body_snippet": row["body_snippet"] or "",
+                "escalation_target": escalation_target,
+                "block_kind": row["block_kind"] or "",
+                "human_owned": True,
+            })
+            continue
         blocked_tasks.append({
             "board": slug,
             "id": row["id"],
@@ -100,6 +124,7 @@ for slug, db_path in sorted(BOARDS.items()):
             "max_retries": row["max_retries"],
             "status_reason": row["status_reason"] or "",
             "body_snippet": row["body_snippet"] or "",
+            "human_owned": False,
         })
 
 # Log diagnostic info to stderr for cron capture
@@ -113,11 +138,16 @@ diag = {
 }
 print(json.dumps(diag), file=sys.stderr)
 
-# Split blocked tasks into two intents:
+# Split blocked tasks into intents:
 #   routine: failed fewer than STUCK_FAILURES times, auto-recoverable, unblock SILENTLY.
 #   stuck:   failed STUCK_FAILURES+ times, auto-repair has not held, escalate.
-stuck = [t for t in blocked_tasks if t["consecutive_failures"] >= STUCK_FAILURES]
-routine = [t for t in blocked_tasks if t["consecutive_failures"] < STUCK_FAILURES]
+#   human_owned: escalation_target set — decision-needed / awaiting a person.
+#                NEVER auto-unblock or auto-escalate these (t_3bfbe7f4). They are
+#                reported for visibility only; the triage flow handles them separately.
+human_owned = [t for t in blocked_tasks if t.get("human_owned")]
+auto_tasks = [t for t in blocked_tasks if not t.get("human_owned")]
+stuck = [t for t in auto_tasks if t["consecutive_failures"] >= STUCK_FAILURES]
+routine = [t for t in auto_tasks if t["consecutive_failures"] < STUCK_FAILURES]
 
 
 def _state_ts(v) -> int:
@@ -173,4 +203,5 @@ print(json.dumps({
     "total_blocked": len(blocked_tasks),
     "routine_unblock": routine,
     "escalate": escalate,
+    "human_owned_skipped": human_owned,
 }, indent=2, ensure_ascii=False))
