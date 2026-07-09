@@ -22,7 +22,25 @@ ENGINE = Path(__file__).resolve().parent.parent
 BLOG = Path.home() / "repos" / "SahilBlog"
 TRACKER = ENGINE / "blog_topics" / "pending_approvals.jsonl"
 FAILED_IMAGES = ENGINE / "blog_topics" / "failed_images.jsonl"
+EXEMPT = ENGINE / "blog_topics" / "published_exempt.jsonl"
 POSTS = BLOG / "src/content/blog"
+
+# After this many failed attempts a post is treated as a hard failure:
+# the audit stops re-flagging it daily and instead reports it once as
+# "escalated" so manual intervention is visible without the noise.
+ESCALATE_AFTER = 3
+
+
+RETRY_STATUS = ENGINE / "output" / "logs" / "blog-failed-retry-status.json"
+
+
+def _read_retry_status() -> dict | None:
+    if not RETRY_STATUS.exists():
+        return None
+    try:
+        return json.loads(RETRY_STATUS.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return None
 
 
 def _git_dirty(repo: Path) -> int:
@@ -63,6 +81,18 @@ def _norm_title(title: str) -> str:
     return re.sub(r"[^a-z0-9\s]", "", title.lower()).strip()
 
 
+def _read_exempt() -> set[str]:
+    """Slugs manually published to the live site (false-flag avoidance).
+
+    When Sahil publishes a post by hand, its local frontmatter may still read
+    ``approved:false``. Those posts are not drafts awaiting approval — they are
+    live. Adding the slug here stops the audit from flagging them. No deploy
+    polling, no repo rewrites: just an explicit, human-maintained list.
+    """
+    rows = _read_jsonl(EXEMPT)
+    return {r["slug"] for r in rows if r.get("slug")}
+
+
 def audit() -> list[str]:
     issues: list[str] = []
 
@@ -72,6 +102,8 @@ def audit() -> list[str]:
         issues.append(f"KenseiAgent worktree dirty: {kd} changed/untracked paths")
     if bd:
         issues.append(f"SahilBlog worktree dirty: {bd} changed/untracked paths")
+
+    exempt = _read_exempt()
 
     approvals = _read_jsonl(TRACKER)
     pending = [e for e in approvals if e.get("status") == "pending"]
@@ -101,6 +133,9 @@ def audit() -> list[str]:
             false_posts.append(p.stem)
             title_rows.append((p.stem, title))
     for slug in false_posts:
+        if slug in exempt:
+            # Manually published live — not a draft awaiting approval.
+            continue
         if slug not in tracked_slugs:
             issues.append(f"approved:false draft has no approval-tracker entry: {slug}")
 
@@ -111,9 +146,47 @@ def audit() -> list[str]:
                 issues.append(f"possible duplicate draft titles ({ratio:.2f}): {slug_a} / {slug_b}")
 
     failed = _read_jsonl(FAILED_IMAGES)
+    retry = _read_retry_status()
+    if retry:
+        finished = retry.get("finished_at", "unknown")
+        if retry.get("rc") == 0 and retry.get("idle"):
+            issues.append(f"image retry last ran {finished}: idle (nothing held)")
+        else:
+            rec = retry.get("recovered", [])
+            still = retry.get("still_failed", [])
+            rec_n = len(rec) if isinstance(rec, list) else rec
+            still_n = len(still) if isinstance(still, list) else still
+            bits = [f"last ran {finished}"]
+            if rec_n:
+                bits.append(f"recovered {rec_n}")
+            if still_n:
+                bits.append(f"still_failed {still_n}")
+            if retry.get("deferred"):
+                bits.append("deferred (Codex cap)")
+            if retry.get("no_draft"):
+                bits.append(f"no_draft {len(retry['no_draft']) if isinstance(retry['no_draft'], list) else retry['no_draft']}")
+            issues.append("image-retry: " + ", ".join(bits))
     for e in failed:
-        if e.get("slug"):
-            issues.append(f"failed image tracked: {e.get('slug')} attempts={e.get('attempts')} error={e.get('last_error')}")
+        if not e.get("slug"):
+            continue
+        slug = e["slug"]
+        attempts = e.get("attempts", 0)
+        last = e.get("date") or e.get("first_failure") or "unknown"
+        err = e.get("last_error", "")
+        if attempts >= ESCALATE_AFTER:
+            # Hard failure: stop daily re-flagging as a fresh problem.
+            # Report once as escalated so manual intervention is visible
+            # without the noise of a repeated "failed image tracked" line.
+            issues.append(
+                f"escalated: image generation failed {attempts}x (last {last}) "
+                f"for {slug} — manual fix needed. error={err}"
+            )
+        else:
+            issues.append(
+                f"failed image tracked: {slug} attempts={attempts} "
+                f"last_attempt={last} error={err} "
+                f"(retry cron runs daily 08:15)"
+            )
 
     return issues
 
