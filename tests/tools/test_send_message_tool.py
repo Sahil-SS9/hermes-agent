@@ -3372,3 +3372,44 @@ class TestSendTelegramThreadNotFoundRetry:
         finally:
             if media_path and os.path.exists(media_path):
                 os.unlink(media_path)
+
+
+def test_cli_send_strips_memory_context_before_delivery():
+    """Regression: the CLI `hermes send` path must strip recalled
+    <memory-context> blocks (defense-in-depth, mirroring the scheduler)."""
+    from tools.send_message_tool import send_message_tool
+
+    msg = (
+        "Normal line.\n\n"
+        "<memory-context>\n"
+        "[2026-05-31] Sahil wants GBrain in KenseiAgent memory layer.\n"
+        "</memory-context>\n\n"
+        "MEDIA:/tmp/proof.txt"
+    )
+
+    captured = {}
+
+    def fake_platform(*args, **kwargs):
+        captured["message"] = kwargs.get("message") or (args[3] if len(args) > 3 else None)
+        captured["media"] = kwargs.get("media_files") or (args[4] if len(args) > 4 else None)
+        return json.dumps({"ok": True})
+
+    fake_config = MagicMock()
+    fake_config.platforms.get.return_value = SimpleNamespace(enabled=True)
+    with patch("tools.send_message_tool._send_to_platform", side_effect=fake_platform), \
+         patch("tools.send_message_tool._maybe_skip_cron_duplicate_send", return_value=None), \
+         patch("gateway.channel_directory.resolve_channel_name", return_value="123456789"), \
+         patch("gateway.config.load_gateway_config", return_value=fake_config):
+        result = send_message_tool(
+            {
+                "action": "send",
+                "target": "discord:#research-ops",
+                "message": msg,
+            }
+        )
+    # If the send was blocked upstream (e.g. target resolution), surface it.
+    assert captured, f"fake_platform never called; send_message_tool returned: {result}"
+
+    assert "memory-context" not in captured["message"], "memory-context leaked through CLI send"
+    assert "Normal line." in captured["message"], "normal text was stripped"
+    assert captured["media"] and any("proof.txt" in m[0] for m in captured["media"]), "MEDIA tag lost"

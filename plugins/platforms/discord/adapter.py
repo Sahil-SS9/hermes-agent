@@ -2313,6 +2313,18 @@ class DiscordAdapter(BasePlatformAdapter):
         if not self._client:
             return SendResult(success=False, error="Not connected")
 
+        # Defence-in-depth: strip recalled <memory-context> blocks before any
+        # Discord delivery. The scheduler, stream_consumer, and CLI send path
+        # each strip upstream, but auxiliary adapter.send() callers (acks,
+        # notices, voice transcriptions, cron fallbacks) bypass those. This is
+        # the final chokepoint — if memory leaks here, it leaks to the user.
+        import re as _re
+        _MEM_LEAK_RE = _re.compile(
+            r"<memory-context>.*?</memory-context>", _re.DOTALL | _re.IGNORECASE
+        )
+        if isinstance(content, str) and _MEM_LEAK_RE.search(content):
+            content = _MEM_LEAK_RE.sub("", content).strip()
+
         try:
             # Determine target channel: thread_id in metadata takes precedence.
             thread_id = None

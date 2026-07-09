@@ -379,6 +379,17 @@ def _handle_send(args):
     # JPGs where Telegram's sendPhoto recompresses to 1280px).
     force_document_attachments = "[[as_document]]" in message
 
+    # Defence-in-depth: strip recalled <memory-context> blocks before delivery.
+    # The scheduler does this at the cron chokepoint, but the CLI `hermes send`
+    # path does not go through the scheduler, so a message carrying recalled
+    # memory (e.g. from an agent session context) would leak to Discord. Mirror
+    # the scheduler's _strip_memory_leak guard here.
+    try:
+        from cron.scheduler import _strip_memory_leak
+        message = _strip_memory_leak(message)
+    except Exception:
+        pass
+
     media_files, cleaned_message = BasePlatformAdapter.extract_media(message)
     media_files = BasePlatformAdapter.filter_media_delivery_paths(media_files)
     mirror_text = cleaned_message.strip() or _describe_media_for_mirror(media_files)

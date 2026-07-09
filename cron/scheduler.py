@@ -3839,8 +3839,27 @@ def run_one_job(job: dict, *, adapters=None, loop=None, verbose: bool = False) -
                 else:
                     final_response = stripped
 
+            # KENSEI CUSTOM — strip raw HTML blocks the model pastes into the
+            # chat body. The report belongs in the .html file (attached via
+            # MEDIA:), not inline in Discord. Models (esp. deepseek-v4-flash /
+            # kimi-k2.6) sometimes emit the full <!DOCTYPE><html>...</html>
+            # document in the chat text alongside the MEDIA tag, flooding the
+            # channel with markup. Remove complete HTML docs from the delivery
+            # text but KEEP any MEDIA: tag so the attachment still sends.
+            if success and final_response and not job.get("no_agent"):
+                import re as _re
+                _raw_html_re = _re.compile(
+                    r"<!DOCTYPE[^>]*>.*?</html>", _re.DOTALL | _re.IGNORECASE
+                )
+                if _raw_html_re.search(final_response):
+                    final_response = _raw_html_re.sub("", final_response).strip()
+                    # Drop any now-orphaned stray tags the model left behind
+                    final_response = _re.sub(
+                        r"<[^>]+>", "", final_response
+                    ).strip()
+
+
             # KENSEI CUSTOM — coerce bare runbooks/*.html (and other deliverable)
-            # paths into MEDIA attachments BEFORE the truncation-hardening below.
             # LLM crons often emit the report path as prose instead of a MEDIA:
             # tag; without this, the hardening block at ~3846 sees "no MEDIA:"
             # and truncates the response, DROPPING the file the cron already
