@@ -3,8 +3,9 @@
 
 Replaces the LLM-hand-written digest (which only listed slugs and bare
 preview filenames that mobile Discord cannot open). This script inlines
-each article's rendered preview HTML into ONE self-contained dark-mode
-file, so a single tapped MEDIA attachment shows every article's content.
+each article's rendered preview TEXT into ONE self-contained dark-mode
+file (base64 images stripped to stay under Discord's 8 MB bot upload cap),
+so a single tapped MEDIA attachment shows every article's content.
 
 Deterministic: no LLM HTML generation, so no drift or broken path links.
 
@@ -40,12 +41,30 @@ def _read_jsonl(path: Path) -> list[dict]:
 
 
 def _body_inner(html_path: Path) -> str:
-    """Extract the inner HTML of <body>…</body> from a preview file."""
+    """Extract the inner HTML of <body>…</body> from a preview file.
+
+    Base64-embedded images are STRIPPED. The digest is delivered as a single
+    Discord MEDIA attachment, and Discord caps bot uploads at ~8 MB. Inlined
+    previews with base64 hero/section images blow past that (26 articles →
+    ~13 MB), so the attachment fails silently. Keeping text + structure makes
+    the digest a lightweight review index that always delivers; the full
+    visual preview for any single article is still generated separately by
+    blog_approval.py and lives on disk.
+    """
     if not html_path.exists():
         return ""
     text = html_path.read_text(encoding="utf-8", errors="replace")
     m = re.search(r"<body[^>]*>(.*?)</body>", text, re.S | re.I)
-    return m.group(1).strip() if m else ""
+    if not m:
+        return ""
+    body = m.group(1)
+    # Drop base64 image blobs (the size killers)
+    body = re.sub(r'<img[^>]*src="data:image/[^"]*"[^>]*/?>', "", body, flags=re.I)
+    body = re.sub(r'<img[^>]*src=\'data:image/[^\']*\'[^>]*/?>', "", body, flags=re.I)
+    # Drop any remaining <img> tags (external/relative srcs are dead in a
+    # standalone digest anyway)
+    body = re.sub(r"<img\b[^>]*>", "", body, flags=re.I)
+    return body.strip()
 
 
 def _esc(s: str) -> str:

@@ -67,7 +67,12 @@ def test_retry_status_reported(tmp_path, monkeypatch):
 
 
 def test_digest_inlines_no_broken_links(tmp_path, monkeypatch):
-    """FIX A: digest inlines article bodies, no file:// path links."""
+    """FIX A: digest inlines article bodies, no file:// links, images stripped.
+
+    Images MUST be stripped — otherwise 26 inlined previews with base64
+    heroes blew the digest to 13.6 MB and Discord rejected the attachment
+    (>8 MB bot cap). Regression guard: assert no data:image and a sane size.
+    """
     tracker = tmp_path / "pending_approvals.jsonl"
     tracker.write_text(json.dumps({
         "slug": "my-post", "title": "My Post", "stream": "ai", "tier": "ai",
@@ -90,4 +95,6 @@ def test_digest_inlines_no_broken_links(tmp_path, monkeypatch):
     html = Path(out).read_text()
     assert "file://" not in html, "digest must not contain broken file:// links"
     assert "body content here" in html, "article body must be inlined"
+    assert "data:image" not in html, "base64 images must be stripped (Discord 8MB cap)"
     assert "<details" in html, "articles should be collapsible blocks"
+    assert Path(out).stat().st_size < 8 * 1024 * 1024, "digest must stay under Discord's 8MB bot cap"
