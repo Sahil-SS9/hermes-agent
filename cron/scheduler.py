@@ -3807,6 +3807,11 @@ def run_one_job(job: dict, *, adapters=None, loop=None, verbose: bool = False) -
         # swallow the error and leak the agent's subprocesses/clients (#10200).
         delivery_error = None
         try:
+            # Strip recalled memory blocks from the persisted output too, so the
+            # on-disk .md log never stores leaked memory (Discord delivery is
+            # already stripped in _deliver_result). Mirrors the interactive
+            # stream_consumer strip — same leak class, storage surface.
+            output = _strip_memory_leak(output) if isinstance(output, str) else output
             output_file = save_job_output(job["id"], output)
             if verbose:
                 logger.info("Output saved to: %s", output_file)
