@@ -372,7 +372,14 @@ def main():
         for issue in issues:
             num = issue["number"]
             key = str(num)
-            if key in seen:
+            existing = seen.get(key)
+            # Every classification is terminal EXCEPT too_new — a too_new issue
+            # must be re-evaluated on later ticks once it clears the age gate,
+            # otherwise it is skipped forever ("if key in seen: continue" ran
+            # before the age gate ever got a chance to re-check). Root cause of
+            # the 2026-07-04 to 2026-07-09 queue starvation: 145/152 issues
+            # marked too_new were never promoted.
+            if existing and existing.get("classification") != "too_new":
                 continue
             classification = classify_issue(issue)
             if classification is None:
@@ -435,28 +442,72 @@ def main():
     output_lines = []
     html_parts = []
 
-    # Write fixable bugs to pipeline queue
+    # Write fixable bugs to pipeline queue.
     # Accept P1, P2, and P3 bugs — most upstream issues default to P3 when
     # no priority label is applied. Filtering P3 out caused the pipeline to
     # starve (0 pending items for 4+ days).
+    #
+    # Sourced from two places, not just this run's fresh classifications:
+    # 1. `new_issues` — issues classified bug/security in THIS run (includes
+    #    issues just promoted out of too_new).
+    # 2. A full backfill scan of `state["seen_issues"]` for any bug/security
+    #    issue that never made it into the queue — e.g. it was classified in
+    #    a run where MAX_QUEUE_SIZE was already full. Without this backfill, a
+    #    capped-out issue is skipped forever on future ticks (classification is
+    #    terminal, so the per-issue loop above never revisits it).
     fixable = [iss for iss in new_issues if iss["classification"] in ("bug", "security")]
-    if fixable:
-        queue_state = {"updated_at": now, "pending": []}
-        if os.path.exists(FIX_QUEUE_FILE):
-            try:
-                with open(FIX_QUEUE_FILE) as f:
-                    existing = json.load(f)
+
+    # Start from the existing file and preserve every key untouched (e.g.
+    # `completed`/`skipped`/`prs_opened` — whatever the agent-driven
+    # moss-fix-pipeline cron tracks on its side). Only `updated_at` and
+    # `pending` are ours to own. Previously this rebuilt the dict from
+    # scratch with just {updated_at, pending}, silently deleting the fix
+    # pipeline's own bookkeeping every 15 minutes.
+    queue_state = {"updated_at": now, "pending": []}
+    known_keys = set()
+    if os.path.exists(FIX_QUEUE_FILE):
+        try:
+            with open(FIX_QUEUE_FILE) as f:
+                existing = json.load(f)
+                if isinstance(existing, dict):
+                    queue_state = dict(existing)
+                    queue_state["updated_at"] = now
                     queue_state["pending"] = existing.get("pending", [])
-            except (json.JSONDecodeError, OSError):
-                pass
-        existing_keys = {f"{i['repo']}#{i['number']}" for i in queue_state["pending"]}
-        for iss in fixable:
-            key = f"{iss['repo']}#{iss['number']}"
-            if key not in existing_keys and len(queue_state["pending"]) < MAX_QUEUE_SIZE:
-                queue_state["pending"].append(iss)
-                existing_keys.add(key)
-        with open(FIX_QUEUE_FILE, "w") as f:
-            json.dump(queue_state, f, indent=2)
+                for bucket_name, bucket_val in (existing.items() if isinstance(existing, dict) else []):
+                    if not isinstance(bucket_val, list):
+                        continue
+                    for i in bucket_val:
+                        if isinstance(i, dict) and "repo" in i and "number" in i:
+                            known_keys.add(f"{i['repo']}#{i['number']}")
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    for iss in fixable:
+        key = f"{iss['repo']}#{iss['number']}"
+        if key not in known_keys and len(queue_state["pending"]) < MAX_QUEUE_SIZE:
+            queue_state["pending"].append(iss)
+            known_keys.add(key)
+
+    for repo_name, repo_seen in state["seen_issues"].items():
+        if len(queue_state["pending"]) >= MAX_QUEUE_SIZE:
+            break
+        for rec in repo_seen.values():
+            if rec.get("classification") not in ("bug", "security"):
+                continue
+            qkey = f"{repo_name}#{rec['number']}"
+            if qkey in known_keys:
+                continue
+            if len(queue_state["pending"]) >= MAX_QUEUE_SIZE:
+                break
+            queue_state["pending"].append({
+                "repo": repo_name, "number": rec["number"], "title": rec["title"],
+                "classification": rec["classification"], "priority": rec.get("priority", "P3"),
+                "url": rec.get("url", ""),
+            })
+            known_keys.add(qkey)
+
+    with open(FIX_QUEUE_FILE, "w") as f:
+        json.dump(queue_state, f, indent=2)
 
     # Only output on PR activity — new issues silently populate the fix queue
     if pr_activity:
