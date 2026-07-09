@@ -3839,6 +3839,30 @@ def run_one_job(job: dict, *, adapters=None, loop=None, verbose: bool = False) -
                 else:
                     final_response = stripped
 
+            # KENSEI CUSTOM — coerce bare runbooks/*.html (and other deliverable)
+            # paths into MEDIA attachments BEFORE the truncation-hardening below.
+            # LLM crons often emit the report path as prose instead of a MEDIA:
+            # tag; without this, the hardening block at ~3846 sees "no MEDIA:"
+            # and truncates the response, DROPPING the file the cron already
+            # wrote (the "synthesis never reached me" bug). Converting the bare
+            # path to a MEDIA tag here makes the hardening skip truncation and
+            # the file is delivered. Mirrors the _deliver_result coercion.
+            if success and final_response and "MEDIA:" not in final_response:
+                try:
+                    from gateway.platforms.base import BasePlatformAdapter
+                    local_files, _ = BasePlatformAdapter.extract_local_files(
+                        final_response
+                    )
+                    for lf in local_files:
+                        tag = lf if isinstance(lf, str) else lf[0]
+                        # The bare path is already in the text; append a MEDIA:
+                        # tag (distinct token) so the delivery layer attaches it.
+                        # Avoid duplicating an existing MEDIA: tag for the same path.
+                        if f"MEDIA:{tag}" not in final_response:
+                            final_response = f"{final_response}\nMEDIA:{tag}"
+                except Exception as e:
+                    logger.debug("pre-truncation local-file coercion skipped: %s", e)
+
             # HARDENING: if an LLM cron produced text but forgot to include a
             # MEDIA: tag or [SILENT] marker, the output is likely raw content
             # flooding Discord. Truncate long text-only responses to a
