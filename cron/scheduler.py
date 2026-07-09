@@ -1629,6 +1629,19 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
     from gateway.platforms.base import BasePlatformAdapter
     media_files, cleaned_delivery_content = BasePlatformAdapter.extract_media(delivery_content)
     media_files = BasePlatformAdapter.filter_media_delivery_paths(media_files)
+    # Coerce bare file paths (e.g. ".../runbooks/foo.html") into attachments.
+    # Cron LLMs often emit the path as prose instead of a MEDIA: tag; without
+    # this the user gets a dead path link instead of a native file (#job-hunt
+    # HTML reports). Mirrors the defence-in-depth pattern used for memory leaks.
+    try:
+        local_files, cleaned_delivery_content = BasePlatformAdapter.extract_local_files(
+            cleaned_delivery_content
+        )
+        for lf in local_files:
+            if lf not in media_files:
+                media_files.append(lf)
+    except Exception as e:
+        logger.debug("local-file coercion skipped: %s", e)
 
     # Resolve the delivery-mirror gate ONCE (default off). When on, each
     # successful delivery is also appended to the target chat's gateway session
