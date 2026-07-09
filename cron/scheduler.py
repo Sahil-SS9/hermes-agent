@@ -244,6 +244,12 @@ from cron.jobs import get_due_jobs, mark_job_run, save_job_output, advance_next_
 # locally for audit.
 SILENT_MARKER = "[SILENT]"
 
+# Recalled memory blocks injected into LLM context must never reach Discord.
+# Strip the fenced <memory-context>...</memory-context> span (which contains the
+# system note + recalled facts, incl. embedded <think> reasoning) from delivered
+# cron output.
+_MEMORY_LEAK_RE = re.compile(r"<memory-context>[\s\S]*?</memory-context>\s*", re.IGNORECASE)
+
 # Canonical silence tokens recognized in cron output.  Cron's contract is
 # intentionally looser than the gateway's exact-whole-response rule: the cron
 # system prompt *instructs* the agent to emit "[SILENT]", and real agents often
@@ -1538,6 +1544,25 @@ def _is_channel_dm_topic(
     return is_channel
 
 
+def _strip_memory_leak(content: str) -> str:
+    """Defence-in-depth: strip recalled ``<memory-context>`` blocks from delivered
+    cron output.
+
+    The agent core injects memory into LLM context and scrubs it from streaming
+    responses, but ``no_agent`` crons and misconfigured jobs bypass that
+    scrubber — so recalled memory can still surface in the final message. This
+    runs at the delivery chokepoint so internal memory never reaches Discord.
+    Mirrors the scheduler-level ``_strip_verification_leak`` pattern from the
+    cron-output-contract skill.
+    """
+    if not content:
+        return content
+    stripped = _MEMORY_LEAK_RE.sub("", content)
+    if stripped != content:
+        logger.info("Memory-context leak stripped from cron delivery output")
+    return stripped
+
+
 def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Optional[str]:
     """
     Deliver job output to the configured target(s) (origin chat, specific platform, etc.).
@@ -1549,6 +1574,8 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
 
     Returns None on success, or an error string on failure.
     """
+    # Defence-in-depth: never deliver recalled memory blocks to Discord.
+    content = _strip_memory_leak(content)
     targets = _resolve_delivery_targets(job)
     if not targets:
         deliver_value = _normalize_deliver_value(job.get("deliver", "local"))
