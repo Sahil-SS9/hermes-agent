@@ -32,6 +32,14 @@ from typing import Any, Dict, List, Optional
 
 from toolsets import TOOLSETS
 
+# Memory-context leak guard.  The delegation return path serialises the
+# child's raw final_response into both the sync tool-result JSON and the
+# async completion event; cron/gateway/discord each have their own copy of
+# this guard, but delegation historically had none.  Route the child output
+# through the canonical stripper so an injected <memory-context>…</…> block
+# can't ride the subagent result back into the parent's context.
+from agent.memory_manager import sanitize_context
+
 # Sentinel value used by the runtime provider system for providers that are
 # not natively known (named custom providers, third-party aggregators, etc.).
 # Must match hermes_cli.runtime_provider.RUNTIME_PROVIDER_TYPE_CUSTOM.
@@ -1144,6 +1152,19 @@ def _build_child_agent(
                 child_toolsets, parent_toolsets
             )
         child_toolsets = _strip_blocked_tools(child_toolsets)
+        if not child_toolsets:
+            # Defense-in-depth warning for the explicit-toolsets branch (dead in
+            # production today, but reachable by direct callers/tests).  An empty
+            # result here means every requested toolset failed to expand against
+            # the parent; the profile-config block below and the final starvation
+            # backstop are what actually rescue this in the live path — but name
+            # the requested set so the failure is visible rather than silent.
+            logger.warning(
+                "delegate_tool: explicit toolsets resolved to empty after parent "
+                "intersection. requested=%r expanded_parent=%r",
+                toolsets,
+                sorted(expanded_parent),
+            )
     elif parent_agent and parent_enabled is not None:
         child_toolsets = _strip_blocked_tools(parent_enabled)
     elif parent_toolsets:
@@ -1205,7 +1226,7 @@ def _build_child_agent(
 
         # Toolsets from profile — intersect with parent (subagent can't gain tools parent lacks)
         _p_toolsets = _pcfg.get("toolsets") or []
-        if _p_toolsets and toolsets is None and parent_toolsets:
+        if _p_toolsets and (toolsets is None or not child_toolsets) and parent_toolsets:
             _expanded = _expand_parent_toolsets(parent_toolsets)
             child_toolsets = [t for t in _p_toolsets if t in _expanded]
             child_toolsets = _strip_blocked_tools(child_toolsets)
@@ -1215,6 +1236,41 @@ def _build_child_agent(
         # Always_skills stored for later injection into child context
         _p_skills_block = _pcfg.get("skills", {}) or {}
         loaded_profile_cfg["skills"] = list(_p_skills_block.get("always_skills") or [])
+
+    # ── Toolset-starvation backstop (Bug 1 fix) ─────────────────────────
+    # If, after BOTH the explicit-toolsets intersection (lines ~1136-1152)
+    # AND the profile-config intersection above, the child would receive an
+    # EMPTY toolset, fall back to exactly what an unscoped delegation call
+    # with no profile override would already receive:
+    #   parent_enabled via _strip_blocked_tools  (if parent_enabled is set)
+    #   else parent_toolsets                    (else branch)
+    #   else DEFAULT_TOOLSETS                   (final fallback)
+    # plus the 'delegation' toolset if the child is an orchestrator.
+    # This can never grant the child more than the parent already has — it
+    # only replaces "zero tools" (which silently leaves only ambient tools
+    # like rescuer_fetch) with "the same bounded set an unscoped delegation
+    # call would already get".  Named with the requested toolsets for audit.
+    if not child_toolsets:
+        _requested = list(toolsets or [])
+        if loaded_profile_cfg:
+            _requested = _requested + list(
+                (loaded_profile_cfg.get("config", {}) or {}).get("toolsets") or []
+            )
+        logger.warning(
+            "delegate_tool: child resolved to an empty toolset — falling back to "
+            "the parent's bounded default instead of leaving the child with only "
+            "ambient tools. requested_toolsets=%r parent_toolsets=%r",
+            _requested,
+            sorted(parent_toolsets),
+        )
+        if parent_enabled is not None:
+            child_toolsets = _strip_blocked_tools(parent_enabled)
+        elif parent_toolsets:
+            child_toolsets = _strip_blocked_tools(sorted(parent_toolsets))
+        else:
+            child_toolsets = _strip_blocked_tools(DEFAULT_TOOLSETS)
+        if effective_role == "orchestrator" and "delegation" not in child_toolsets:
+            child_toolsets.append("delegation")
 
     # Inject profile SOUL.md into the child system prompt
     if loaded_profile_cfg and loaded_profile_cfg.get("soul_md"):
@@ -2122,7 +2178,11 @@ def _run_single_child(
 
         duration = round(time.monotonic() - child_start, 2)
 
-        summary = result.get("final_response") or ""
+        # Bug 2 fix: strip any <memory-context>…</…> (or fence/notes) block that
+        # the child's raw LLM output may carry before it enters the parent's
+        # context via either the sync tool-result JSON or the async completion
+        # event.  This is the single choke point both paths read from.
+        summary = sanitize_context(result.get("final_response") or "")
         completed = result.get("completed", False)
         interrupted = result.get("interrupted", False)
         api_calls = result.get("api_calls", 0)
@@ -2229,7 +2289,9 @@ def _run_single_child(
             ),
         }
         if status == "failed":
-            entry["error"] = result.get("error", "Subagent did not produce a response.")
+            entry["error"] = sanitize_context(
+                str(result.get("error", "Subagent did not produce a response."))
+            )
 
         # Cross-agent file-state reminder.  If this subagent wrote any
         # files the parent had already read, surface it so the parent

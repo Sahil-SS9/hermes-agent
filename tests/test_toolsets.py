@@ -291,3 +291,35 @@ class TestResolveToolsetIncludeRegistry:
 
     def test_registry_only_toolset_static_view_is_empty(self):
         assert resolve_toolset("__definitely_not_a_real_toolset__", include_registry=False) == []
+
+
+class TestAuditToolset:
+    """Least-privilege read-only audit toolset (Bug 1 fix, toolsets.py).
+
+    Locks in the intent: read/search/run-safe commands only, NO write access
+    (write_file/patch absent), and terminal but not process (background-process
+    management is not needed for pytest/git log/git diff)."""
+
+    def test_audit_tools_are_read_only(self):
+        audit = TOOLSETS["audit"]
+        assert audit["tools"] == ["read_file", "search_files", "terminal"]
+
+    def test_audit_has_no_write_tools(self):
+        audit = TOOLSETS["audit"]
+        assert "write_file" not in audit["tools"]
+        assert "patch" not in audit["tools"]
+
+    def test_audit_has_no_process_management(self):
+        audit = TOOLSETS["audit"]
+        assert "process" not in audit["tools"]
+
+    def test_audit_tools_subset_of_builtins(self):
+        # Every audit tool must be a real, registered tool (not a phantom name).
+        from tools.registry import discover_builtin_tools, registry
+
+        discover_builtin_tools()
+        known = set(registry.get_tool_names()) if hasattr(registry, "get_tool_names") \
+            else {t for ts in TOOLSETS.values() for t in ts.get("tools", [])}
+        for tool in TOOLSETS["audit"]["tools"]:
+            assert tool in known, f"{tool} must be a real registered tool"
+

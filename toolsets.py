@@ -339,6 +339,25 @@ TOOLSETS = {
         "includes": ["web", "vision", "image_gen"]
     },
 
+    # Least-privilege audit toolset — read-only code review without any
+    # write access.  Pair with delegation.subagent_auto_approve (default
+    # false) so any dangerous `terminal` command a child tries is
+    # auto-denied rather than executed.  `terminal` alone (not `process`)
+    # is intentional: background-process management isn't needed for
+    # pytest/git log/git diff, and write_file/patch are deliberately
+    # absent so a review child can't mutate the repo it's auditing.
+    "audit": {
+        "description": (
+            "Least-privilege read-only code audit: read files, search a "
+            "codebase, and run safe read-only shell/test commands. No "
+            "write_file/patch. Pair with delegation.subagent_auto_approve "
+            "(default false) so any dangerous command a child tries via "
+            "`terminal` is auto-denied rather than executed."
+        ),
+        "tools": ["read_file", "search_files", "terminal"],
+        "includes": []
+    },
+
     # Coding posture (base Hermes — CLI/TUI/desktop/ACP). Auto-selected in a
     # code workspace; see agent/coding_context.py. Keeps everything you reach
     # for while pairing on code and drops the rest (messaging, tts, image_gen,

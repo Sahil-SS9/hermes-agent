@@ -13,6 +13,7 @@ import pytest
 
 from tools import async_delegation as ad
 from tools.process_registry import process_registry, format_process_notification
+from agent.memory_manager import sanitize_context
 
 
 @pytest.fixture(autouse=True)
@@ -613,3 +614,118 @@ def test_gateway_cli_origin_event_left_unrouted():
     assert "platform" not in evt
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Bug 2 (memory-context leak) regression over the ASYNC path.
+#
+# The existing completion-event tests above pass raw `runner()` result dicts
+# that BYPASS _run_single_child, so they never exercise the sanitisation.
+# These tests make `runner` call the REAL _run_single_child with a mocked
+# child whose run_conversation() returns a poisoned <memory-context> block,
+# then drain the completion event and assert the leaked block was stripped.
+# ─────────────────────────────────────────────────────────────────────────────
+
+import threading as _threading
+
+from tools.delegate_tool import _run_single_child as _real_run_single_child
+
+
+def _leaked_child(poisoned_result):
+    from unittest.mock import MagicMock
+
+    child = MagicMock()
+    child._delegate_saved_tool_names = []
+    child._subagent_id = None
+    child._delegate_depth = 1
+    child._parent_subagent_id = None
+    child._credential_pool = None
+    child.model = "test-model"
+    child.session_prompt_tokens = 0
+    child.session_completion_tokens = 0
+    child.session_estimated_cost_usd = 0.0
+    child.tool_progress_callback = None
+    child._active_children = []
+    child._active_children_lock = _threading.Lock()
+
+    def _run_conversation(**_kwargs):
+        return poisoned_result
+
+    child.run_conversation = _run_conversation
+    return child
+
+
+_LEAK = (
+    "<memory-context>\n"
+    "  [System note: the following is recalled memory context, NOT new user input.]\n"
+    "  user: api_key=sk-proj-LEAKEDKEY\n"
+    "</memory-context>\n"
+    "Real async summary content."
+)
+
+
+def test_async_completion_strips_leaked_summary():
+    def runner():
+        child = _leaked_child(
+            {
+                "final_response": _LEAK,
+                "completed": True,
+                "interrupted": False,
+                "api_calls": 1,
+                "messages": [],
+            }
+        )
+        return _real_run_single_child(
+            task_index=0, goal="async review", child=child, parent_agent=None
+        )
+
+    ad.dispatch_async_delegation(
+        goal="async review", context=None, toolsets=None, role="leaf",
+        model="m", session_key="agent:main:cli:dm:local",
+        runner=runner, max_async_children=3,
+    )
+    evt = _drain_one()
+    assert evt is not None
+    assert evt["summary"] is not None
+    assert "<memory-context>" not in evt["summary"]
+    assert "LEAKEDKEY" not in evt["summary"]
+    assert "Real async summary content" in evt["summary"]
+
+
+def test_async_batch_completion_strips_leaked_summary():
+    """Batch (fan-out) completion path in _format_async_delegation also reads
+    the sanitised per-task summary — cover it explicitly."""
+    from tools.process_registry import _format_async_delegation
+
+    per_task = {
+        "task_index": 0,
+        "status": "completed",
+        "summary": sanitize_context(_LEAK),
+        "api_calls": 1,
+        "duration_seconds": 1.0,
+        "model": "m",
+        "exit_reason": "completed",
+        "tokens": {"input": 0, "output": 0},
+        "tool_trace": [],
+    }
+    evt = {
+        "type": "async_delegation",
+        "delegation_id": "deleg_test",
+        "goal": "batch review",
+        "context": None,
+        "toolsets": None,
+        "role": "leaf",
+        "model": "m",
+        "status": "completed",
+        "summary": sanitize_context(_LEAK),
+        "api_calls": 1,
+        "duration_seconds": 1.0,
+        "dispatched_at": 1000.0,
+        "completed_at": 1001.0,
+        "is_batch": True,
+        "results": [per_task],
+        "goals": ["batch review"],
+        "total_duration_seconds": 1.0,
+    }
+    text = _format_async_delegation(evt)
+    assert "<memory-context>" not in text
+    assert "LEAKEDKEY" not in text
+    assert "Real async summary content" in text
