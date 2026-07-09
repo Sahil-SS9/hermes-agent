@@ -888,6 +888,19 @@ class GatewayStreamConsumer:
     # treated identically whichever path delivered the text.
     _MEDIA_RE = MEDIA_TAG_CLEANUP_RE
 
+    # Strip recalled memory blocks (``<memory-context>...</memory-context>``)
+    # before delivering interactive responses. The agent core injects these as
+    # context for the model; if a model re-emits them (or a non-streaming path
+    # bypasses the run_agent streaming scrubber) they leak to the user. Mirrors
+    # the defence-in-depth strip already applied at the cron delivery layer.
+    _MEMORY_LEAK_RE = re.compile(
+        r"<memory-context>.*?</memory-context>", re.DOTALL | re.IGNORECASE
+    )
+
+    @staticmethod
+    def _strip_memory_leak(text: str) -> str:
+        return GatewayStreamConsumer._MEMORY_LEAK_RE.sub("", text).strip()
+
     @staticmethod
     def _clean_for_display(text: str) -> str:
         """Strip MEDIA: directives and internal markers from text before display.
@@ -899,7 +912,10 @@ class GatewayStreamConsumer:
         stream finishes — we just need to hide the raw directives from the
         user.
         """
-        return _BasePlatformAdapter.strip_media_directives_for_display(text)
+        text = _BasePlatformAdapter.strip_media_directives_for_display(text)
+        # Defence-in-depth: never deliver recalled memory blocks to the user.
+        text = stream_consumer._strip_memory_leak(text)
+        return text
 
     async def _send_new_chunk(
         self,
