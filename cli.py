@@ -7966,6 +7966,18 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
                 save_config_value("model.base_url", result.base_url)
             elif result.provider_changed:
                 save_config_value("model.base_url", None)
+            # model.api_key / model.api_mode only ever apply to a bare
+            # "custom" endpoint (named providers resolve their own
+            # credentials from the providers: block; built-ins resolve from
+            # env/auth.json/the credential pool). Never WRITE a resolved
+            # credential here; result.api_key can be a live pool-rotated
+            # key, and pinning it into config.yaml would break rotation and
+            # leak it to disk. Only clear stale leftovers when the target
+            # isn't literally "custom", mirroring
+            # gateway/slash_commands.py's clear_model_endpoint_credentials gate.
+            if str(result.target_provider or "").strip().lower() != "custom":
+                save_config_value("model.api_key", None)
+                save_config_value("model.api_mode", None)
             _cprint("    Saved to config.yaml (--global)")
         else:
             _cprint("    (session only — add --global to persist)")
@@ -8290,6 +8302,18 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
                 save_config_value("model.base_url", result.base_url)
             elif result.provider_changed:
                 save_config_value("model.base_url", None)
+            # model.api_key / model.api_mode only ever apply to a bare
+            # "custom" endpoint (named providers resolve their own
+            # credentials from the providers: block; built-ins resolve from
+            # env/auth.json/the credential pool). Never WRITE a resolved
+            # credential here; result.api_key can be a live pool-rotated
+            # key, and pinning it into config.yaml would break rotation and
+            # leak it to disk. Only clear stale leftovers when the target
+            # isn't literally "custom", mirroring
+            # gateway/slash_commands.py's clear_model_endpoint_credentials gate.
+            if str(result.target_provider or "").strip().lower() != "custom":
+                save_config_value("model.api_key", None)
+                save_config_value("model.api_mode", None)
             _cprint("    Saved to config.yaml")
         else:
             _cprint("    (session only — add --global to persist)")
