@@ -1422,9 +1422,17 @@ def _send_media_via_adapter(
 ) -> None:
     """Send extracted MEDIA files as native platform attachments via a live adapter.
 
-    Routes each file to the appropriate adapter method (send_voice, send_image_file,
-    send_video, send_document) based on file extension — mirroring the routing logic
+    Non-document files (voice, video, image) are routed individually through
+    their dedicated adapter methods (``send_voice``, ``send_image_file``,
+    ``send_video``) with per-file status/error handling — mirroring the routing
     in ``BasePlatformAdapter._process_message_background``.
+
+    Document files (everything else) are collected into a single batch and
+    sent through ``adapter.send_multiple_documents``, the Base contract that
+    every adapter owns.  Platforms without a native multi-attachment API
+    (e.g. Telegram) inherit the default per-document fallback from
+    ``BasePlatformAdapter``; platforms with one (e.g. Discord) override it to
+    chunk into multi-attachment messages.
     """
     from pathlib import Path
 
@@ -1432,27 +1440,42 @@ def _send_media_via_adapter(
 
     media_files = BasePlatformAdapter.filter_media_delivery_paths(media_files)
 
-    for media_path, _is_voice in media_files:
-        try:
-            ext = Path(media_path).suffix.lower()
-            route_platform = platform if platform is not None else getattr(adapter, "platform", None)
-            if should_send_media_as_audio(route_platform, ext, is_voice=_is_voice):
-                coro = adapter.send_voice(chat_id=chat_id, audio_path=media_path, metadata=metadata)
-            elif ext in _VIDEO_EXTS:
-                coro = adapter.send_video(chat_id=chat_id, video_path=media_path, metadata=metadata)
-            elif ext in _IMAGE_EXTS:
-                coro = adapter.send_image_file(chat_id=chat_id, image_path=media_path, metadata=metadata)
-            else:
-                coro = adapter.send_document(chat_id=chat_id, file_path=media_path, metadata=metadata)
+    # Partition into non-document files (sent individually with per-file
+    # status/error handling) and document files (sent as one batch through
+    # the Base send_multiple_documents contract).
+    non_doc_files: list = []
+    doc_files: list = []
+    for media_path, is_voice in media_files:
+        ext = Path(media_path).suffix.lower()
+        route_platform = platform if platform is not None else getattr(adapter, "platform", None)
+        if should_send_media_as_audio(route_platform, ext, is_voice=is_voice):
+            non_doc_files.append(("voice", media_path))
+        elif ext in _VIDEO_EXTS:
+            non_doc_files.append(("video", media_path))
+        elif ext in _IMAGE_EXTS:
+            non_doc_files.append(("image", media_path))
+        else:
+            doc_files.append((media_path, is_voice))
 
-            from agent.async_utils import safe_schedule_threadsafe
+    # Non-document media: per-file routing with individual status/error handling.
+    from agent.async_utils import safe_schedule_threadsafe
+
+    for kind, media_path in non_doc_files:
+        try:
+            if kind == "voice":
+                coro = adapter.send_voice(chat_id=chat_id, audio_path=media_path, metadata=metadata)
+            elif kind == "video":
+                coro = adapter.send_video(chat_id=chat_id, video_path=media_path, metadata=metadata)
+            else:
+                coro = adapter.send_image_file(chat_id=chat_id, image_path=media_path, metadata=metadata)
+
             future = safe_schedule_threadsafe(coro, loop)
             if future is None:
                 logger.warning(
                     "Job '%s': cannot send media %s, gateway loop unavailable",
                     job.get("id", "?"), media_path,
                 )
-                return
+                continue
             try:
                 result = future.result(timeout=30)
             except TimeoutError:
@@ -1465,6 +1488,26 @@ def _send_media_via_adapter(
                 )
         except Exception as e:
             logger.warning("Job '%s': failed to send media %s: %s", job.get("id", "?"), media_path, e)
+
+    # Document media: single batch through the Base contract (no hasattr guard).
+    if doc_files:
+        try:
+            coro = adapter.send_multiple_documents(
+                chat_id=chat_id, documents=doc_files, metadata=metadata,
+            )
+            future = safe_schedule_threadsafe(coro, loop)
+            if future is None:
+                logger.warning(
+                    "Job '%s': cannot send %d document(s), gateway loop unavailable",
+                    job.get("id", "?"), len(doc_files),
+                )
+            else:
+                future.result(timeout=60)
+        except Exception as e:
+            logger.warning(
+                "Job '%s': failed to send %d document(s): %s",
+                job.get("id", "?"), len(doc_files), e,
+            )
 
 
 def _confirm_adapter_delivery(send_result) -> bool:

@@ -113,8 +113,8 @@ def test_bare_local_path_only(tmp_path, monkeypatch):
     # Must not raise ValueError from the unpack loop.
     _deliver_with_live_adapter(tmp_path, monkeypatch, f"Daily review ready.\nFull report: {html}", adapter)
     adapter.send.assert_called_once()
-    # Document send must have been invoked (bare .html routes to send_document).
-    adapter.send_document.assert_called_once()
+    # Document now routes through the generic batch method (send_multiple_documents).
+    adapter.send_multiple_documents.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
@@ -127,7 +127,7 @@ def test_explicit_media_tag_only(tmp_path, monkeypatch):
     adapter.send_document.return_value = MagicMock(success=True)
     _deliver_with_live_adapter(tmp_path, monkeypatch, f"Summary.\nMEDIA:{html}", adapter)
     adapter.send.assert_called_once()
-    adapter.send_document.assert_called_once()
+    adapter.send_multiple_documents.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
@@ -145,5 +145,5 @@ def test_mixed_media_tag_and_bare_path(tmp_path, monkeypatch):
         adapter,
     )
     adapter.send.assert_called_once()
-    # Both files must be delivered as documents (no crash, no drop).
-    assert adapter.send_document.call_count == 2
+    # Both files must be delivered in one batch (no crash, no drop).
+    adapter.send_multiple_documents.assert_called_once()

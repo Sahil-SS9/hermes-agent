@@ -3238,6 +3238,40 @@ class BasePlatformAdapter(ABC):
             except Exception as img_err:
                 logger.error("[%s] Error sending image: %s", self.name, img_err, exc_info=True)
 
+    async def send_multiple_documents(
+        self,
+        chat_id: str,
+        documents: List[Tuple[str, str]],
+        metadata: Optional[Dict[str, Any]] = None,
+        human_delay: float = 0.0,
+    ) -> None:
+        """Send a batch of documents (files) as native platform attachments.
+
+        Default implementation sends each document individually through
+        ``send_document``, skipping missing files with a warning.  Override
+        in subclasses to bundle into native multi-attachment API calls
+        (e.g. Discord's 10-attachment-per-message limit).
+
+        ``documents`` is a list of ``(file_path, caption_or_alt)`` tuples —
+        the same shape used by ``send_multiple_images``.
+        """
+        for file_path, _alt in documents:
+            if not os.path.exists(file_path):
+                logger.warning("[%s] Skipping missing document: %s", self.name, file_path)
+                continue
+            if human_delay > 0:
+                await asyncio.sleep(human_delay)
+            try:
+                result = await self.send_document(
+                    chat_id=chat_id,
+                    file_path=file_path,
+                    metadata=metadata,
+                )
+                if not result.success:
+                    logger.error("[%s] Failed to send document: %s", self.name, result.error)
+            except Exception as doc_err:
+                logger.error("[%s] Error sending document: %s", self.name, doc_err, exc_info=True)
+
     async def send_image(
         self,
         chat_id: str,

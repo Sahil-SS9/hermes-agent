@@ -2918,6 +2918,87 @@ class DiscordAdapter(BasePlatformAdapter):
                     except Exception:
                         pass
 
+    async def send_multiple_documents(
+        self,
+        chat_id: str,
+        documents: List[Tuple[str, str]],
+        metadata: Optional[Dict[str, Any]] = None,
+        human_delay: float = 0.0,
+    ) -> None:
+        """Send a batch of documents as chunked Discord attachments.
+
+        Discord permits up to 10 file attachments per message. Batches are
+        chunked accordingly. Forum channels (type 15) use ``create_thread``
+        via ``_forum_post_file``. On per-chunk failure the remaining files
+        in that chunk fall back to per-file ``_send_file_attachment``.
+        """
+        if not self._client:
+            return
+        if not documents:
+            return
+
+        try:
+            channel = self._client.get_channel(int(chat_id))
+            if not channel:
+                channel = await self._client.fetch_channel(int(chat_id))
+            if not channel:
+                logger.warning("[%s] Channel %s not found for multi-doc send", self.name, chat_id)
+                return
+        except Exception as e:
+            logger.warning("[%s] Failed to resolve channel for multi-doc send: %s", self.name, e)
+            await super().send_multiple_documents(chat_id, documents, metadata, human_delay)
+            return
+
+        # Filter to existing files up front.
+        valid_docs: List[Tuple[str, str]] = []
+        for file_path, alt in documents:
+            if not os.path.exists(file_path):
+                logger.warning("[%s] Skipping missing document: %s", self.name, file_path)
+                continue
+            valid_docs.append((file_path, alt))
+
+        if not valid_docs:
+            return
+
+        CHUNK = 10
+        chunks = [valid_docs[i:i + CHUNK] for i in range(0, len(valid_docs), CHUNK)]
+
+        for chunk_idx, chunk in enumerate(chunks):
+            if human_delay > 0 and chunk_idx > 0:
+                await asyncio.sleep(human_delay)
+            try:
+                files: List[Any] = []
+                for file_path, _alt in chunk:
+                    files.append(discord.File(file_path, filename=os.path.basename(file_path)))
+
+                logger.info(
+                    "[%s] Sending %d document(s) as Discord message (chunk %d/%d)",
+                    self.name, len(files), chunk_idx + 1, len(chunks),
+                )
+
+                if self._is_forum_parent(channel):
+                    await self._forum_post_file(
+                        channel,
+                        content="",
+                        files=files,
+                    )
+                else:
+                    await channel.send(content=None, files=files)
+            except Exception as e:
+                logger.warning(
+                    "[%s] Multi-doc Discord send failed (chunk %d/%d), falling back to per-file: %s",
+                    self.name, chunk_idx + 1, len(chunks), e,
+                    exc_info=True,
+                )
+                for file_path, _alt in chunk:
+                    try:
+                        await self._send_file_attachment(chat_id, file_path)
+                    except Exception as per_file_err:
+                        logger.error(
+                            "[%s] Per-file fallback failed for %s: %s",
+                            self.name, file_path, per_file_err,
+                        )
+
     async def play_tts(
         self,
         chat_id: str,
@@ -9104,6 +9185,81 @@ async def _standalone_post_json_with_429_retry(
         return data, None
 
 
+def _standalone_close_handles(handles):
+    """Best-effort close of file handles opened for a multipart form.
+
+    Called after every POST attempt (success, 429, error) so that no file
+    handle survives into the next retry form. Exceptions are logged but never
+    propagated — a failed close on a consumed stream must not mask the real
+    POST result.
+    """
+    for _fh in handles:
+        try:
+            _fh.close()
+        except Exception as _e:
+            logger.debug("failed to close multipart file handle: %s", _e)
+
+
+async def _standalone_post_multipart_with_429_retry(
+    session, url: str, *, headers: dict, form_factory, req_kw: dict, error_label: str,
+):
+    """POST multipart FormData to Discord, retrying once inline on a 429.
+
+    Mirrors ``_standalone_post_json_with_429_retry`` but for file-attachment
+    uploads. ``form_factory`` is a zero-arg callable returning a 2-tuple
+    ``(aiohttp.FormData, list_of_open_handles)`` — a *fresh* form backed by
+    freshly opened file handles for every invocation. Returning fresh
+    handles each call is required because file streams are consumed by the
+    first POST and cannot be reused on the retry; the helper owns and
+    deterministically closes the handles from each invocation after the
+    corresponding POST completes (success, 429, or error), before a fresh
+    retry form is built. Returns (data, error) with the same contract as the
+    JSON variant.
+    """
+    handles = []
+    try:
+        form, handles = form_factory()
+        async with session.post(url, headers=headers, data=form, **req_kw) as resp:
+            if resp.status == 429:
+                body = await _standalone_read_text_limited(resp, _DISCORD_STANDALONE_ERROR_BODY_LIMIT_BYTES)
+                retry_after = 1.0
+                try:
+                    retry_after = min(
+                        _DISCORD_STANDALONE_MAX_INLINE_RETRY_SECONDS,
+                        max(0.1, float(json.loads(body).get("retry_after", retry_after))),
+                    )
+                except Exception:
+                    pass
+                logger.warning(
+                    "%s rate-limited (429); retrying once in %.2fs", error_label, retry_after,
+                )
+                await asyncio.sleep(retry_after)
+            else:
+                if resp.status not in {200, 201}:
+                    body = await _standalone_read_text_limited(resp, _DISCORD_STANDALONE_ERROR_BODY_LIMIT_BYTES)
+                    return None, f"{error_label} ({resp.status}): {body}"
+                data = await _standalone_read_json_limited(resp, _DISCORD_STANDALONE_JSON_BODY_LIMIT_BYTES)
+                return data, None
+    finally:
+        _standalone_close_handles(handles)
+
+    # 429 path only reaches here: close first-attempt handles then build a
+    # fresh retry form with its own fresh handles.
+    retry_handles = []
+    try:
+        retry_form, retry_handles = form_factory()
+        async with session.post(url, headers=headers, data=retry_form, **req_kw) as retry_resp:
+            if retry_resp.status not in {200, 201}:
+                retry_body = await _standalone_read_text_limited(
+                    retry_resp, _DISCORD_STANDALONE_ERROR_BODY_LIMIT_BYTES,
+                )
+                return None, f"{error_label} ({retry_resp.status}): {retry_body}"
+            data = await _standalone_read_json_limited(retry_resp, _DISCORD_STANDALONE_JSON_BODY_LIMIT_BYTES)
+            return data, None
+    finally:
+        _standalone_close_handles(retry_handles)
+
+
 async def _standalone_send(
     pconfig,
     chat_id: str,
@@ -9291,37 +9447,66 @@ async def _standalone_send(
                 if send_err is not None:
                     return {"error": send_err}
 
-            # Send each media file as a separate multipart upload
+            # Batch media files: Discord permits <=10 attachments per message.
+            # Chunk the valid media into batches of 10 with a 1s inter-batch
+            # delay, using _standalone_post_multipart_with_429_retry so each
+            # batch retries once inline on a 429. Safe-path filtering and
+            # file-handle cleanup are preserved per batch.
+            valid_media_paths = []
             for media_path, _is_voice in media_files:
                 if not os.path.exists(media_path):
                     warning = f"Media file not found, skipping: {media_path}"
                     logger.warning(warning)
                     warnings.append(warning)
                     continue
-                try:
+                valid_media_paths.append(media_path)
+
+            _MEDIA_CHUNK = 10
+            _INTER_BATCH_DELAY = 1.0
+            for batch_idx in range(0, len(valid_media_paths), _MEDIA_CHUNK):
+                if batch_idx > 0:
+                    await asyncio.sleep(_INTER_BATCH_DELAY)
+                batch = valid_media_paths[batch_idx:batch_idx + _MEDIA_CHUNK]
+
+                def _build_form(_batch=batch):
+                    # Open a fresh file handle per attachment and pass the
+                    # *open* handle directly to add_field so aiohttp streams
+                    # the bytes instead of buffering them in memory. The
+                    # helper closes these handles after the POST. Each
+                    # invocation opens its own handles so a 429 retry never
+                    # reuses a consumed stream.
                     form = aiohttp.FormData()
-                    filename = os.path.basename(media_path)
-                    with open(media_path, "rb") as f:
-                        form.add_field("files[0]", f, filename=filename)
-                        async with session.post(url, headers=auth_headers, data=form, **_req_kw) as resp:
-                            if resp.status not in {200, 201}:
-                                body = await _standalone_read_text_limited(
-                                    resp,
-                                    _DISCORD_STANDALONE_ERROR_BODY_LIMIT_BYTES,
-                                )
-                                warning = _standalone_sanitize_error(f"Failed to send media {media_path}: Discord API error ({resp.status}): {body}")
-                                logger.error(warning)
-                                warnings.append(warning)
-                                continue
-                            last_data = await _standalone_read_json_limited(
-                                resp,
-                                _DISCORD_STANDALONE_JSON_BODY_LIMIT_BYTES,
-                            )
+                    handles = []
+                    for _idx, _path in enumerate(_batch):
+                        _fh = open(_path, "rb")
+                        handles.append(_fh)
+                        form.add_field(
+                            f"files[{_idx}]",
+                            _fh,
+                            filename=os.path.basename(_path),
+                        )
+                    return form, handles
+
+                try:
+                    batch_data, batch_err = await _standalone_post_multipart_with_429_retry(
+                        session, url,
+                        headers=auth_headers,
+                        form_factory=_build_form,
+                        req_kw=_req_kw,
+                        error_label=f"Discord media batch ({batch_idx // _MEDIA_CHUNK + 1})",
+                    )
+                    if batch_err is not None:
+                        warning = _standalone_sanitize_error(batch_err)
+                        logger.error(warning)
+                        warnings.append(warning)
+                        continue
+                    last_data = batch_data
                 except Exception as e:
-                    warning = _standalone_sanitize_error(f"Failed to send media {media_path}: {e}")
+                    warning = _standalone_sanitize_error(
+                        f"Failed to send media batch starting at {batch[0]}: {e}"
+                    )
                     logger.error(warning)
                     warnings.append(warning)
-
         if last_data is None:
             error = "No deliverable text or media remained after processing"
             if warnings:
