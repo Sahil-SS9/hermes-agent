@@ -405,7 +405,16 @@ def check_kanban() -> dict | None:
             triage_total += cur.fetchone()[0]
             cur.execute("SELECT COUNT(*) FROM tasks WHERE status = 'blocked'")
             blocked_total += cur.fetchone()[0]
-            cur.execute("SELECT COUNT(*) FROM tasks WHERE status NOT IN ('done','archived','completed') AND updated_at < ?", (stale_ts,))
+            # Derive staleness from task_events.created_at (exists on ALL boards).
+            # Fall back to tasks.created_at for tasks with no events.
+            cur.execute("""
+                SELECT COUNT(*) FROM tasks t
+                WHERE t.status NOT IN ('done','archived','completed')
+                  AND COALESCE(
+                    (SELECT MAX(created_at) FROM task_events WHERE task_id = t.id),
+                    t.created_at
+                  ) < ?
+            """, (stale_ts,))
             stale_total += cur.fetchone()[0]
             conn.close()
         except Exception:
