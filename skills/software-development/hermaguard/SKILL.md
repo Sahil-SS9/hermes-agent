@@ -372,6 +372,26 @@ The feature pipeline's review step (`sdlc-review`) checks that Hermaguard was ru
 ### With KENSEI Governance
 CRITICAL findings should be logged to `#governance` — they're system-level risks.
 
+### With the Release Gate (L4+ block)
+The `scripts/hermaguard_release_gate.py` module consumes Hermaguard findings and
+blocks a release when **any** finding is graded **L4, L5, or L6** (the action-graded
+harm-potential levels from arXiv:2607.07474). Findings graded **L0–L3** allow the
+release through. Each finding should carry an explicit `L_level` (auto-graded by the
+consolidator per `severity-rubric.json`); the gate also derives the level on the fly
+from the typed-action booleans (`completed`, `reversible`, `cross_scope`, `privilege`,
+`escalation`). A finding that cannot be graded is **fail-closed: treated as a block**,
+never silently allowed.
+
+Wiring (consumes findings emitted by this skill's report):
+```bash
+# Allowed (all findings L0-L3): exit 0
+python scripts/hermaguard_release_gate.py --json findings.json
+# Blocked (any L4+): exit 2, report lists every blocking finding with L-level
+#   definition, Hermaguard tier, location, detail, and fix
+```
+The gate is the canonical release-blocking check for the severity-aware flow. Its
+exit code (0 allow / 2 block) is suitable for a CI pre-release hook.
+
 ---
 
 ## Configuration
