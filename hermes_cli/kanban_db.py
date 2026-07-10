@@ -109,6 +109,14 @@ VALID_STATUSES = {
     # Feature pipeline stages (Phase A→D)
     "research", "prd", "spec", "council", "sign_off", "tech_review",
     "decompose", "execute", "pr+qa", "audit", "final_sign_off", "document",
+    # Terminal blocked state set by ``block_task`` when a worker hits a
+    # stakeholder-decision gate (``escalation_target IS NOT NULL`` and a
+    # decision-kind block). Differs from ``blocked`` because it is meant
+    # to be human-owned: ``unblock_task`` refuses to flip it, the
+    # kensei-blocked-unblocker cron pre-check skips it, and dispatch
+    # never claims it. The only legitimate exits are a direct operator
+    # write (e.g. ``hermes kanban set-status ... done``) or reschedule.
+    "decision-needed",
 }
 VALID_INITIAL_STATUSES = {"running", "blocked", "backlog"}
 
@@ -132,7 +140,23 @@ VALID_INITIAL_STATUSES = {"running", "blocked", "backlog"}
 # ``BLOCK_RECURRENCE_LIMIT``) escalates them to ``triage`` if a cron keeps
 # unblocking them only to have the worker re-block for the same reason.
 # ``None`` = legacy/un-typed block (treated as a generic human blocker).
-VALID_BLOCK_KINDS = {"dependency", "needs_input", "capability", "transient"}
+VALID_BLOCK_KINDS = {
+    "dependency", "needs_input", "capability", "transient",
+    # Decision kinds: blocks that need a human to decide before the task can
+    # continue. Routed by ``block_task`` to the ``decision-needed`` terminal
+    # status when ``escalation_target`` is set on the task, instead of the
+    # generic ``blocked`` bucket. See ``DECISION_BLOCK_KINDS`` below.
+    "stakeholder-decision", "escalation",
+}
+
+# Subset of ``VALID_BLOCK_KINDS`` whose blocks carry a "human must decide"
+# semantic. When a task is blocked with one of these kinds AND it has an
+# ``escalation_target`` set, ``block_task`` routes it to the
+# ``decision-needed`` terminal status (not ``blocked``) so the auto-unblocker
+# loop can't churn on it. Without ``escalation_target`` these kinds fall
+# through to the regular ``blocked`` routing — only an explicit human
+# escalation promotes the task into the terminal decision gate.
+DECISION_BLOCK_KINDS = {"stakeholder-decision", "escalation"}
 
 # After a task has been blocked, unblocked, and re-blocked this many times for
 # the same (truly-blocked) reason, the unblock-loop breaker stops trusting the
@@ -5516,8 +5540,19 @@ def block_task(
       can use it to signal "this might clear on its own"; it still participates
       in the loop breaker so a forever-flaky task eventually escalates.
 
-    Returns True on any successful transition (to ``blocked``, ``todo``, or
-    ``triage``), False when the task wasn't in a blockable state.
+    * ``stakeholder-decision`` / ``escalation`` — decision kinds
+      (subset :data:`DECISION_BLOCK_KINDS`). When the task already has an
+      ``escalation_target`` set, the block routes the task to the
+      ``decision-needed`` terminal status instead of ``blocked`` — surfacing
+      it as human-owned so the auto-unblocker can't churn on it. Without an
+      ``escalation_target`` the block falls through to the regular
+      ``blocked`` routing (the decision-kind alone is not enough; a human
+      must have explicitly escalated the task for it to enter the terminal
+      decision gate).
+
+    Returns True on any successful transition (to ``blocked``, ``todo``,
+    ``triage``, or ``decision-needed``), False when the task wasn't in a
+    blockable state.
     """
     if kind is not None and kind not in VALID_BLOCK_KINDS:
         raise ValueError(
@@ -5527,7 +5562,8 @@ def block_task(
     recurrences = 0
     with write_txn(conn):
         cur_row = conn.execute(
-            "SELECT status, block_kind, block_recurrences FROM tasks WHERE id = ?",
+            "SELECT status, block_kind, block_recurrences, escalation_target "
+            "FROM tasks WHERE id = ?",
             (task_id,),
         ).fetchone()
         if cur_row is None:
@@ -5538,6 +5574,22 @@ def block_task(
             if "block_recurrences" in cur_row.keys()
             and cur_row["block_recurrences"] is not None
             else 0
+        )
+        # Pre-compute the decision-gate routing. A decision-kind block with an
+        # ``escalation_target`` is the explicit human signal that this task
+        # needs a decision, not another auto-recovery cycle. We evaluate this
+        # once up-front so both the loop-detected (``triage``) and the normal
+        # (``blocked``) branches can fall through to it. The recurrence
+        # counter still increments — a forever-flaky decision-kind task will
+        # still hit BLOCK_RECURRENCE_LIMIT and be routed to ``triage`` so a
+        # human can see "this decision has been bouncing" rather than the
+        # task silently sitting in ``decision-needed`` while the underlying
+        # problem keeps re-asserting itself.
+        is_decision_block = kind in DECISION_BLOCK_KINDS
+        is_escalated = (
+            "escalation_target" in cur_row.keys()
+            and cur_row["escalation_target"] is not None
+            and str(cur_row["escalation_target"]).strip() != ""
         )
 
         # Dependency blocks never enter the human ``blocked`` bucket — they
@@ -5597,11 +5649,19 @@ def block_task(
 
         if recurrences >= BLOCK_RECURRENCE_LIMIT:
             # Loop detected — stop letting the unblocker spin this task. Route
-            # to triage for a human-in-the-loop decision instead of blocked.
+            # to triage for a human-in-the-loop decision instead of blocked —
+            # UNLESS this is a decision-kind block on an already-escalated
+            # task, in which case the terminal decision gate
+            # (``decision-needed``) wins so the human sees the decision
+            # surfaced for action rather than re-buried in a triage loop.
+            dest_status = (
+                "decision-needed" if is_decision_block and is_escalated
+                else "triage"
+            )
             cur = conn.execute(
                 """
                 UPDATE tasks
-                   SET status        = 'triage',
+                   SET status        = ?,
                        claim_lock    = NULL,
                        claim_expires = NULL,
                        worker_pid    = NULL,
@@ -5610,8 +5670,9 @@ def block_task(
                  WHERE id = ?
                    AND status IN ('running', 'ready')
                 """ + ("" if expected_run_id is None else " AND current_run_id = ?"),
-                (kind, recurrences, task_id) if expected_run_id is None
-                else (kind, recurrences, task_id, int(expected_run_id)),
+                (dest_status, kind, recurrences, task_id)
+                if expected_run_id is None
+                else (dest_status, kind, recurrences, task_id, int(expected_run_id)),
             )
             if cur.rowcount != 1:
                 return False
@@ -5631,16 +5692,28 @@ def block_task(
                     "kind": kind,
                     "recurrences": recurrences,
                     "limit": BLOCK_RECURRENCE_LIMIT,
+                    "decision_gate": is_decision_block and is_escalated,
+                    "routed_to": dest_status,
                 },
                 run_id=run_id,
             )
-            routed_to = "triage"
+            routed_to = dest_status
         else:
+            # Decision-gate routing: a decision-kind block with an
+            # ``escalation_target`` set on the task lands the task in the
+            # ``decision-needed`` terminal status (human-owned, unblocker
+            # refuses to touch it). Without ``escalation_target`` the regular
+            # ``blocked`` bucket is used so the human escalation flow remains
+            # the explicit signal.
+            dest_status = (
+                "decision-needed" if is_decision_block and is_escalated
+                else "blocked"
+            )
             if expected_run_id is None:
                 cur = conn.execute(
                     """
                     UPDATE tasks
-                       SET status        = 'blocked',
+                       SET status        = ?,
                            claim_lock    = NULL,
                            claim_expires = NULL,
                            worker_pid    = NULL,
@@ -5649,13 +5722,13 @@ def block_task(
                      WHERE id = ?
                        AND status IN ('running', 'ready')
                     """,
-                    (kind, recurrences, task_id),
+                    (dest_status, kind, recurrences, task_id),
                 )
             else:
                 cur = conn.execute(
                     """
                     UPDATE tasks
-                       SET status        = 'blocked',
+                       SET status        = ?,
                            claim_lock    = NULL,
                            claim_expires = NULL,
                            worker_pid    = NULL,
@@ -5665,7 +5738,7 @@ def block_task(
                        AND status IN ('running', 'ready')
                        AND current_run_id = ?
                     """,
-                    (kind, recurrences, task_id, int(expected_run_id)),
+                    (dest_status, kind, recurrences, task_id, int(expected_run_id)),
                 )
             if cur.rowcount != 1:
                 return False
@@ -5684,9 +5757,16 @@ def block_task(
                 )
             _append_event(
                 conn, task_id, "blocked",
-                {"reason": reason, "kind": kind, "recurrences": recurrences},
+                {
+                    "reason": reason,
+                    "kind": kind,
+                    "recurrences": recurrences,
+                    "decision_gate": is_decision_block and is_escalated,
+                    "routed_to": dest_status,
+                },
                 run_id=run_id,
             )
+            routed_to = dest_status
         _blocked_task = get_task(conn, task_id)
     _fire_kanban_lifecycle_hook(
         "kanban_task_blocked",
@@ -5705,9 +5785,12 @@ def block_task(
         event_type="kanban.task.blocked",
         object_type="kanban_task",
         object_id=task_id,
-        status_to="blocked",
+        # Follow the actual destination so dashboards and event consumers see
+        # the right landing state (``decision-needed`` for decision gates,
+        # ``triage`` for loop-detected, ``blocked`` for normal).
+        status_to=routed_to,
         summary=reason or f"Blocked kanban task {task_id}",
-        payload={"reason": reason, "run_id": run_id},
+        payload={"reason": reason, "run_id": run_id, "routed_to": routed_to},
     )
     return True
 
@@ -5966,6 +6049,16 @@ def promote_task(
 def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
     """Transition ``blocked``/``scheduled`` -> ready or todo.
 
+    Refuses to unblock tasks that are gated on a human decision — those
+    carry ``status = 'decision-needed'`` or, while still in ``blocked``,
+    have a decision-kind block (:data:`DECISION_BLOCK_KINDS`) with
+    ``escalation_target`` set. In both cases the task is meant to be
+    human-owned: the only legitimate exits are a direct operator write
+    (e.g. ``hermes kanban set-status ... done``) or reschedule. Returning
+    ``False`` on refusal lets the auto-unblocker cron skip these cleanly
+    instead of cycling them, and the operator CLI surfaces the reason via
+    the post-call error path.
+
     Defensively closes any stale ``current_run_id`` pointer before flipping
     status. In the common path (``block_task`` closed the run already) this
     is a no-op. If a future or external write left the pointer dangling,
@@ -5975,6 +6068,54 @@ def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
     """
     now = int(time.time())
     with write_txn(conn):
+        # Decision-gate refusal: a task currently in ``decision-needed`` is
+        # already human-owned and an auto-unblocker must not flip it. We
+        # also catch the *in-flight* case where the task is still in
+        # ``blocked`` (e.g. the upstream ``block_task`` routed it to
+        # ``blocked`` instead of ``decision-needed`` because it had no
+        # ``escalation_target`` set at the time, but one was added later
+        # by an operator) but the row carries the decision-gate
+        # fingerprint: a decision-kind block with ``escalation_target``
+        # set. Mirrors the routing predicate in ``block_task`` so the
+        # refusal stays in sync as ``DECISION_BLOCK_KINDS`` evolves.
+        gated = conn.execute(
+            "SELECT status, block_kind, escalation_target FROM tasks WHERE id = ?",
+            (task_id,),
+        ).fetchone()
+        if gated is not None:
+            status = gated["status"]
+            block_kind = gated["block_kind"]
+            escalation = gated["escalation_target"]
+            is_decision_needed = status == "decision-needed"
+            is_decision_gated = (
+                status == "blocked"
+                and block_kind in DECISION_BLOCK_KINDS
+                and bool(
+                    escalation is not None
+                    and str(escalation).strip() != ""
+                )
+            )
+            if is_decision_needed or is_decision_gated:
+                _log.warning(
+                    "unblock_task refused: task %s is decision-gated "
+                    "(status=%r, block_kind=%r, escalation_target=%r); "
+                    "human decision required",
+                    task_id, status, block_kind, escalation,
+                )
+                # Append a refusal event so the audit trail captures the
+                # auto-unblocker's attempt — same shape as the success
+                # event but with a ``refused`` flag, so a dashboard can
+                # spot the cycling pattern at a glance.
+                _append_event(
+                    conn, task_id, "unblock_refused",
+                    {
+                        "reason": "decision-gated",
+                        "status": status,
+                        "block_kind": block_kind,
+                        "escalation_target": escalation,
+                    },
+                )
+                return False
         stale = conn.execute(
             "SELECT current_run_id FROM tasks WHERE id = ? AND status IN ('blocked', 'scheduled')",
             (task_id,),
@@ -6679,6 +6820,17 @@ def set_escalation_target(
     The daily briefing's "NEEDS YOU" section reads every still-open task whose
     ``escalation_target`` is set, so this is the single structured signal that
     drives human escalation. Allowed on any non-terminal status.
+
+    Refuses to set the target on a task already in the ``decision-needed``
+    terminal state — that row has already been promoted to a human gate by
+    ``block_task`` and any further ``escalation_target`` write would mutate a
+    human-owned task through automation. The escalation column is intended
+    to be set *before* the block transitions the status; re-setting it after
+    is meaningless and is treated as automation touching a human-owned row.
+    The same refusal applies to *clearing* the target while the task is in
+    the terminal decision gate — only a direct status flip (e.g. ``hermes
+    kanban set-status ... done``) should move it out, not column-level
+    writes from the escalate CLI.
     """
     cleaned = (str(target).strip() or None) if target is not None else None
     with write_txn(conn):
@@ -6691,6 +6843,11 @@ def set_escalation_target(
         if status in {"done", "archived"}:
             raise ValueError(
                 f"cannot set escalation_target on terminal task (status={status!r})"
+            )
+        if status == "decision-needed":
+            raise ValueError(
+                f"cannot set escalation_target on decision-gated task "
+                f"(status='decision-needed'); human decision required"
             )
         if row["escalation_target"] == cleaned:
             return {"ok": True, "escalation_target": cleaned, "changed": False,
@@ -7505,8 +7662,39 @@ def schedule_task(
     ``scheduled`` tasks are intentionally not dispatchable; an external cron,
     human action, or automation can later call ``unblock_task`` to re-gate them
     to ``ready`` (or ``todo`` if parents are still incomplete).
+
+    Refuses to schedule a task currently in the ``decision-needed`` terminal
+    state — that status means a human decision is gating the task and
+    automation must not silently re-time it. The status whitelist below also
+    excludes ``decision-needed``, so the UPDATE would no-op anyway; this guard
+    is here so the refusal is *explicit* (log + audit event) rather than
+    silent, matching the pattern in :func:`unblock_task`. Mirrors
+    ``VALID_STATUSES`` intent: a task in a terminal blocked state is
+    human-owned until a human moves it.
     """
     with write_txn(conn):
+        # Defensive early-out: if the row is in ``decision-needed`` log a
+        # refusal event and return False instead of relying on the UPDATE
+        # whitelist below to no-op. Keeps the invariant visible to anyone
+        # reading the function or the audit trail, and protects against a
+        # future change that widens the whitelist.
+        gated = conn.execute(
+            "SELECT status FROM tasks WHERE id = ?", (task_id,),
+        ).fetchone()
+        if gated is not None and gated["status"] == "decision-needed":
+            _log.warning(
+                "schedule_task refused: task %s is decision-gated "
+                "(status='decision-needed'); human decision required",
+                task_id,
+            )
+            _append_event(
+                conn, task_id, "schedule_refused",
+                {
+                    "reason": "decision-gated",
+                    "status": "decision-needed",
+                },
+            )
+            return False
         params: list[Any] = [task_id]
         sql = """
             UPDATE tasks

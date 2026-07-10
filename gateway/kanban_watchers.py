@@ -109,6 +109,62 @@ def _release_singleton_lock(handle) -> None:
         pass
 
 
+def _board_notifier_lock_path(slug: str) -> Path:
+    """Return the filesystem path for a per-board notifier lock.
+
+    Each board gets its own lock file under ``<kanban_home>/.notifier.locks/``
+    so that only one gateway process polls a given board DB at a time.
+    """
+    from hermes_cli import kanban_db as _kb
+    return _kb.kanban_home() / "kanban" / ".notifier.locks" / f"{slug}.lock"
+
+
+def _acquire_board_notifier_lock(slug: str) -> "tuple[Optional[object], str]":
+    """Take an exclusive, non-blocking advisory lock for a single board's notifier.
+
+    Only one gateway process may poll a given board's DB for kanban
+    notifications at a time. Without this guard, N concurrent gateway
+    processes (one per profile) all open the same board DB every 5s,
+    producing sustained concurrent WAL-writer pressure that corrupts
+    index pages under heavy event volume.
+
+    Returns ``(handle, "held")`` on success — the caller keeps the file
+    handle for the duration of the board poll and **must** release it via
+    :func:`_release_board_notifier_lock`. ``(None, "contended")`` when
+    another gateway holds the lock (caller skips this board's poll).
+    ``(None, "unavailable")`` when locking cannot be performed.
+    """
+    try:
+        from gateway.status import _try_acquire_file_lock
+    except ImportError:
+        return None, "unavailable"
+    lock_path = _board_notifier_lock_path(slug)
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        handle = open(str(lock_path), "a+", encoding="utf-8")
+    except OSError:
+        return None, "unavailable"
+    if not _try_acquire_file_lock(handle):
+        handle.close()
+        return None, "contended"
+    return handle, "held"
+
+
+def _release_board_notifier_lock(handle) -> None:
+    """Release a per-board notifier lock acquired via :func:`_acquire_board_notifier_lock`."""
+    if handle is None:
+        return
+    try:
+        from gateway.status import _release_file_lock
+        _release_file_lock(handle)
+    except Exception:
+        pass
+    try:
+        handle.close()
+    except Exception:
+        pass
+
+
 class GatewayKanbanWatchersMixin:
     """Kanban watcher / notifier / dispatcher loops for GatewayRunner."""
 
@@ -230,10 +286,24 @@ class GatewayKanbanWatchersMixin:
                             )
                             continue
                         seen_db_paths.add(resolved_db_path)
+                        # Per-board notifier lock: only one gateway polls a
+                        # given board DB at a time. Without this guard, N
+                        # concurrent gateway processes (one per profile) all
+                        # open the same board DB every 5s, producing sustained
+                        # concurrent WAL-writer pressure that corrupts index
+                        # pages under heavy event volume.
+                        lock_handle, lock_state = _acquire_board_notifier_lock(slug)
+                        if lock_state != "held":
+                            logger.debug(
+                                "kanban notifier: board %s notifier lock %s; skipping",
+                                slug, lock_state,
+                            )
+                            continue
                         try:
                             conn = _kb.connect(board=slug)
                         except Exception as exc:
                             logger.debug("kanban notifier: cannot open board %s: %s", slug, exc)
+                            _release_board_notifier_lock(lock_handle)
                             continue
                         try:
                             # `connect()` runs the schema + idempotent migration
@@ -293,6 +363,7 @@ class GatewayKanbanWatchersMixin:
                                 })
                         finally:
                             conn.close()
+                            _release_board_notifier_lock(lock_handle)
                     return deliveries
 
                 deliveries = await asyncio.to_thread(_collect)

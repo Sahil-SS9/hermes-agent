@@ -1096,7 +1096,13 @@ def _maybe_auto_subscribe(conn: Any, task_id: str) -> bool:
 
 
 def _handle_unblock(args: dict, **kw) -> str:
-    """Transition a blocked task back to ready."""
+    """Transition a blocked task back to ready.
+
+    Returns a specific error when the task is in ``decision-needed`` or
+    otherwise decision-gated (see :func:`hermes_cli.kanban_db.unblock_task`
+    for the refusal predicate) so the operator knows it needs a human
+    decision rather than a cron-style retry.
+    """
     guard = _require_orchestrator_tool("kanban_unblock")
     if guard:
         return guard
@@ -1112,7 +1118,41 @@ def _handle_unblock(args: dict, **kw) -> str:
         try:
             ok = kb.unblock_task(conn, str(tid))
             if not ok:
-                return tool_error(f"could not unblock {tid} (not blocked or unknown)")
+                # Distinguish decision-gated refusals from generic
+                # "not blocked" so operators get an actionable message.
+                gated_row = conn.execute(
+                    "SELECT status, block_kind, escalation_target "
+                    "FROM tasks WHERE id = ?",
+                    (str(tid),),
+                ).fetchone()
+                if gated_row is None:
+                    return tool_error(
+                        f"could not unblock {tid} (not found)"
+                    )
+                status = gated_row["status"]
+                block_kind = gated_row["block_kind"]
+                escalation = gated_row["escalation_target"]
+                if status == "decision-needed":
+                    return tool_error(
+                        f"task {tid} is in 'decision-needed' state "
+                        f"(escalation_target={escalation!r}); a human "
+                        f"decision is required — use 'hermes kanban "
+                        f"set-status' to advance it directly"
+                    )
+                if (
+                    status == "blocked"
+                    and block_kind in kb.DECISION_BLOCK_KINDS
+                    and escalation
+                ):
+                    return tool_error(
+                        f"task {tid} is decision-gated "
+                        f"(block_kind={block_kind!r}, "
+                        f"escalation_target={escalation!r}); a human "
+                        f"decision is required"
+                    )
+                return tool_error(
+                    f"could not unblock {tid} (not blocked or unknown)"
+                )
             return _ok(task_id=str(tid), status="ready")
         finally:
             conn.close()

@@ -1459,6 +1459,207 @@ def test_unblock_without_parents_goes_to_ready(kanban_home):
         assert kb.get_task(conn, t).status == "ready"
 
 
+def test_unblock_refuses_decision_needed_status(kanban_home):
+    """unblock_task must refuse tasks in the ``decision-needed`` terminal state.
+
+    ``decision-needed`` is the human-owned escalation state set by
+    ``block_task`` for decision-kind blocks with ``escalation_target``.
+    The auto-unblocker cron must skip these (otherwise it would cycle
+    decision-gated tasks forever). The function returns ``False`` so
+    callers can log the refusal and move on; the underlying status is
+    unchanged. A refusal event is recorded for the audit trail.
+    """
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="awaiting human", assignee="a")
+        kb.claim_task(conn, t)
+        # Simulate block_task routing into the decision-needed terminal
+        # state with an escalation target. We set the columns directly
+        # (the routing predicate itself is exercised by the
+        # block_task tests); this test only needs the post-condition.
+        conn.execute(
+            "UPDATE tasks SET status = ?, block_kind = ?, "
+            "escalation_target = ?, current_run_id = NULL "
+            "WHERE id = ?",
+            ("decision-needed", "stakeholder-decision", "sahil", t),
+        )
+        conn.commit()
+        assert kb.unblock_task(conn, t) is False
+        # Status and escalation_target are unchanged. Read the columns
+        # via SQL because ``Task`` does not expose ``escalation_target``
+        # as a Python attribute (the column is consumed by the
+        # escalation-aware routing code, not the dataclass).
+        row = conn.execute(
+            "SELECT status, escalation_target FROM tasks WHERE id = ?",
+            (t,),
+        ).fetchone()
+        assert row["status"] == "decision-needed"
+        assert row["escalation_target"] == "sahil"
+        # Refusal event is recorded.
+        ev_rows = conn.execute(
+            "SELECT kind, payload FROM task_events "
+            "WHERE task_id = ? AND kind = 'unblock_refused' "
+            "ORDER BY id DESC LIMIT 1",
+            (t,),
+        ).fetchall()
+        assert len(ev_rows) == 1
+        assert ev_rows[0]["kind"] == "unblock_refused"
+
+
+def test_unblock_refuses_blocked_with_decision_kind_and_escalation(kanban_home):
+    """unblock_task must refuse a ``blocked`` task whose row carries the
+    decision-gate fingerprint (decision-kind block + ``escalation_target``).
+
+    This catches the in-flight case where ``block_task`` did not promote
+    the status to ``decision-needed`` (e.g. the escalation was added
+    after the block, or the block was placed before the new routing
+    shipped) but the row is still semantically decision-gated. The
+    refusal stays in sync with ``DECISION_BLOCK_KINDS`` so any new
+    decision kind added to the set is automatically protected.
+    """
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="stuck awaiting decision", assignee="a")
+        kb.claim_task(conn, t)
+        # Simulate a block_task outcome that landed in ``blocked`` rather
+        # than ``decision-needed`` — e.g. the worker called
+        # ``block_task(conn, t, kind="stakeholder-decision")`` without an
+        # escalation_target on the row yet, then the operator escalated.
+        # The block_task routing predicate in this working tree lands
+        # these in ``blocked``, so the test mirrors that post-condition.
+        conn.execute(
+            "UPDATE tasks SET status = ?, block_kind = ?, "
+            "escalation_target = ?, current_run_id = NULL "
+            "WHERE id = ?",
+            ("blocked", "stakeholder-decision", "sahil", t),
+        )
+        conn.commit()
+        assert kb.unblock_task(conn, t) is False
+        row = conn.execute(
+            "SELECT status, escalation_target FROM tasks WHERE id = ?",
+            (t,),
+        ).fetchone()
+        assert row["status"] == "blocked"
+        assert row["escalation_target"] == "sahil"
+        # Refusal event recorded.
+        n = conn.execute(
+            "SELECT COUNT(*) AS n FROM task_events "
+            "WHERE task_id = ? AND kind = 'unblock_refused'",
+            (t,),
+        ).fetchone()["n"]
+        assert n == 1
+
+
+def test_unblock_refuses_each_decision_block_kind(kanban_home):
+    """Every kind in ``DECISION_BLOCK_KINDS`` is refused when paired with
+    ``escalation_target``.
+
+    Catches a refactor that adds a new decision kind to
+    ``DECISION_BLOCK_KINDS`` but forgets to update the unblock check.
+    """
+    with kb.connect() as conn:
+        for kind in sorted(kb.DECISION_BLOCK_KINDS):
+            t = kb.create_task(
+                conn, title=f"refused-{kind}", assignee="a",
+            )
+            kb.claim_task(conn, t)
+            conn.execute(
+                "UPDATE tasks SET status = 'blocked', block_kind = ?, "
+                "escalation_target = ?, current_run_id = NULL "
+                "WHERE id = ?",
+                (kind, "sahil", t),
+            )
+            conn.commit()
+            assert kb.unblock_task(conn, t) is False, (
+                f"unblock_task did not refuse kind={kind!r} "
+                f"with escalation_target set"
+            )
+            task = kb.get_task(conn, t)
+            assert task.status == "blocked"
+
+
+def test_unblock_allows_blocked_decision_kind_without_escalation(kanban_home):
+    """A decision-kind block WITHOUT ``escalation_target`` is a regular
+    blocked task — the auto-unblocker can still flip it.
+
+    The decision-gate fingerprint requires BOTH the kind and the
+    escalation target. A decision-kind block alone (no escalation) is
+    a normal ``blocked`` task awaiting action; refusing it would strand
+    the auto-unblocker on legitimate worker stalls. This is the
+    regression case for the routing predicate in ``block_task`` which
+    only routes to ``decision-needed`` when BOTH are set.
+    """
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="just a decision kind", assignee="a")
+        kb.claim_task(conn, t)
+        conn.execute(
+            "UPDATE tasks SET status = 'blocked', block_kind = ?, "
+            "escalation_target = NULL, current_run_id = NULL "
+            "WHERE id = ?",
+            ("stakeholder-decision", t),
+        )
+        conn.commit()
+        assert kb.unblock_task(conn, t) is True
+        assert kb.get_task(conn, t).status == "ready"
+
+
+def test_unblock_allows_blocked_with_escalation_but_non_decision_kind(kanban_home):
+    """``escalation_target`` alone is not enough — the kind must also be a
+    decision kind.
+
+    A ``needs_input`` block can carry an ``escalation_target`` (a worker
+    might escalate a clarification request). It should still be
+    unblockable, because the cron-loop breaker is what governs those
+    blocks, not the decision-gate refusal.
+    """
+    with kb.connect() as conn:
+        t = kb.create_task(
+            conn, title="needs-input-with-escalation", assignee="a",
+        )
+        kb.claim_task(conn, t)
+        conn.execute(
+            "UPDATE tasks SET status = 'blocked', block_kind = ?, "
+            "escalation_target = ?, current_run_id = NULL "
+            "WHERE id = ?",
+            ("needs_input", "sahil", t),
+        )
+        conn.commit()
+        assert kb.unblock_task(conn, t) is True
+        assert kb.get_task(conn, t).status == "ready"
+
+
+def test_unblock_refusal_does_not_reset_failure_counters(kanban_home):
+    """A refusal must not touch ``consecutive_failures`` / ``escalation_target``.
+
+    The unblock success path resets those columns (giving the worker a
+    fresh retry budget). On refusal we must NOT reset them — the task
+    stays at the same state with the same retry budget so a later
+    legitimate unblock (or human override) starts from the right
+    baseline.
+    """
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="gated", assignee="a")
+        kb.claim_task(conn, t)
+        conn.execute(
+            "UPDATE tasks SET status = ?, block_kind = ?, "
+            "escalation_target = ?, consecutive_failures = 3, "
+            "last_failure_error = 'previous attempt', "
+            "current_run_id = NULL WHERE id = ?",
+            ("decision-needed", "stakeholder-decision", "sahil", t),
+        )
+        conn.commit()
+        assert kb.unblock_task(conn, t) is False
+        task = kb.get_task(conn, t)
+        assert task.status == "decision-needed"
+        # Read counters and escalation_target directly — the Task
+        # dataclass exposes consecutive_failures / last_failure_error
+        # but not escalation_target.
+        assert task.consecutive_failures == 3
+        assert task.last_failure_error == "previous attempt"
+        row = conn.execute(
+            "SELECT escalation_target FROM tasks WHERE id = ?", (t,),
+        ).fetchone()
+        assert row["escalation_target"] == "sahil"
+
+
 def test_assign_refuses_while_running(kanban_home):
     with kb.connect() as conn:
         t = kb.create_task(conn, title="x", assignee="a")
@@ -3831,6 +4032,301 @@ def test_dispatch_review_skips_nonspawnable(kanban_home, monkeypatch):
 def test_review_status_in_valid_statuses():
     """'review' is a valid task status."""
     assert "review" in kb.VALID_STATUSES
+
+
+def test_decision_needed_status_in_valid_statuses():
+    """'decision-needed' is a valid task status (terminal human-gated state).
+
+    Set by ``block_task`` when a worker hits a stakeholder-decision gate
+    (decision-kind block with ``escalation_target IS NOT NULL``). Differs
+    from ``blocked`` because it is human-owned: the kensei-blocked-unblocker
+    cron pre-check skips it and ``unblock_task`` refuses to flip it. The
+    only legitimate exits are an operator direct write or reschedule.
+    """
+    assert "decision-needed" in kb.VALID_STATUSES
+
+
+def test_decision_needed_status_not_initial():
+    """'decision-needed' is not a valid initial status for create_task.
+
+    A task is only ever promoted INTO ``decision-needed`` by ``block_task``
+    after a worker has run and surfaced a decision-kind block — never born
+    there. ``VALID_INITIAL_STATUSES`` should keep that invariant.
+    """
+    assert "decision-needed" not in kb.VALID_INITIAL_STATUSES
+
+
+def test_decision_block_kinds_registered():
+    """``DECISION_BLOCK_KINDS`` is a subset of ``VALID_BLOCK_KINDS`` and
+    includes the example kinds named in the task spec.
+
+    The new constant exists to drive ``block_task``'s decision-gate
+    routing (escalation + decision-kind → ``decision-needed``). Keeping it
+    a strict subset of ``VALID_BLOCK_KINDS`` ensures the existing
+    ``block_task`` kind validation still accepts the decision kinds.
+    """
+    assert kb.DECISION_BLOCK_KINDS <= kb.VALID_BLOCK_KINDS
+    assert "stakeholder-decision" in kb.DECISION_BLOCK_KINDS
+    assert "escalation" in kb.DECISION_BLOCK_KINDS
+
+
+def test_block_task_routes_decision_kind_with_escalation_to_decision_needed(kanban_home):
+    """block_task lands a decision-kind+escalation task in ``decision-needed``.
+
+    Mirrors the t_bc74d747 task body: when ``kind`` is a decision kind
+    AND ``escalation_target`` is set, the block should NOT land in the
+    generic ``blocked`` bucket (where a cron would keep auto-unblocking
+    it) — it should land in the terminal ``decision-needed`` state.
+    """
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="needs-decision", assignee="alice")
+        kb.set_escalation_target(conn, t, target="sahil", author="test")
+        kb.claim_task(conn, t)
+        assert kb.block_task(
+            conn, t, reason="need sign-off", kind="stakeholder-decision",
+        ) is True
+    assert kb.get_task(conn, t).status == "decision-needed"
+    assert kb.get_task(conn, t).block_kind == "stakeholder-decision"
+    # escalation_target is preserved — the gate is the trigger, not the
+    # side effect of the block, so the briefing still surfaces the row.
+    row = conn.execute(
+        "SELECT escalation_target FROM tasks WHERE id = ?", (t,),
+    ).fetchone()
+    assert row["escalation_target"] == "sahil"
+    # The decision-blocked event records the routed_to so dashboards
+    # can distinguish decision-gate routing from generic blocked.
+    events = [
+        e for e in kb.list_events(conn, t) if e.kind == "blocked"
+    ]
+    assert events, "expected a 'blocked' task_event"
+    last = events[-1]
+    assert last.payload["routed_to"] == "decision-needed"
+    assert last.payload["decision_gate"] is True
+
+
+def test_block_task_decision_kind_without_escalation_lands_in_blocked(kanban_home):
+    """Decision-kind alone is NOT enough — must have explicit escalation.
+
+    Without an ``escalation_target``, a decision-kind block falls through
+    to the regular ``blocked`` bucket. This keeps the human-escalation
+    signal as the *explicit* trigger for the terminal gate; just naming a
+    decision kind does not silently surface the task as human-owned.
+    """
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="maybe-decision", assignee="alice")
+        kb.claim_task(conn, t)
+        assert kb.block_task(
+            conn, t, reason="escalation not set", kind="escalation",
+        ) is True
+    assert kb.get_task(conn, t).status == "blocked"
+    assert kb.get_task(conn, t).block_kind == "escalation"
+    # The blocked event must record routed_to=blocked (not decision-needed).
+    events = [
+        e for e in kb.list_events(conn, t) if e.kind == "blocked"
+    ]
+    assert events[-1].payload["routed_to"] == "blocked"
+    assert events[-1].payload["decision_gate"] is False
+
+
+def test_block_task_non_decision_kind_with_escalation_stays_blocked(kanban_home):
+    """Non-decision kinds with escalation still land in ``blocked``.
+
+    Guards against an over-broad routing that would route any escalated
+    task to ``decision-needed`` regardless of block kind. The decision
+    gate is a joint predicate: decision-kind AND escalation.
+    """
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="escalated-but-routine", assignee="alice")
+        kb.set_escalation_target(conn, t, target="sahil", author="test")
+        kb.claim_task(conn, t)
+        assert kb.block_task(
+            conn, t, reason="needs human input", kind="needs_input",
+        ) is True
+    assert kb.get_task(conn, t).status == "blocked"
+    assert kb.get_task(conn, t).block_kind == "needs_input"
+
+
+def test_block_task_loop_detected_decision_kind_routes_to_decision_needed(kanban_home):
+    """The decision gate wins over the loop-detected ``triage`` routing.
+
+    When a decision-kind task is blocked repeatedly with the same kind,
+    the recurrence counter trips the loop-breaker — normally a route to
+    ``triage`` for human review. But for a decision-kind block with
+    ``escalation_target`` set, the terminal ``decision-needed`` gate is
+    a better landing (it's the explicit human-ownership signal). Verify
+    the override: a high recurrence counter + decision-kind + escalation
+    lands in ``decision-needed``, not ``triage``.
+
+    Note: the normal public path cannot reach this state because the
+    sibling ``unblock_task`` change refuses to unblock decision-gated
+    tasks — by design, this branch is only reachable via direct DB
+    writes (e.g. an operator re-opening a stale task). The test simulates
+    that scenario by bumping the recurrence counter directly.
+    """
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="loop-decision", assignee="alice")
+        kb.claim_task(conn, t)
+        # Simulate a previously-cycled decision task by setting the
+        # recurrence counter to the limit before the next block.
+        conn.execute(
+            "UPDATE tasks SET block_recurrences = ?, block_kind = ? "
+            "WHERE id = ?",
+            (kb.BLOCK_RECURRENCE_LIMIT, "escalation", t),
+        )
+        conn.commit()
+        kb.set_escalation_target(conn, t, target="sahil", author="test")
+        assert kb.block_task(
+            conn, t, reason="re-blocked", kind="escalation",
+        ) is True
+    assert kb.get_task(conn, t).status == "decision-needed"
+    # The block_loop_detected event (not the plain 'blocked' event) is
+    # still emitted because the loop branch fired, with the routed_to
+    # override recorded in the payload.
+    events = [
+        e for e in kb.list_events(conn, t) if e.kind == "block_loop_detected"
+    ]
+    assert events, "expected a 'block_loop_detected' event"
+    assert events[-1].payload["routed_to"] == "decision-needed"
+    assert events[-1].payload["decision_gate"] is True
+
+
+def test_block_task_telemetry_status_to_follows_routed_to(kanban_home):
+    """The external telemetry event's ``status_to`` matches the actual destination.
+
+    The old hardcoded ``status_to="blocked"`` would mislabel a
+    decision-needed or triage routing in dashboards / event consumers.
+    Verify the new behaviour: the external ``kanban.task.blocked`` event
+    carries the real destination in ``status_to`` (and ``routed_to``
+    payload field for explicit introspection).
+    """
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="telemetry", assignee="alice")
+        kb.set_escalation_target(conn, t, target="sahil", author="test")
+        kb.claim_task(conn, t)
+        kb.block_task(
+            conn, t, reason="decision gate", kind="stakeholder-decision",
+        )
+    # External telemetry is emitted via record_event_if_enabled. When
+    # disabled (the default in unit tests) the event doesn't reach the
+    # bus, but the routing decision is still observable via the internal
+    # ``blocked`` task_event payload (covered by the prior test). This
+    # test pins the contract: if telemetry is enabled, ``status_to`` MUST
+    # equal ``routed_to`` — and the latter is captured in the
+    # task_event payload. We assert the internal side here as the
+    # externally-visible contract.
+    events = [
+        e for e in kb.list_events(conn, t) if e.kind == "blocked"
+    ]
+    routed = events[-1].payload["routed_to"]
+    status = kb.get_task(conn, t).status
+    assert routed == status, (
+        f"task_event routed_to={routed!r} must match final status={status!r}"
+    )
+
+
+def test_schedule_task_refuses_decision_needed(kanban_home):
+    """schedule_task must not silently re-time a decision-gated task.
+
+    ``decision-needed`` is a terminal blocked state meaning a human
+    decision is gating the task. An auto-scheduler that flips it to
+    ``scheduled`` would lose the human-ownership signal and let
+    ``unblock_task`` (or the next dispatch tick) move the task back into
+    the work pool without a decision. ``schedule_task`` must refuse,
+    return ``False``, log a warning, and append a ``schedule_refused``
+    event for the audit trail. Mirrors the ``unblock_task`` decision-gate
+    refusal pattern.
+    """
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="needs-decision", assignee="a")
+        # No production code path sets status='decision-needed' yet, so we
+        # simulate the post-condition the same way an operator
+        # ``hermes kanban set-status`` would: a direct write to the row.
+        _set_task_status(conn, t, "decision-needed")
+        assert kb.get_task(conn, t).status == "decision-needed"
+
+        assert kb.schedule_task(conn, t, reason="automated tick") is False
+        # Status unchanged — the row stayed in the terminal decision gate.
+        assert kb.get_task(conn, t).status == "decision-needed"
+        # Refusal event recorded for the audit trail.
+        refused = [
+            e for e in kb.list_events(conn, t) if e.kind == "schedule_refused"
+        ]
+        assert len(refused) == 1
+        assert refused[0].payload == {
+            "reason": "decision-gated",
+            "status": "decision-needed",
+        }
+
+
+def test_set_escalation_target_refuses_decision_needed(kanban_home):
+    """set_escalation_target must refuse a task already in the decision gate.
+
+    The ``escalation_target`` column is the structured signal that drives
+    the daily briefing's NEEDS-YOU list and is intended to be set
+    *before* ``block_task`` promotes the task into ``decision-needed``.
+    Writing to it on a task that's already terminal-decision-gated is
+    automation touching a human-owned row and is rejected with
+    ``ValueError`` — symmetric with the existing refusal on ``done`` /
+    ``archived`` terminal states.
+    """
+    with kb.connect() as conn:
+        t = kb.create_task(
+            conn, title="already-decision-gated", assignee="a",
+        )
+        _set_task_status(conn, t, "decision-needed")
+        # Set on a decision-needed task: refused.
+        with pytest.raises(ValueError, match="decision-gated"):
+            kb.set_escalation_target(
+                conn, t, target="sahil", author="auto-scheduler",
+            )
+        # Cleared on a decision-needed task: also refused — the column
+        # is locked, not just writes to a non-null value.
+        with pytest.raises(ValueError, match="decision-gated"):
+            kb.set_escalation_target(
+                conn, t, target=None, author="auto-scheduler",
+            )
+        # Status still unchanged.
+        assert kb.get_task(conn, t).status == "decision-needed"
+        # The escalation column was never written (refusal happened
+        # before the UPDATE). ``Task`` does not expose the column so
+        # query the row directly.
+        row = conn.execute(
+            "SELECT escalation_target FROM tasks WHERE id = ?", (t,),
+        ).fetchone()
+        assert row["escalation_target"] is None
+
+
+def test_set_escalation_target_allows_non_decision_needed_statuses(kanban_home):
+    """The decision-needed refusal does not regress normal escalate flow.
+
+    A ``blocked`` task with an existing ``escalation_target`` is still
+    escalable (a worker may escalate a clarification request before the
+    gate is set); a ``ready`` task with no escalation is settable; and a
+    clearing call on a non-decision-gated task works as before. Guards
+    against an over-broad refusal that would break the briefing.
+    """
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="normal blocked", assignee="a")
+        _set_task_status(conn, t, "blocked")
+        res = kb.set_escalation_target(
+            conn, t, target="sahil", author="op",
+        )
+        assert res["ok"] is True
+        assert res["changed"] is True
+        row = conn.execute(
+            "SELECT escalation_target FROM tasks WHERE id = ?", (t,),
+        ).fetchone()
+        assert row["escalation_target"] == "sahil"
+        # And clearing is allowed.
+        res = kb.set_escalation_target(
+            conn, t, target=None, author="op",
+        )
+        assert res["ok"] is True
+        assert res["changed"] is True
+        row = conn.execute(
+            "SELECT escalation_target FROM tasks WHERE id = ?", (t,),
+        ).fetchone()
+        assert row["escalation_target"] is None
 
 
 def test_dispatch_review_does_not_claim_ready_tasks(
