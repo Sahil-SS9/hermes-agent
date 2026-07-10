@@ -551,6 +551,9 @@ class TestDiscordPlayTtsSkip:
         adapter._voice_timeout_tasks = {}
         adapter._voice_receivers = {}
         adapter._voice_listen_tasks = {}
+        adapter._use_voice_bridge = False
+        adapter._voice_bridges = {}
+        adapter._voice_bridge_latency_logs = {}
         adapter._client = None
         adapter._broadcast = AsyncMock()
         return adapter
@@ -1106,6 +1109,9 @@ class TestDiscordVoiceChannelMethods:
         adapter._voice_timeout_tasks = {}
         adapter._voice_receivers = {}
         adapter._voice_listen_tasks = {}
+        adapter._use_voice_bridge = False
+        adapter._voice_bridges = {}
+        adapter._voice_bridge_latency_logs = {}
         adapter._voice_input_callback = None
         adapter._allowed_user_ids = set()
         adapter._running = True
@@ -1914,6 +1920,9 @@ class TestVoiceTimeoutCleansRunnerState:
         adapter._voice_timeout_tasks = {}
         adapter._voice_receivers = {}
         adapter._voice_listen_tasks = {}
+        adapter._use_voice_bridge = False
+        adapter._voice_bridges = {}
+        adapter._voice_bridge_latency_logs = {}
         adapter._voice_input_callback = None
         adapter._on_voice_disconnect = None
         adapter._client = None
@@ -2054,6 +2063,9 @@ class TestPlaybackTimeout:
         adapter._voice_timeout_tasks = {}
         adapter._voice_receivers = {}
         adapter._voice_listen_tasks = {}
+        adapter._use_voice_bridge = False
+        adapter._voice_bridges = {}
+        adapter._voice_bridge_latency_logs = {}
         adapter._voice_input_callback = None
         adapter._on_voice_disconnect = None
         adapter._client = None
@@ -2240,6 +2252,9 @@ class TestVoiceChannelAwareness:
         adapter._voice_text_channels = {}
         adapter._voice_sources = {}
         adapter._voice_receivers = {}
+        adapter._use_voice_bridge = False
+        adapter._voice_bridges = {}
+        adapter._voice_bridge_latency_logs = {}
         adapter._client = MagicMock()
         adapter._client.user = SimpleNamespace(id=99999, name="HermesBot")
         return adapter
@@ -2710,6 +2725,9 @@ class TestVoiceTTSPlayback:
         adapter._voice_text_channels = {}
         adapter._voice_sources = {}
         adapter._voice_receivers = {}
+        adapter._use_voice_bridge = False
+        adapter._voice_bridges = {}
+        adapter._voice_bridge_latency_logs = {}
         return adapter
 
     # -- play_tts behavior --
@@ -2892,6 +2910,9 @@ class TestUDPKeepalive:
         adapter._voice_sources = {}
         adapter._voice_receivers = {}
         adapter._voice_listen_tasks = {}
+        adapter._use_voice_bridge = False
+        adapter._voice_bridges = {}
+        adapter._voice_bridge_latency_logs = {}
 
         # Mock VC and receiver
         mock_vc = MagicMock()

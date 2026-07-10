@@ -128,6 +128,25 @@ from gateway.platforms.base import (
 )
 from tools.url_safety import is_safe_url
 
+# ── Kensei-voice bridge seam ─────────────────────────────────────────────
+# Misa-Misa's live voice path is owned by the kensei-voice package; the
+# approved integration seam is ``MisaMisaVoiceBridge`` (see
+# /home/kensei/repos/kensei-voice/src/kensei_voice/misa_misa_seam.py).
+# The bridge subscribes the Discord voice client, runs VAD + STT + brain
+# + TTS internally, and is mutually exclusive with the legacy
+# ``VoiceReceiver`` path.  When kensei-voice is importable we route the
+# live voice channel through the bridge; otherwise the legacy path runs.
+try:  # pragma: no cover - import guarded
+    from kensei_voice.misa_misa_seam import (
+        LiveLatencyLog,
+        MisaMisaVoiceBridge,
+    )
+    KENSEI_VOICE_BRIDGE_AVAILABLE = True
+except Exception:  # pragma: no cover - kensei-voice not installed
+    KENSEI_VOICE_BRIDGE_AVAILABLE = False
+    LiveLatencyLog = None  # type: ignore[assignment,misc]
+    MisaMisaVoiceBridge = None  # type: ignore[assignment,misc]
+
 
 def _truncate_discord_component_text(text: str, limit: int) -> str:
     """Return text within Discord's UTF-16 component field budget."""
@@ -1101,6 +1120,23 @@ class DiscordAdapter(BasePlatformAdapter):
         # Mirrors the Telegram #58563 fix. Entries are dropped on finalize.
         self._last_overflow_preview: Dict[tuple, str] = {}
         self._warned_fail_closed_default = False
+
+        # ── kensei-voice bridge ──────────────────────────────────────────
+        # When ``use_kensei_voice_bridge`` is true (default) and the
+        # package is importable, ``join_voice_channel`` routes the live
+        # Discord voice path through ``MisaMisaVoiceBridge`` instead of
+        # the legacy ``VoiceReceiver``.  The bridge owns receive, STT,
+        # brain, and TTS for the duration of the join; the adapter keeps
+        # only the connection / reconnection lifecycle.
+        self._use_voice_bridge: bool = (
+            KENSEI_VOICE_BRIDGE_AVAILABLE
+            and self._coerce_bool(extra.get("use_kensei_voice_bridge"), True)
+        )
+        self._voice_bridges: Dict[int, Any] = {}  # guild_id -> MisaMisaVoiceBridge
+        # Per-guild latency log captured by the bridge for the live
+        # Phase 2a report.  Surfaced via ``voice_bridge_latency_report()``
+        # so the operator / measure script can dump it after a run.
+        self._voice_bridge_latency_logs: Dict[int, Any] = {}  # guild_id -> LiveLatencyLog
 
     def _handle_bot_task_done(self, task: asyncio.Task) -> None:
         """Surface post-startup discord.py task exits to the gateway supervisor.
@@ -3263,7 +3299,15 @@ class DiscordAdapter(BasePlatformAdapter):
         return bool(mixers) and mixers.get(guild_id) is not None
 
     async def join_voice_channel(self, channel) -> bool:
-        """Join a Discord voice channel. Returns True on success."""
+        """Join a Discord voice channel. Returns True on success.
+
+        When the kensei-voice bridge is enabled (default when
+        ``kensei-voice`` is importable and ``discord.extra.use_kensei_voice_bridge``
+        is true), the voice client is a ``voice_recv.VoiceRecvClient`` and
+        the :class:`MisaMisaVoiceBridge` owns receive, STT, brain, and TTS
+        for the duration of the join.  Otherwise the legacy
+        :class:`VoiceReceiver`` / ``_voice_listen_loop`` path is used.
+        """
         if not self._client or not DISCORD_AVAILABLE:
             return False
         guild_id = channel.guild.id
@@ -3277,29 +3321,56 @@ class DiscordAdapter(BasePlatformAdapter):
                     return True
                 await existing.move_to(channel)
                 self._reset_voice_timeout(guild_id)
-                if floor_acquired:
-                    self._release_voice_floor(int(vc_channel_id))
                 return True
 
-            vc = await channel.connect()
+            # Bridge path: connect with VoiceRecvClient so the bridge can
+            # subscribe receive + drive playback.  Falls back to a plain
+            # VoiceClient if discord-ext-voice-recv is not importable in
+            # this environment (older deploys / CI).
+            if self._use_voice_bridge:
+                vc = await self._voice_connect_for_bridge(channel)
+                if vc is None:
+                    logger.warning(
+                        "kensei-voice bridge requested but VoiceRecvClient "
+                        "connect failed; falling back to legacy path"
+                    )
+                    vc = await channel.connect()
+            else:
+                vc = await channel.connect()
             self._voice_clients[guild_id] = vc
             self._reset_voice_timeout(guild_id)
 
-            # Start voice receiver (Phase 2: listen to users)
-            try:
-                receiver = VoiceReceiver(vc, allowed_user_ids=self._allowed_user_ids)
-                receiver.start()
-                self._voice_receivers[guild_id] = receiver
-                self._voice_listen_tasks[guild_id] = asyncio.ensure_future(
-                    self._voice_listen_loop(guild_id)
-                )
-            except Exception as e:
-                logger.warning("Voice receiver failed to start: %s", e)
+            if self._use_voice_bridge and getattr(vc, "listen", None) is not None:
+                # Bridge owns receive + playback; do NOT start the legacy
+                # VoiceReceiver in parallel (two STT pipelines on the same
+                # mic is the classic two-bots-in-one-body failure).
+                bridge_started = await self._start_voice_bridge(guild_id, vc)
+                if not bridge_started:
+                    logger.warning(
+                        "MisaMisaVoiceBridge failed to start; falling back "
+                        "to legacy VoiceReceiver path for guild %d", guild_id
+                    )
+            else:
+                # Start voice receiver (Phase 2: listen to users)
+                try:
+                    receiver = VoiceReceiver(vc, allowed_user_ids=self._allowed_user_ids)
+                    receiver.start()
+                    self._voice_receivers[guild_id] = receiver
+                    self._voice_listen_tasks[guild_id] = asyncio.ensure_future(
+                        self._voice_listen_loop(guild_id)
+                    )
+                except Exception as e:
+                    logger.warning("Voice receiver failed to start: %s", e)
 
             # Phase 3: install the continuous mixer (ambient bed + ducked
-            # speech).  Best-effort — if it fails we fall back to the legacy
-            # one-shot FFmpegPCMAudio playback path in play_in_voice_channel.
-            if getattr(self, "_voice_fx_cfg", {}).get("enabled"):
+            # speech).  Only meaningful for the legacy path — the bridge
+            # has its own TTS/playback pipeline.  Best-effort — if it
+            # fails we fall back to the legacy one-shot FFmpegPCMAudio
+            # playback path in play_in_voice_channel.
+            if (
+                not self._use_voice_bridge
+                and getattr(self, "_voice_fx_cfg", {}).get("enabled")
+            ):
                 try:
                     await self._install_voice_mixer(guild_id, vc)
                 except Exception as e:
@@ -3307,9 +3378,140 @@ class DiscordAdapter(BasePlatformAdapter):
 
             return True
 
+    async def _voice_connect_for_bridge(self, channel):
+        """Connect a VoiceRecvClient; return None on any failure.
+
+        Kept as a small method so the failure path is unit-testable
+        without dragging the full adapter in.
+        """
+        try:
+            from discord.ext import voice_recv as _voice_recv
+        except Exception as e:
+            logger.warning(
+                "discord-ext-voice-recv unavailable; cannot use bridge: %s", e
+            )
+            return None
+        try:
+            return await channel.connect(cls=_voice_recv.VoiceRecvClient)
+        except Exception as e:
+            logger.warning("VoiceRecvClient.connect failed: %s", e)
+            return None
+
+    async def _start_voice_bridge(self, guild_id: int, voice_client) -> bool:
+        """Construct + start the MisaMisaVoiceBridge for a guild.
+
+        Returns True if the bridge is running, False if construction or
+        start failed (the caller falls back to the legacy path).
+        """
+        if not KENSEI_VOICE_BRIDGE_AVAILABLE or MisaMisaVoiceBridge is None:
+            return False
+        # The bridge needs a brain; the production default is the
+        # booking brain (misa-misa's domain).  If the operator wants
+        # a different brain they can pass one in via discord.extra
+        # once the gateway runner wires that.  For now build_default_brain
+        # gives a working fakes-only pipeline that surfaces the seam;
+        # a real OPENAI_API_KEY makes the brain hit the LLM.
+        try:
+            from kensei_voice.brain import build_default_brain
+        except Exception as e:
+            logger.warning("kensei_voice.brain import failed: %s", e)
+            return False
+        brain = build_default_brain()
+        latency_log = LiveLatencyLog(
+            config_context=self._voice_bridge_config_context(guild_id)
+        )
+        bridge = MisaMisaVoiceBridge(
+            voice_client=voice_client,
+            brain=brain,
+            text_callback=self._make_voice_bridge_text_callback(guild_id),
+            latency_log=latency_log,
+        )
+        try:
+            await bridge.start()
+        except Exception as e:
+            logger.warning("MisaMisaVoiceBridge.start failed: %s", e)
+            return False
+        self._voice_bridges[guild_id] = bridge
+        self._voice_bridge_latency_logs[guild_id] = latency_log
+        logger.info(
+            "MisaMisaVoiceBridge active for guild %d (channel %s)",
+            guild_id,
+            getattr(voice_client, "channel", None),
+        )
+        return True
+
+    def _voice_bridge_config_context(self, guild_id: int) -> dict:
+        """Capture config/hardware context for the live latency log."""
+        import platform as _platform
+        import sys as _sys
+        return {
+            "guild_id": guild_id,
+            "voice_channel_id": getattr(
+                getattr(self._voice_clients.get(guild_id), "channel", None), "id", None
+            ),
+            "host": _platform.node(),
+            "python": _sys.version.split()[0],
+            "model": os.environ.get("KENSEI_VOICE_LIVE_MODEL", "default"),
+            "voice": os.environ.get("KENSEI_VOICE_LIVE_VOICE", "default"),
+        }
+
+    def _make_voice_bridge_text_callback(self, guild_id: int):
+        """Build the bridge's text-callback for one guild.
+
+        The bridge runs the brain in-process, so the gateway runner
+        never sees the user's utterance.  We mirror the brain's reply
+        to the linked text channel so the live conversation is
+        visible in chat exactly like the legacy voice path.
+        """
+        adapter_self = self
+
+        async def _callback(text: str, meta: dict) -> None:
+            chat_id = adapter_self._voice_text_channels.get(guild_id)
+            if not chat_id:
+                return
+            try:
+                await adapter_self.send(chat_id=str(chat_id), content=text)
+            except Exception as e:  # pragma: no cover - best effort
+                logger.warning(
+                    "Voice-bridge text callback post failed for guild %d: %s",
+                    guild_id,
+                    e,
+                )
+
+        return _callback
+
+    def voice_bridge_latency_report(self, guild_id: int) -> Optional[dict]:
+        """Return the live latency log for a guild, or None if not bridged.
+
+        Surfaced for ``scripts/measure_phase2a_live`` and operator
+        postmortem dumps.  Returns None when the bridge is not active
+        for the guild (e.g. legacy path or never joined).
+        """
+        log = self._voice_bridge_latency_logs.get(guild_id)
+        if log is None:
+            return None
+        return log.report()
+
+    def voice_bridge_active(self, guild_id: int) -> bool:
+        """True iff the MisaMisaVoiceBridge is currently active for guild_id."""
+        bridge = self._voice_bridges.get(guild_id)
+        return bool(bridge is not None and bridge.started)
+
     async def leave_voice_channel(self, guild_id: int) -> None:
         """Disconnect from the voice channel in a guild."""
         async with self._voice_locks.setdefault(guild_id, asyncio.Lock()):
+            # Stop the bridge first so its transport releases the voice
+            # client's sink + source before the adapter disconnects.
+            bridge = self._voice_bridges.pop(guild_id, None)
+            if bridge is not None:
+                try:
+                    await bridge.stop()
+                except Exception:  # pragma: no cover - best effort
+                    logger.debug("bridge.stop raised during leave", exc_info=True)
+            # Bridge is mutually exclusive with VoiceReceiver; clear
+            # the latency log only after stop completes.
+            self._voice_bridge_latency_logs.pop(guild_id, None)
+
             # Stop voice receiver first
             receiver = self._voice_receivers.pop(guild_id, None)
             if receiver:
