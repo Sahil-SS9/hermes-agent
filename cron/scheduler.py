@@ -1638,8 +1638,8 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
             cleaned_delivery_content
         )
         for lf in local_files:
-            if lf not in media_files:
-                media_files.append(lf)
+            if (lf, False) not in media_files:
+                media_files.append((lf, False))
     except Exception as e:
         logger.debug("local-file coercion skipped: %s", e)
 
