@@ -55,3 +55,16 @@
 {"topic_id": "manual-1692", "title_hint": "New Concept", "tags": [], "priority": 10}
 {"topic_id": "manual-9303", "title_hint": "New Concept", "tags": [], "priority": 10}
 {"topic_id": "manual-4780", "title_hint": "New Concept", "tags": [], "priority": 10}
+{"topic_id": "manual-7295", "title_hint": "New Concept", "tags": [], "priority": 10}
+{"topic_id": "manual-8365", "title_hint": "New Concept", "tags": [], "priority": 10}
+{"topic_id": "manual-2955", "title_hint": "New Concept", "tags": [], "priority": 10}
+{"topic_id": "manual-3086", "title_hint": "New Concept", "tags": [], "priority": 10}
+{"topic_id": "manual-2509", "title_hint": "New Concept", "tags": [], "priority": 10}
+{"topic_id": "manual-1602", "title_hint": "New Concept", "tags": [], "priority": 10}
+{"topic_id": "manual-3476", "title_hint": "New Concept", "tags": [], "priority": 10}
+{"topic_id": "manual-7772", "title_hint": "New Concept", "tags": [], "priority": 10}
+{"topic_id": "research-2607.07474", "title_hint": "Why Binary Security Metrics Are Lying to You — Severity-Graded Agent Red-Teaming", "tags": ["research-paper", "paper-synthesis", "agent-security", "red-teaming", "hermaguard", "llm-evaluation"], "priority": 7, "curated": true, "source": "paper-synthesis", "source_url": "https://arxiv.org/abs/2607.07474"}
+{"topic_id": "research-2607.06624", "title_hint": "Beyond Pass/Fail — Evaluating Coding Agent Trajectories for Real Diagnostics", "tags": ["research-paper", "paper-synthesis", "agent-evaluation", "trajectory-analysis", "coding-agents", "benchmarking"], "priority": 6, "curated": true, "source": "paper-synthesis", "source_url": "https://arxiv.org/abs/2607.06624"}
+{"topic_id": "research-2607.04542", "title_hint": "Proving What Repeats — Compiling Agent Behavior into Verified Binaries", "tags": ["research-paper", "paper-synthesis", "agent-compilation", "verification", "rl-training", "research-agents"], "priority": 5, "curated": true, "source": "paper-synthesis", "source_url": "https://arxiv.org/abs/2607.04542"}
+{"topic_id": "research-2607.08497", "title_hint": "Design Agents That Remember — Episodic Visual Memory for Content Pipelines", "tags": ["research-paper", "paper-synthesis", "design-agents", "visual-memory", "multimodal", "content-pipeline", "ceecee"], "priority": 6, "curated": true, "source": "paper-synthesis", "source_url": "https://arxiv.org/abs/2607.08497"}
+{"topic_id": "manual-0700", "title_hint": "New Concept", "tags": [], "priority": 10}

@@ -1,22 +1,23 @@
 #!/usr/bin/env python3
-"""Build a self-contained pending-approvals digest for #blog-management.
+"""Build a lightweight pending-approvals STATUS/SUMMARY index for #blog-management.
 
-Replaces the LLM-hand-written digest (which only listed slugs and bare
-preview filenames that mobile Discord cannot open). This script inlines
-each article's rendered preview TEXT into ONE self-contained dark-mode
-file (base64 images stripped to stay under Discord's 8 MB bot upload cap),
-so a single tapped MEDIA attachment shows every article's content.
+Design (per Sahil's 20:03 format):
+  1. This script emits ONE small summary/status HTML (title list + counts +
+     per-item !approve/!reject). No inlined article bodies — keeps it tiny
+     (~tens of KB) so it always delivers as a MEDIA attachment.
+  2. The per-article openable previews (with embedded images) are generated
+     separately by blog_approval._generate_preview() into
+     ~/.hermes/reports/blog-previews/<slug>.html. The cron attaches each of
+     those as its own MEDIA file. So Sahil gets one summary + one openable
+     HTML per article, each with its images.
 
 Deterministic: no LLM HTML generation, so no drift or broken path links.
-
-Outputs: ~/.hermes/reports/blog-previews/pending-digest-DD-MM-YY.html
-Prints the absolute path on stdout (so the cron can attach it as MEDIA:).
+Prints the absolute summary path on stdout (cron attaches it as MEDIA:).
 """
 from __future__ import annotations
 
 import json
 import re
-import sys
 from datetime import date
 from pathlib import Path
 
@@ -40,33 +41,6 @@ def _read_jsonl(path: Path) -> list[dict]:
     return out
 
 
-def _body_inner(html_path: Path) -> str:
-    """Extract the inner HTML of <body>…</body> from a preview file.
-
-    Base64-embedded images are STRIPPED. The digest is delivered as a single
-    Discord MEDIA attachment, and Discord caps bot uploads at ~8 MB. Inlined
-    previews with base64 hero/section images blow past that (26 articles →
-    ~13 MB), so the attachment fails silently. Keeping text + structure makes
-    the digest a lightweight review index that always delivers; the full
-    visual preview for any single article is still generated separately by
-    blog_approval.py and lives on disk.
-    """
-    if not html_path.exists():
-        return ""
-    text = html_path.read_text(encoding="utf-8", errors="replace")
-    m = re.search(r"<body[^>]*>(.*?)</body>", text, re.S | re.I)
-    if not m:
-        return ""
-    body = m.group(1)
-    # Drop base64 image blobs (the size killers)
-    body = re.sub(r'<img[^>]*src="data:image/[^"]*"[^>]*/?>', "", body, flags=re.I)
-    body = re.sub(r'<img[^>]*src=\'data:image/[^\']*\'[^>]*/?>', "", body, flags=re.I)
-    # Drop any remaining <img> tags (external/relative srcs are dead in a
-    # standalone digest anyway)
-    body = re.sub(r"<img\b[^>]*>", "", body, flags=re.I)
-    return body.strip()
-
-
 def _esc(s: str) -> str:
     return (s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
 
@@ -79,12 +53,11 @@ def _blog_items() -> list[dict]:
             continue
         slug = e.get("slug", "")
         preview = e.get("preview_path") or ""
-        body = _body_inner(Path(preview)) if preview else ""
         items.append({
             "slug": slug,
             "title": e.get("title", slug),
             "stream": e.get("stream", e.get("tier", "ai")),
-            "body": body,
+            "preview": preview,
         })
     return items
 
@@ -92,17 +65,15 @@ def _blog_items() -> list[dict]:
 def _x_items() -> list[dict]:
     items = []
     for p in sorted(PREVIEW_DIR.glob("xarticle-*.html")):
-        # derive a readable title from the filename
-        stem = p.stem  # xarticle-2026-07-07-how-i-use-hermes
+        stem = p.stem
         parts = stem.split("-", 2)
         date_part = parts[1] if len(parts) > 1 else ""
         title_guess = parts[2].replace("-", " ").title() if len(parts) > 2 else stem
-        body = _body_inner(p)
         items.append({
             "slug": stem,
             "title": f"{title_guess} ({date_part})",
             "stream": "x",
-            "body": body,
+            "preview": str(p),
         })
     return items
 
@@ -112,17 +83,19 @@ _STREAM_CLASS = {
 }
 
 
-def _article_block(item: dict, idx: int) -> str:
+def _row(item: dict, idx: int) -> str:
     cls = _STREAM_CLASS.get(str(item.get("stream", "")).lower(), "stream-ai")
     slug = _esc(item.get("slug", ""))
     title = _esc(item.get("title", slug))
-    body = item.get("body") or "<p><em>Preview not available — use !preview to generate.</em></p>"
-    return f"""<details class="article" open>
-  <summary><span class="item-title">{title} <span class="stream-tag {cls}">{_esc(str(item.get('stream','').upper()) or 'AI')}</span></span></summary>
-  <div class="item-meta">slug: <code>{slug}</code></div>
-  <div class="item-actions"><code>!approve {slug}</code> · <code>!reject {slug}</code></div>
-  <div class="preview">{body}</div>
-</details>"""
+    stream = _esc(str(item.get("stream", "")).upper() or "AI")
+    has_prev = "yes" if item.get("preview") else "no"
+    return f"""<tr>
+  <td class="num">{idx}</td>
+  <td><span class="item-title">{title}</span><br><span class="slug"><code>{slug}</code></span></td>
+  <td><span class="stream-tag {cls}">{stream}</span></td>
+  <td class="prev">{has_prev}</td>
+  <td class="acts"><code>!approve {slug}</code><br><code>!reject {slug}</code></td>
+</tr>"""
 
 
 def build() -> str:
@@ -130,6 +103,9 @@ def build() -> str:
     x = _x_items()
     today = date.today().strftime("%d/%m/%Y")
     ddmmyy = date.today().strftime("%d-%m-%y")
+
+    blog_rows = "\n".join(_row(it, i + 1) for i, it in enumerate(blog)) or '<tr><td colspan="5"><em>None pending.</em></td></tr>'
+    x_rows = "\n".join(_row(it, i + 1) for i, it in enumerate(x)) or '<tr><td colspan="5"><em>None pending.</em></td></tr>'
 
     html = f"""<!DOCTYPE html>
 <html lang="en" data-color-scheme="dark">
@@ -139,38 +115,49 @@ def build() -> str:
 <title>Pending Approvals — {today}</title>
 <style>
   * {{ margin: 0; padding: 0; box-sizing: border-box; }}
-  body {{ background: #11100f; color: #f5f5f4; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; padding: 1.5rem; max-width: 820px; margin: 0 auto; }}
+  body {{ background: #11100f; color: #f5f5f4; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.5; padding: 1.5rem; max-width: 900px; margin: 0 auto; }}
   h1 {{ color: #fbbf24; font-size: 1.5rem; margin-bottom: 0.25rem; }}
-  .subtitle {{ color: #a8a29e; font-size: 0.9rem; margin-bottom: 1.5rem; }}
-  h2 {{ color: #fbbf24; font-size: 1.1rem; margin: 1.5rem 0 0.75rem; padding-bottom: 0.25rem; border-bottom: 1px solid #34302c; }}
-  .article {{ background: #1c1a18; border: 1px solid #34302c; border-radius: 6px; padding: 0.75rem 1rem; margin-bottom: 0.5rem; }}
-  .article > summary {{ cursor: pointer; list-style: none; }}
-  .article > summary::-webkit-details-marker {{ display: none; }}
-  .item-title {{ font-weight: 600; color: #f5f5f4; }}
-  .item-meta {{ font-size: 0.8rem; color: #a8a29e; margin: 0.25rem 0; }}
-  .item-meta code {{ background: #2c2a28; padding: 1px 4px; border-radius: 3px; font-size: 0.75rem; }}
-  .item-actions {{ font-size: 0.85rem; margin-bottom: 0.5rem; }}
-  .item-actions code {{ background: #2c2a28; color: #fbbf24; padding: 2px 6px; border-radius: 4px; }}
-  .preview {{ border-top: 1px solid #34302c; margin-top: 0.5rem; padding-top: 0.5rem; }}
-  .preview img {{ max-width: 100%; height: auto; border-radius: 4px; }}
-  .stream-tag {{ display: inline-block; font-size: 0.7rem; padding: 1px 6px; border-radius: 3px; margin-left: 0.5rem; text-transform: uppercase; }}
+  .subtitle {{ color: #a8a29e; font-size: 0.9rem; margin-bottom: 1.25rem; }}
+  h2 {{ color: #fbbf24; font-size: 1.1rem; margin: 1.5rem 0 0.5rem; padding-bottom: 0.25rem; border-bottom: 1px solid #34302c; }}
+  table {{ width: 100%; border-collapse: collapse; font-size: 0.85rem; }}
+  th {{ text-align: left; color: #a8a29e; font-weight: 600; padding: 0.4rem 0.5rem; border-bottom: 1px solid #34302c; }}
+  td {{ padding: 0.5rem; border-bottom: 1px solid #1f1d1b; vertical-align: top; }}
+  .num {{ color: #a8a29e; width: 2rem; }}
+  .item-title {{ font-weight: 600; }}
+  .slug {{ font-size: 0.75rem; color: #a8a29e; }}
+  .slug code, .acts code {{ background: #2c2a28; padding: 1px 5px; border-radius: 3px; font-size: 0.72rem; }}
+  .acts code {{ color: #fbbf24; }}
+  .prev {{ color: #86efac; }}
+  .stream-tag {{ display: inline-block; font-size: 0.7rem; padding: 1px 6px; border-radius: 3px; text-transform: uppercase; }}
   .stream-ai {{ background: #3b1f1f; color: #fca5a5; }}
   .stream-builder {{ background: #1f3b2f; color: #86efac; }}
   .stream-pm {{ background: #1f2a3b; color: #93c5fd; }}
   .footer {{ margin-top: 2rem; padding-top: 1rem; border-top: 1px solid #34302c; color: #a8a29e; font-size: 0.8rem; }}
+  .footer code {{ background: #2c2a28; padding: 1px 5px; border-radius: 3px; }}
 </style>
 </head>
 <body>
 <h1>📝 Pending Approvals</h1>
-<p class="subtitle">{today} · {len(blog)} blog posts + {len(x)} X/Twitter articles awaiting review (previews inlined)</p>
+<p class="subtitle">{today} · {len(blog)} blog posts + {len(x)} X/Twitter articles awaiting review</p>
 
 <h2>Blog Posts</h2>
-{chr(10).join(_article_block(it, i) for i, it in enumerate(blog)) or "<p><em>None pending.</em></p>"}
+<table>
+  <thead><tr><th>#</th><th>Article</th><th>Stream</th><th>Preview</th><th>Actions</th></tr></thead>
+  <tbody>
+{blog_rows}
+  </tbody>
+</table>
 
 <h2>X/Twitter Articles</h2>
-{chr(10).join(_article_block(it, i) for i, it in enumerate(x)) or "<p><em>None pending.</em></p>"}
+<table>
+  <thead><tr><th>#</th><th>Article</th><th>Stream</th><th>Preview</th><th>Actions</th></tr></thead>
+  <tbody>
+{x_rows}
+  </tbody>
+</table>
 
 <div class="footer">
+  Each article has its own openable HTML preview (with images) attached separately.<br>
   Approve: <code>!approve &lt;slug&gt;</code> · Reject: <code>!reject &lt;slug&gt;</code><br>
   Batch: <code>!approve all</code> or <code>!approve 1,2,3,6-10</code>
 </div>

@@ -1,6 +1,6 @@
 """Regression tests for blog pipeline fixes (issues A/B/C).
 
-A: digest builder inlines previews (no broken file:// links)
+A: digest builder emits a compact status index (no article bodies or file:// links)
 B: audit escalates at attempts>=3, reports retry status
 C: audit skips approved:false slugs in published_exempt.jsonl
 """
@@ -8,7 +8,8 @@ import json
 import sys
 from pathlib import Path
 
-sys.path.insert(0, "/home/kensei/repos/KenseiAgent/content_engine")
+CONTENT_ENGINE = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(CONTENT_ENGINE))
 
 from tools.blog_pipeline_audit import audit, _read_exempt  # noqa: E402
 from scripts.build_pending_digest import build  # noqa: E402
@@ -66,12 +67,12 @@ def test_retry_status_reported(tmp_path, monkeypatch):
     assert any("image-retry" in i and "recovered 1" in i and "still_failed 1" in i for i in issues), issues
 
 
-def test_digest_inlines_no_broken_links(tmp_path, monkeypatch):
-    """FIX A: digest inlines article bodies, no file:// links, images stripped.
+def test_digest_is_status_index(tmp_path, monkeypatch):
+    """FIX A (corrected): digest is a lightweight STATUS/SUMMARY index.
 
-    Images MUST be stripped — otherwise 26 inlined previews with base64
-    heroes blew the digest to 13.6 MB and Discord rejected the attachment
-    (>8 MB bot cap). Regression guard: assert no data:image and a sane size.
+    It must NOT inline article bodies (that blew to 13.6MB and Discord
+    rejected it). Each article's openable preview (with images) is attached
+    SEPARATELY by the cron. The index stays tiny and has no embedded bodies.
     """
     tracker = tmp_path / "pending_approvals.jsonl"
     tracker.write_text(json.dumps({
@@ -84,17 +85,15 @@ def test_digest_inlines_no_broken_links(tmp_path, monkeypatch):
         "<img src='data:image/jpeg;base64,AAAA'></body></html>"
     )
     monkeypatch.setattr("tools.blog_pipeline_audit.TRACKER", tracker)
-    # point digest builder at tmp dirs
-    monkeypatch.setattr(
-        "scripts.build_pending_digest.TRACKER", tracker
-    )
+    monkeypatch.setattr("scripts.build_pending_digest.TRACKER", tracker)
     monkeypatch.setattr(
         "scripts.build_pending_digest.PREVIEW_DIR", tmp_path / "previews"
     )
     out = build()
     html = Path(out).read_text()
-    assert "file://" not in html, "digest must not contain broken file:// links"
-    assert "body content here" in html, "article body must be inlined"
-    assert "data:image" not in html, "base64 images must be stripped (Discord 8MB cap)"
-    assert "<details" in html, "articles should be collapsible blocks"
-    assert Path(out).stat().st_size < 8 * 1024 * 1024, "digest must stay under Discord's 8MB bot cap"
+    assert "file://" not in html, "index must not contain broken file:// links"
+    # index lists the article but does NOT inline its body
+    assert "My Post" in html, "index should list the article title"
+    assert "body content here" not in html, "index must NOT inline article bodies"
+    assert "data:image" not in html, "index must not embed images (per-article previews do)"
+    assert Path(out).stat().st_size < 8 * 1024 * 1024, "index must stay under Discord's 8MB cap"

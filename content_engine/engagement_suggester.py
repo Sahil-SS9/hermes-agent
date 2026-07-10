@@ -499,7 +499,11 @@ def _llm_generate_response(tweet_text: str, author: str, response_type: str) -> 
                 "max_tokens": 200,
                 "temperature": 0.8,
             },
-            timeout=20,
+            # 60s timeout (was 20s) — ollama.com cloud can have cold starts
+            # that blow a 20s budget. The function already falls back to a
+            # template response on any error, so a longer timeout only
+            # reduces how often we degrade to the fallback.
+            timeout=60,
         )
         if resp.status_code == 200:
             text = resp.json()["choices"][0]["message"]["content"].strip()
