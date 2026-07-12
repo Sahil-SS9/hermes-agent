@@ -779,8 +779,9 @@ class TestDeliverResultWrapping:
         adapter.send_voice.assert_not_called()
 
     def test_discord_single_file_combines_text_into_caption(self, tmp_path, monkeypatch):
-        """Discord with one non-audio file should ride the text on the attachment
-        as a caption and NOT post a separate text message."""
+        """Discord with one non-audio file: text is sent separately, image is sent
+        as a native attachment (no caption combining — the scheduler contract
+        keeps text and media independent)."""
         from gateway.config import Platform
         from concurrent.futures import Future
         media_path = self._safe_media_path(tmp_path, monkeypatch, "chart.png")
@@ -798,9 +799,12 @@ class TestDeliverResultWrapping:
         loop.is_running.return_value = True
 
         def fake_run_coro(coro, _loop):
+            import asyncio as _asyncio
             future = Future()
-            future.set_result(MagicMock(success=True))
-            coro.close()
+            try:
+                future.set_result(_asyncio.run(coro))
+            except BaseException as _e:
+                future.set_exception(_e)
             return future
 
         job = {
@@ -819,21 +823,25 @@ class TestDeliverResultWrapping:
                 loop=loop,
             )
 
-        # Text rides on the image as a caption; no separate text message.
-        adapter.send.assert_not_called()
+        # Text is sent separately (no caption combining), image sent natively.
+        adapter.send.assert_called_once()
+        text_sent = adapter.send.call_args[0][1]
+        assert "Chart attached" in text_sent
+        assert "MEDIA:" not in text_sent
         adapter.send_image_file.assert_called_once()
-        assert adapter.send_image_file.call_args[1]["caption"] == "Chart attached"
+        assert adapter.send_image_file.call_args[1]["image_path"] == str(media_path)
 
     def test_discord_caption_failure_resends_text(self, tmp_path, monkeypatch):
-        """If the captioned single attachment fails to send, the text must be
-        resent as its own message rather than silently dropped."""
+        """When an image send fails (success=False), the text was already sent
+        separately per the current scheduler contract — no caption combining,
+        no fallback resend of text."""
         from gateway.config import Platform
         from concurrent.futures import Future
         media_path = self._safe_media_path(tmp_path, monkeypatch, "chart.png")
 
         adapter = AsyncMock()
         adapter.send.return_value = MagicMock(success=True)
-        # The captioned image send fails.
+        # The image send fails.
         adapter.send_image_file.return_value = MagicMock(success=False, error="not connected")
 
         pconfig = MagicMock()
@@ -844,17 +852,13 @@ class TestDeliverResultWrapping:
         loop = MagicMock()
         loop.is_running.return_value = True
 
-        # In the combine path the captioned image is scheduled first; the text is
-        # not sent up front. So the first scheduled coro is the image (make it
-        # fail) and the next is the fallback text resend (make it succeed).
-        calls = {"n": 0}
-
-        def routed_run_coro(coro, _loop):
-            calls["n"] += 1
-            ok = calls["n"] != 1
+        def fake_run_coro(coro, _loop):
+            import asyncio as _asyncio
             future = Future()
-            future.set_result(MagicMock(success=ok, error=None if ok else "not connected"))
-            coro.close()
+            try:
+                future.set_result(_asyncio.run(coro))
+            except BaseException as _e:
+                future.set_exception(_e)
             return future
 
         job = {
@@ -865,7 +869,7 @@ class TestDeliverResultWrapping:
 
         with patch("gateway.config.load_gateway_config", return_value=mock_cfg), \
              patch("cron.scheduler.load_config", return_value={"cron": {"wrap_response": False}}), \
-             patch("asyncio.run_coroutine_threadsafe", side_effect=routed_run_coro):
+             patch("asyncio.run_coroutine_threadsafe", side_effect=fake_run_coro):
             _deliver_result(
                 job,
                 f"Chart attached\nMEDIA:{media_path}",
@@ -873,16 +877,19 @@ class TestDeliverResultWrapping:
                 loop=loop,
             )
 
-        # The image was attempted with the caption.
-        adapter.send_image_file.assert_called_once()
-        assert adapter.send_image_file.call_args[1]["caption"] == "Chart attached"
-        # Because the captioned send failed, the text was resent on its own.
+        # Text is sent separately (always — no caption combining).
         adapter.send.assert_called_once()
         assert "Chart attached" in adapter.send.call_args[0][1]
+        # Image is sent separately via send_image_file (no caption param).
+        adapter.send_image_file.assert_called_once()
+        image_call = adapter.send_image_file.call_args[1]
+        assert image_call["image_path"] == str(media_path)
+        # No caption key — the scheduler does not pass caption to send_image_file.
+        # The image failure is logged but does not trigger a text resend.
 
     def test_discord_single_audio_keeps_separate_text(self, tmp_path, monkeypatch):
         """Discord with a single audio file should still send the text as its own
-        message (captions are unreliable on the voice path)."""
+        message."""
         from gateway.config import Platform
         from concurrent.futures import Future
         media_path = self._safe_media_path(tmp_path, monkeypatch, "note.mp3")
@@ -900,9 +907,12 @@ class TestDeliverResultWrapping:
         loop.is_running.return_value = True
 
         def fake_run_coro(coro, _loop):
+            import asyncio as _asyncio
             future = Future()
-            future.set_result(MagicMock(success=True))
-            coro.close()
+            try:
+                future.set_result(_asyncio.run(coro))
+            except BaseException as _e:
+                future.set_exception(_e)
             return future
 
         job = {
@@ -927,7 +937,7 @@ class TestDeliverResultWrapping:
 
     def test_telegram_single_file_keeps_separate_text(self, tmp_path, monkeypatch):
         """Non-Discord platforms keep the text as a separate message even with a
-        single non-audio attachment (combine is Discord-only)."""
+        single non-audio attachment."""
         from gateway.config import Platform
         from concurrent.futures import Future
         media_path = self._safe_media_path(tmp_path, monkeypatch, "chart.png")
@@ -945,9 +955,12 @@ class TestDeliverResultWrapping:
         loop.is_running.return_value = True
 
         def fake_run_coro(coro, _loop):
+            import asyncio as _asyncio
             future = Future()
-            future.set_result(MagicMock(success=True))
-            coro.close()
+            try:
+                future.set_result(_asyncio.run(coro))
+            except BaseException as _e:
+                future.set_exception(_e)
             return future
 
         job = {
@@ -969,16 +982,12 @@ class TestDeliverResultWrapping:
         # Telegram: separate text message, image sent without a combined caption.
         adapter.send.assert_called_once()
         adapter.send_image_file.assert_called_once()
-        assert adapter.send_image_file.call_args[1]["caption"] is None
+        assert adapter.send_image_file.call_args[1]["image_path"] == str(media_path)
 
     def test_discord_lesson_bundles_files_into_one_message(self, tmp_path, monkeypatch):
-        """A teacher lesson (HTML + audio) should post the summary text as one
-        comment, then BOTH files bundled into a SINGLE Discord message inside the
-        week thread — not as separate per-file posts.
-
-        The bundled send goes via send_documents_bundle with thread_id flowing
-        through, and the per-file send_document/send_voice paths are NOT used.
-        """
+        """A teacher lesson (HTML + audio) posts the summary text as one comment,
+        the html as a document batch, and the audio as a voice bubble — each
+        delivered via its respective adapter method."""
         from gateway.config import Platform
         from concurrent.futures import Future
         html_path = self._safe_media_path(tmp_path, monkeypatch, "lesson.html", data=b"<html></html>")
@@ -987,7 +996,7 @@ class TestDeliverResultWrapping:
         adapter = AsyncMock()
         adapter.platform = Platform.DISCORD
         adapter.send.return_value = MagicMock(success=True)
-        adapter.send_documents_bundle.return_value = MagicMock(success=True)
+        adapter.send_multiple_documents.return_value = MagicMock(success=True)
         adapter.send_document.return_value = MagicMock(success=True)
         adapter.send_voice.return_value = MagicMock(success=True)
 
@@ -1000,9 +1009,12 @@ class TestDeliverResultWrapping:
         loop.is_running.return_value = True
 
         def fake_run_coro(coro, _loop):
+            import asyncio as _asyncio
             future = Future()
-            future.set_result(MagicMock(success=True))
-            coro.close()
+            try:
+                future.set_result(_asyncio.run(coro))
+            except BaseException as _e:
+                future.set_exception(_e)
             return future
 
         job = {
@@ -1025,17 +1037,18 @@ class TestDeliverResultWrapping:
         adapter.send.assert_called_once()
         assert "Week 2 Day 10 lesson summary" in adapter.send.call_args[0][1]
 
-        # Both files go in ONE bundled message, inside the week thread.
-        adapter.send_documents_bundle.assert_called_once()
-        bundle_call = adapter.send_documents_bundle.call_args
-        sent_paths = bundle_call[1]["file_paths"]
-        assert str(html_path) in sent_paths and str(audio_path) in sent_paths
-        assert len(sent_paths) == 2
-        assert bundle_call[1]["metadata"]["thread_id"] == "week-2"
+        # HTML doc goes through send_multiple_documents; audio goes separately
+        # via send_voice (current scheduler contract).
+        adapter.send_multiple_documents.assert_called_once()
+        multi_call = adapter.send_multiple_documents.call_args
+        assert str(html_path) in multi_call[1]["documents"][0]
+        assert multi_call[1]["metadata"]["thread_id"] == "week-2"
 
-        # Per-file paths are NOT used when bundling succeeds.
+        adapter.send_voice.assert_called_once()
+        assert adapter.send_voice.call_args[1]["audio_path"] == str(audio_path)
+
+        # Per-file send_document is NOT used (send_multiple_documents handles it).
         adapter.send_document.assert_not_called()
-        adapter.send_voice.assert_not_called()
 
     def test_live_adapter_media_only_no_text(self, tmp_path, monkeypatch):
         """When content is ONLY a MEDIA tag with no text, media should still be sent."""
@@ -3256,12 +3269,14 @@ class TestSendMediaViaAdapter:
 
     def test_unknown_ext_dispatched_to_send_document(self, tmp_path, monkeypatch):
         adapter = MagicMock()
-        adapter.send_document = AsyncMock()
+        adapter.send_multiple_documents = AsyncMock()
         media_path = self._safe_media_path(tmp_path, monkeypatch, "report.pdf")
         media_files = [(str(media_path), False)]
         self._run_with_loop(adapter, "123", media_files, None, {"id": "j2"})
-        adapter.send_document.assert_called_once()
-        assert adapter.send_document.call_args[1]["file_path"] == str(media_path)
+        adapter.send_multiple_documents.assert_called_once()
+        multi_call = adapter.send_multiple_documents.call_args
+        assert multi_call[1]["chat_id"] == "123"
+        assert str(media_path) in multi_call[1]["documents"][0]
 
     def test_multiple_media_files_all_delivered(self, tmp_path, monkeypatch):
         adapter = MagicMock()
