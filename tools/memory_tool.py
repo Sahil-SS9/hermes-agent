@@ -520,6 +520,20 @@ class MemoryStore:
                         "current_entries": entries_after,
                     "usage": f"{current:,}/{limit:,}",
                 })
+                else:
+                    current3 = self._char_count(target)
+                    return self._consolidation_failure({
+                        "success": False,
+                        "error": (
+                            f"Memory at {current3:,}/{limit:,} chars. "
+                            f"Adding this entry ({len(content)} chars) would exceed the limit. "
+                            "Auto-compaction could not free enough space. "
+                            "Merge/summarise existing entries manually with "
+                            "memory(action=replace), then retry this add."
+                        ),
+                        "current_entries": self._entries_for(target),
+                        "usage": f"{current3:,}/{limit:,}",
+                    })
 
             entries.append(content)
             self._set_entries(target, entries)

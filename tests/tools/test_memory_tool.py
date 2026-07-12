@@ -301,6 +301,53 @@ class TestMemoryStoreAdd:
         assert "current_entries" in result
         assert "usage" in result
 
+    def test_auto_compact_failure_rejects_overflow(self, tmp_path, monkeypatch):
+        """Auto-compaction failure must NOT bypass the char limit.
+
+        When auto-compact returns success=False (e.g. LLM unavailable AND
+        deterministic tiers can't free enough space), add() must still
+        reject the overflow and return a consolidation failure. The entry
+        must NOT be appended to the store.
+        """
+        monkeypatch.setattr("tools.memory_tool.get_memory_dir", lambda: tmp_path)
+        tight = MemoryStore(memory_char_limit=200, user_char_limit=200)
+        tight.load_from_disk()
+
+        # First entry: long, distinct text — no subsumption or short-merge possible
+        r1 = tight.add("memory", "A" * 95)
+        assert r1["success"]
+        before = len(tight.memory_entries)
+        before_chars = tight._char_count("memory")
+
+        # Second entry: overflow that triggers auto-compact
+        # 95 + 3(delimiter) + 120 = 218 > 200
+        # Auto-compact: LLM fails (no auxiliary_client), no subsumption
+        # (single entry, content isn't substring), no short-merge (>80 chars).
+        # Returns success=False → add() MUST reject.
+        r2 = tight.add("memory", "Z" * 120)
+
+        assert not r2["success"], (
+            "Overflow after failed auto-compact must return failure, "
+            f"got: {r2}"
+        )
+        assert "current_entries" in r2, (
+            "Failure response must include current_entries"
+        )
+        assert "usage" in r2, (
+            "Failure response must include usage"
+        )
+
+        # Store must be unchanged
+        assert len(tight.memory_entries) == before, (
+            "No entries should be added after failed auto-compact"
+        )
+        assert tight._char_count("memory") == before_chars, (
+            "Char count must not increase after failed auto-compact"
+        )
+        assert "Z" * 120 not in tight.memory_entries, (
+            "Overflow entry must not appear in store"
+        )
+
     def test_add_succeeds_after_auto_compact(self, store, tmp_path, monkeypatch):
         """Auto-compaction persists compressed entries so the new add fits.
 
