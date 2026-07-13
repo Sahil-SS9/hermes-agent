@@ -2760,7 +2760,7 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
         default_assignee = (_kanban_cfg.get("default_assignee") or "").strip() or None
 
         def _coerce_positive_int(value):
-            if value is None:
+            if value is None or isinstance(value, bool):
                 return None
             try:
                 ival = int(value)

@@ -1008,7 +1008,7 @@ class GatewayKanbanWatchersMixin:
         # / non-positive values are ignored (no per-tick budget).
         raw_max_spawn_per_tick = kanban_cfg.get("max_spawn_per_tick", None)
         max_spawn_per_tick = None
-        if raw_max_spawn_per_tick is not None:
+        if raw_max_spawn_per_tick is not None and not isinstance(raw_max_spawn_per_tick, bool):
             try:
                 max_spawn_per_tick = int(raw_max_spawn_per_tick)
             except (TypeError, ValueError):
