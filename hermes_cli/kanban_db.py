@@ -9146,6 +9146,7 @@ def dispatch_once(
     board: Optional[str] = None,
     default_assignee: Optional[str] = None,
     max_in_progress_per_profile: Optional[int] = None,
+    max_spawn_per_tick: Optional[int] = None,
 ) -> DispatchResult:
     """Run one dispatcher tick under the board's single-writer lock.
 
@@ -9180,6 +9181,7 @@ def dispatch_once(
             board=board,
             default_assignee=default_assignee,
             max_in_progress_per_profile=max_in_progress_per_profile,
+            max_spawn_per_tick=max_spawn_per_tick,
         )
     with _dispatch_tick_lock(db_path) as held:
         if not held:
@@ -9196,6 +9198,7 @@ def dispatch_once(
             board=board,
             default_assignee=default_assignee,
             max_in_progress_per_profile=max_in_progress_per_profile,
+            max_spawn_per_tick=max_spawn_per_tick,
         )
 
 
@@ -9212,6 +9215,7 @@ def _dispatch_once_locked(
     board: Optional[str] = None,
     default_assignee: Optional[str] = None,
     max_in_progress_per_profile: Optional[int] = None,
+    max_spawn_per_tick: Optional[int] = None,
 ) -> DispatchResult:
     """Run one dispatcher tick.
 
@@ -9251,6 +9255,12 @@ def _dispatch_once_locked(
       4. ``max_review_spawn``: separate lane for review tasks (default
          ``max(1, max_spawn // 2)``), so review and work cannot starve
          each other.
+      5. ``max_spawn_per_tick``: per-tick start budget — caps the number of
+         NEW starts made during THIS ``dispatch_once`` call, counted across
+         all three lanes via ``_tick_started``. Orthogonal to the concurrency
+         caps above (those bound how many run at once; this bounds how many
+         may *start* in one tick). Enforced identically under ``dry_run``.
+         None / non-positive means no per-tick budget.
 
     The three dispatch sites (ready, review, pipeline) all respect the same
     precedence stack, with review using its own lane for the review cap.
@@ -9349,6 +9359,21 @@ def _dispatch_once_locked(
         if max_spawn is None or max_spawn > remaining:
             max_spawn = remaining
     spawned = 0
+    # Per-tick spawn budget (kanban.max_spawn_per_tick): caps the number of
+    # NEW starts made during this single dispatch tick, across the ready,
+    # review, and pipeline lanes. Distinct from max_spawn (live concurrency)
+    # and max_in_progress (concurrency ceiling). ``_tick_started`` counts every
+    # start committed this tick — in BOTH dry_run and real paths — so a
+    # --dry-run report matches a real dispatch. Non-positive / non-int values
+    # coerce to None (no per-tick cap), preserving legacy behaviour.
+    _per_tick_cap = (
+        max_spawn_per_tick
+        if isinstance(max_spawn_per_tick, int)
+        and not isinstance(max_spawn_per_tick, bool)
+        and max_spawn_per_tick > 0
+        else None
+    )
+    _tick_started = 0
     # Per-profile concurrency cap (#21582): when set, track how many
     # workers each assignee already has in flight, and refuse to spawn
     # when this would push that assignee past the cap. Prevents
@@ -9438,6 +9463,8 @@ def _dispatch_once_locked(
     _last_stagger_assignee: Optional[str] = None
     for row in ready_rows:
         if max_spawn is not None and running_count + spawned >= max_spawn:
+            break
+        if _per_tick_cap is not None and _tick_started >= _per_tick_cap:
             break
         row_assignee = row["assignee"]
         if not row_assignee:
@@ -9603,6 +9630,7 @@ def _dispatch_once_locked(
                 continue
         if dry_run:
             result.spawned.append((row["id"], row_assignee, ""))
+            _tick_started += 1
             # Increment per-profile counter even in dry_run so the cap
             # check sees the would-be spawn on subsequent iterations.
             # Without this, dry_run reports every task as spawnable and
@@ -9648,6 +9676,7 @@ def _dispatch_once_locked(
             # complete_task).
             result.spawned.append((claimed.id, claimed.assignee or "", str(workspace)))
             spawned += 1
+            _tick_started += 1
             if _daily_budget > 0:
                 _consume_daily_spawn(conn)
 
@@ -9705,6 +9734,8 @@ def _dispatch_once_locked(
     for row in review_rows:
         if _review_spawned >= _max_review_spawn:
             break
+        if _per_tick_cap is not None and _tick_started >= _per_tick_cap:
+            break
         if not row["assignee"]:
             result.skipped_unassigned.append(row["id"])
             continue
@@ -9722,6 +9753,7 @@ def _dispatch_once_locked(
                 continue
         if dry_run:
             result.spawned.append((row["id"], row["assignee"], ""))
+            _tick_started += 1
             continue
         claimed = claim_review_task(conn, row["id"], ttl_seconds=ttl_seconds)
         if claimed is None:
@@ -9759,6 +9791,7 @@ def _dispatch_once_locked(
             result.spawned.append((claimed.id, claimed.assignee or "", str(workspace)))
             spawned += 1
             _review_spawned += 1
+            _tick_started += 1
             if _daily_budget > 0:
                 _consume_daily_spawn(conn)
 
@@ -10081,8 +10114,15 @@ def _dispatch_once_locked(
                 # Stage owner is also nonspawnable — this is a config error.
                 result.skipped_nonspawnable.append(row["id"])
                 continue
+            # Per-tick spawn budget: skip this pipeline spawn (not the whole
+            # loop — cheap gate checks/advances for other rows still run) when
+            # the tick's start budget is exhausted. The gate_failed event above
+            # already persisted, so the task is retried on the next tick.
+            if _per_tick_cap is not None and _tick_started >= _per_tick_cap:
+                continue
             if dry_run:
                 result.spawned.append((row["id"], row["assignee"], ""))
+                _tick_started += 1
                 continue
             claimed = claim_pipeline_task(conn, row["id"], ttl_seconds=ttl_seconds)
             if claimed is None:
@@ -10110,6 +10150,7 @@ def _dispatch_once_locked(
                 )
                 result.spawned.append((claimed.id, claimed.assignee or "", str(workspace)))
                 spawned += 1
+                _tick_started += 1
                 if _daily_budget > 0:
                     _consume_daily_spawn(conn)
 

@@ -1000,6 +1000,36 @@ class GatewayKanbanWatchersMixin:
                         max_in_progress_per_profile,
                     )
 
+        # Read kanban.max_spawn_per_tick — per-tick start budget. Distinct
+        # from max_spawn (live concurrency) and max_in_progress (concurrency
+        # ceiling): this caps how many NEW workers a single dispatcher tick may
+        # start, so a large ready queue ramps up gradually rather than
+        # launching everything the concurrency ceiling allows at once. Invalid
+        # / non-positive values are ignored (no per-tick budget).
+        raw_max_spawn_per_tick = kanban_cfg.get("max_spawn_per_tick", None)
+        max_spawn_per_tick = None
+        if raw_max_spawn_per_tick is not None:
+            try:
+                max_spawn_per_tick = int(raw_max_spawn_per_tick)
+            except (TypeError, ValueError):
+                logger.warning(
+                    "kanban dispatcher: invalid kanban.max_spawn_per_tick=%r; ignoring",
+                    raw_max_spawn_per_tick,
+                )
+                max_spawn_per_tick = None
+            else:
+                if max_spawn_per_tick < 1:
+                    logger.warning(
+                        "kanban dispatcher: kanban.max_spawn_per_tick=%r is below 1; ignoring",
+                        raw_max_spawn_per_tick,
+                    )
+                    max_spawn_per_tick = None
+                else:
+                    logger.info(
+                        "kanban dispatcher: max_spawn_per_tick=%d",
+                        max_spawn_per_tick,
+                    )
+
         # Initial delay so the gateway finishes wiring adapters before the
         # dispatcher spawns workers (those workers may hit gateway notify
         # subscriptions etc.). Matches the notifier watcher's delay.
@@ -1093,6 +1123,7 @@ class GatewayKanbanWatchersMixin:
                     stale_timeout_seconds=stale_timeout_seconds,
                     default_assignee=default_assignee,
                     max_in_progress_per_profile=max_in_progress_per_profile,
+                    max_spawn_per_tick=max_spawn_per_tick,
                 )
             except sqlite3.DatabaseError as exc:
                 if _is_corrupt_board_db_error(exc):

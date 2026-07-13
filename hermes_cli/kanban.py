@@ -2745,11 +2745,13 @@ def _cmd_tail(args: argparse.Namespace) -> int:
 
 def _cmd_dispatch(args: argparse.Namespace) -> int:
     # Honour kanban.default_assignee as the fallback for unassigned ready
-    # tasks (#27145), kanban.max_in_progress as the global concurrency cap
-    # (#33488), kanban.max_in_progress_per_profile as the per-profile
-    # cap (#21582), and kanban.max_spawn as the per-tick spawn limit
-    # (#28805). Same semantics as the gateway dispatch path so behavior
-    # matches whether the user runs the CLI directly or relies on the
+    # tasks (#27145), kanban.max_in_progress as the global concurrency
+    # ceiling (#33488), kanban.max_in_progress_per_profile as the per-profile
+    # cap (#21582), kanban.max_spawn as the live-concurrency cap (running +
+    # this tick; #28805), and kanban.max_spawn_per_tick as the per-tick start
+    # budget (caps NEW starts made in one dispatch tick — distinct from the
+    # concurrency caps). Same semantics as the gateway dispatch path so
+    # behavior matches whether the user runs the CLI directly or relies on the
     # gateway-embedded dispatcher.
     try:
         from hermes_cli.config import load_config
@@ -2776,11 +2778,18 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
         max_spawn = cli_max if cli_max is not None else _coerce_positive_int(
             _kanban_cfg.get("max_spawn")
         )
+        # kanban.max_spawn_per_tick: per-tick start budget (distinct from
+        # max_spawn / max_in_progress). Same coercion as the other caps —
+        # invalid/non-positive falls through to None (no per-tick budget).
+        max_spawn_per_tick = _coerce_positive_int(
+            _kanban_cfg.get("max_spawn_per_tick")
+        )
     except Exception:
         default_assignee = None
         max_in_progress_per_profile = None
         max_in_progress = None
         max_spawn = getattr(args, "max", None)
+        max_spawn_per_tick = None
     with kb.connect_closing() as conn:
         res = kb.dispatch_once(
             conn,
@@ -2790,6 +2799,7 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
             failure_limit=getattr(args, "failure_limit", kb.DEFAULT_SPAWN_FAILURE_LIMIT),
             default_assignee=default_assignee,
             max_in_progress_per_profile=max_in_progress_per_profile,
+            max_spawn_per_tick=max_spawn_per_tick,
         )
     if getattr(args, "json", False):
         print(json.dumps({
