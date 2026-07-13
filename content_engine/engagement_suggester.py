@@ -1055,15 +1055,23 @@ def configure_xurl_from_postiz() -> bool:
     access_token = token[:colon_idx]
     access_secret = token[colon_idx + 1:]
 
-    # Get consumer key/secret from docker-compose.override.yml
-    consumer_key = "wM0iqdFYFB2CkSJMvWYAHChu8"
-    consumer_secret = "IwhMiXvdK5pUEvlSBTqtDxbumuCov30MxkC5fAjf2nMuYTJWRa"
+    # Get all OAuth credentials from the environment.
+    client_id = os.getenv("XURL_CLIENT_ID", "")
+    client_secret = os.getenv("XURL_CLIENT_SECRET", "")
+    consumer_key = os.getenv("XURL_CONSUMER_KEY", "")
+    consumer_secret = os.getenv("XURL_CONSUMER_SECRET", "")
+    if not all((client_id, client_secret, consumer_key, consumer_secret)):
+        print(
+            "[engagement] XURL_CLIENT_ID, XURL_CLIENT_SECRET, XURL_CONSUMER_KEY, "
+            "and XURL_CONSUMER_SECRET must be set. Skipping xurl config write."
+        )
+        return False
 
     # Write xurl config
     xurl_config = f"""apps:
     kensei-digest:
-        client_id: ZXNfaFhEQUJFckJxRmN3VU80UFI6MTpjaQ
-        client_secret: -9tMjL9JGEo_n0WFjEJ9qdR7YINZ78zisRYvqeAugDgOJbwldM
+        client_id: {client_id}
+        client_secret: {client_secret}
         oauth1_token:
             type: oauth1
             oauth1:
