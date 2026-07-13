@@ -165,6 +165,7 @@ export interface TranscriptRow {
 }
 
 export interface UiState {
+  agentMode: AgentMode
   bgTasks: Set<string>
   busy: boolean
   busyInputMode: BusyInputMode
@@ -185,7 +186,6 @@ export interface UiState {
   indicatorStyle: IndicatorStyle
   sid: null | string
   status: string
-  agentMode: AgentMode
   statusBar: StatusBarMode
   streaming: boolean
   theme: Theme
@@ -226,12 +226,23 @@ export interface ComposerActions {
   syncQueue: () => void
 }
 
+/**
+ * Options that ride along with a submission from the composer / overlay call
+ * site down through submit -> dispatchSubmission -> send -> submitPrompt. Named
+ * (not positional booleans) so the "skip re-optimisation" intent of an accepted
+ * prompt-optimisation preview cannot be silently dropped somewhere in the chain.
+ */
+export interface SubmissionOptions {
+  showUserMessage?: boolean
+  skipOptimization?: boolean
+}
+
 export interface ComposerRefs {
   historyDraftRef: MutableRefObject<string>
   historyRef: MutableRefObject<string[]>
   queueEditRef: MutableRefObject<null | number>
   queueRef: MutableRefObject<string[]>
-  submitRef: MutableRefObject<(value: string, showUserMessage?: boolean, skipOptimization?: boolean) => void>
+  submitRef: MutableRefObject<(value: string, options?: SubmissionOptions) => void>
 }
 
 export interface ComposerState {
@@ -250,7 +261,7 @@ export interface UseComposerStateOptions {
   gw: GatewayClient
   onClipboardPaste: (quiet?: boolean) => Promise<void> | void
   onImageAttached?: (info: ImageAttachResponse) => void
-  submitRef: MutableRefObject<(value: string, showUserMessage?: boolean, skipOptimization?: boolean) => void>
+  submitRef: MutableRefObject<(value: string, options?: SubmissionOptions) => void>
 }
 
 export interface UseComposerStateResult {
@@ -318,7 +329,7 @@ export interface GatewayEventHandlerContext {
     setCatalog: StateSetter<null | SlashCatalog>
   }
   submission: {
-    submitRef: MutableRefObject<(value: string, showUserMessage?: boolean, skipOptimization?: boolean) => void>
+    submitRef: MutableRefObject<(value: string, options?: SubmissionOptions) => void>
   }
   system: {
     bellOnComplete: boolean

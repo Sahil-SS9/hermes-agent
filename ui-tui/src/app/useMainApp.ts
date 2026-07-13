@@ -29,13 +29,13 @@ import { asRpcResult, rpcErrorMessage } from '../lib/rpc.js'
 import { terminalParityHints } from '../lib/terminalParity.js'
 import { buildToolTrailLine, formatAbandonedClarify, sameToolTrailGroup, toolTrailLabel } from '../lib/text.js'
 import { estimatedMsgHeight, messageHeightKey } from '../lib/virtualHeights.js'
-import type { Msg, PanelSection, SlashCatalog } from '../types.js'
+import type { Msg, PanelSection, PromptOptimizationPreview, SlashCatalog } from '../types.js'
 
 import { createGatewayEventHandler } from './createGatewayEventHandler.js'
 import { createSlashHandler } from './createSlashHandler.js'
 import { planGatewayRecovery } from './gatewayRecovery.js'
 import { getInputSelection } from './inputSelectionStore.js'
-import { type GatewayRpc, type TranscriptRow } from './interfaces.js'
+import { type GatewayRpc, type SubmissionOptions, type TranscriptRow } from './interfaces.js'
 import { $overlayState, patchOverlayState } from './overlayStore.js'
 import { scrollWithSelectionBy } from './scroll.js'
 import { turnController } from './turnController.js'
@@ -75,6 +75,39 @@ const statusColorOf = (status: string, t: { error: string; muted: string; ok: st
   }
 
   return t.muted
+}
+
+export interface PromptOptimizationChoiceDeps {
+  setInput: (value: string) => void
+  submit: (value: string, options?: SubmissionOptions) => void
+  sys: (text: string) => void
+}
+
+/**
+ * Resolve a prompt-optimisation overlay choice into a concrete action.
+ *
+ * accept -> submit the rewritten text; reject (any non-edit/accept choice) ->
+ * submit the original text. BOTH submit with skipOptimization=true so the
+ * already-decided text is not fed back into the optimiser (which would pop a
+ * second preview and loop). edit -> load the rewritten text into the composer
+ * without submitting. Extracted from the hook so the flag contract is unit-
+ * testable without React infra (mirrors startPromptLiveSession).
+ */
+export function resolvePromptOptimizationChoice(
+  choice: string,
+  preview: PromptOptimizationPreview,
+  deps: PromptOptimizationChoiceDeps
+): void {
+  if (choice === 'edit') {
+    deps.setInput(preview.rewritten)
+    deps.sys('optimised prompt loaded for editing')
+
+    return
+  }
+
+  const text = choice === 'accept' ? preview.rewritten : preview.original
+
+  deps.submit(text, { showUserMessage: true, skipOptimization: true })
 }
 
 export interface PromptLiveSessionOptions {
@@ -210,7 +243,7 @@ export function useMainApp(gw: GatewayClient) {
   const scrollRef = useRef<null | ScrollBoxHandle>(null)
   const onEventRef = useRef<(ev: GatewayEvent) => void>(() => {})
   const clipboardPasteRef = useRef<(quiet?: boolean) => Promise<void> | void>(() => {})
-  const submitRef = useRef<(value: string, skipOptimization?: boolean) => void>(() => {})
+  const submitRef = useRef<(value: string, options?: SubmissionOptions) => void>(() => {})
   const terminalHintsShownRef = useRef(new Set<string>())
   const historyItemsRef = useRef(historyItems)
   const lastUserMsgRef = useRef(lastUserMsg)
@@ -1003,14 +1036,11 @@ export function useMainApp(gw: GatewayClient) {
 
       patchOverlayState({ promptOptimization: null })
 
-      if (choice === 'accept' && opt.preview) {
-        submitRef.current(opt.preview.rewritten)
-      } else if (choice === 'edit' && opt.preview) {
-        composerActions.setInput(opt.preview.rewritten)
-        sys('optimised prompt loaded for editing')
-      } else {
-        submitRef.current(opt.preview?.original ?? '')
-      }
+      resolvePromptOptimizationChoice(choice, opt.preview, {
+        setInput: composerActions.setInput,
+        submit: (value, options) => submitRef.current(value, options),
+        sys
+      })
     },
     [composerActions, overlay.promptOptimization, sys]
   )

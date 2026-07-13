@@ -9,7 +9,7 @@ import { hasInterpolation, INTERPOLATION_RE } from '../protocol/interpolation.js
 import { PASTE_SNIPPET_RE } from '../protocol/paste.js'
 import type { Msg } from '../types.js'
 
-import type { ComposerActions, ComposerRefs, ComposerState, PasteSnippet } from './interfaces.js'
+import type { ComposerActions, ComposerRefs, ComposerState, PasteSnippet, SubmissionOptions } from './interfaces.js'
 import { submitPrompt } from './submissionCore.js'
 import { turnController } from './turnController.js'
 import { getUiState, patchUiState } from './uiStore.js'
@@ -77,7 +77,7 @@ export function useSubmission(opts: UseSubmissionOptions) {
   }, [composerState.input, composerState.inputBuf])
 
   const send = useCallback(
-    (text: string, showUserMessage = true, skipOptimization = false) => {
+    (text: string, options?: SubmissionOptions) => {
       const expand = expandSnips(composerState.pasteSnips)
 
       submitPrompt(
@@ -91,8 +91,8 @@ export function useSubmission(opts: UseSubmissionOptions) {
           setLastUserMsg,
           sys
         },
-        showUserMessage,
-        skipOptimization
+        options?.showUserMessage ?? true,
+        options?.skipOptimization ?? false
       )
     },
     [appendMessage, composerActions, composerState.pasteSnips, gw, maybeGoodVibes, setLastUserMsg, sys]
@@ -224,7 +224,7 @@ export function useSubmission(opts: UseSubmissionOptions) {
   )
 
   const dispatchSubmission = useCallback(
-    (full: string) => {
+    (full: string, options?: SubmissionOptions) => {
       if (!full.trim()) {
         return
       }
@@ -292,16 +292,16 @@ export function useSubmission(opts: UseSubmissionOptions) {
       if (hasInterpolation(full)) {
         patchUiState({ busy: true })
 
-        return interpolate(full, send)
+        return interpolate(full, result => send(result, options))
       }
 
-      send(full)
+      send(full, options)
     },
     [appendMessage, composerActions, composerRefs, handleBusyInput, interpolate, send, sendQueued, shellExec, slashRef]
   )
 
   const submit = useCallback(
-    (value: string, showUserMessage?: boolean, skipOptimization?: boolean) => {
+    (value: string, options?: SubmissionOptions) => {
       if (composerState.completions.length) {
         const row = composerState.completions[composerState.compIdx]
         const next = completionToApplyOnSubmit(value, row?.text, composerState.compReplace)
@@ -347,7 +347,7 @@ export function useSubmission(opts: UseSubmissionOptions) {
         return composerActions.setInput('')
       }
 
-      dispatchSubmission([...composerState.inputBuf, value].join('\n'))
+      dispatchSubmission([...composerState.inputBuf, value].join('\n'), options)
     },
     [appendMessage, composerActions, composerRefs, composerState, dispatchSubmission, gw, sys]
   )
@@ -366,6 +366,6 @@ export interface UseSubmissionOptions {
   maybeGoodVibes: (text: string) => void
   setLastUserMsg: (value: string) => void
   slashRef: MutableRefObject<(cmd: string) => boolean>
-  submitRef: MutableRefObject<(value: string) => void>
+  submitRef: MutableRefObject<(value: string, options?: SubmissionOptions) => void>
   sys: (text: string) => void
 }
