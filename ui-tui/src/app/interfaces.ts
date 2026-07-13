@@ -185,6 +185,7 @@ export interface UiState {
   indicatorStyle: IndicatorStyle
   sid: null | string
   status: string
+  agentMode: AgentMode
   statusBar: StatusBarMode
   streaming: boolean
   theme: Theme
@@ -230,7 +231,7 @@ export interface ComposerRefs {
   historyRef: MutableRefObject<string[]>
   queueEditRef: MutableRefObject<null | number>
   queueRef: MutableRefObject<string[]>
-  submitRef: MutableRefObject<(value: string) => void>
+  submitRef: MutableRefObject<(value: string, showUserMessage?: boolean, skipOptimization?: boolean) => void>
 }
 
 export interface ComposerState {
@@ -249,7 +250,7 @@ export interface UseComposerStateOptions {
   gw: GatewayClient
   onClipboardPaste: (quiet?: boolean) => Promise<void> | void
   onImageAttached?: (info: ImageAttachResponse) => void
-  submitRef: MutableRefObject<(value: string) => void>
+  submitRef: MutableRefObject<(value: string, showUserMessage?: boolean, skipOptimization?: boolean) => void>
 }
 
 export interface UseComposerStateResult {
@@ -317,7 +318,7 @@ export interface GatewayEventHandlerContext {
     setCatalog: StateSetter<null | SlashCatalog>
   }
   submission: {
-    submitRef: MutableRefObject<(value: string) => void>
+    submitRef: MutableRefObject<(value: string, showUserMessage?: boolean, skipOptimization?: boolean) => void>
   }
   system: {
     bellOnComplete: boolean
@@ -384,7 +385,9 @@ export interface SlashHandlerContext {
 
 export interface AppLayoutActions {
   answerApproval: (choice: string) => void
+  answerAskUserQuestions: (answers: Record<number, string>, requestId: string) => void
   answerClarify: (answer: string) => void
+  answerPromptOptimization: (choice: string) => void
   answerSecret: (value: string) => void
   answerSudo: (pw: string) => void
   clearSelection: () => void
@@ -450,7 +453,9 @@ export interface AppOverlaysProps {
   compIdx: number
   completions: CompletionItem[]
   onApprovalChoice: (choice: string) => void
+  onAskUserQuestionsAnswer: (answers: Record<number, string>, requestId: string) => void
   onClarifyAnswer: (value: string) => void
+  onPromptOptimizationChoice: (choice: string) => void
   onActiveSessionSelect: (sessionId: string) => void
   onActiveSessionClose: (sessionId: string) => Promise<null | SessionCloseResponse>
   onModelSelect: (value: string) => void

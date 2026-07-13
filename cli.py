@@ -4044,6 +4044,10 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
         self._clarify_state = None
         self._clarify_freetext = False
         self._clarify_deadline = 0
+        # ── KENSEI CUSTOM: ask_user_questions modal state ──
+        self._auq_state = None  # dict: questions, activeIdx, selections, response_queue
+        self._auq_deadline = 0
+        # ── END KENSEI CUSTOM ──
         self._sudo_state = None
         self._sudo_deadline = 0
         self._modal_input_snapshot = None
@@ -4892,6 +4896,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
         awaiting_input = bool(
             self._approval_state
             or self._clarify_state
+            or self._auq_state  # KENSEI CUSTOM
             or self._sudo_state
             or self._secret_state
             or getattr(self, "_slash_confirm_state", None)
@@ -6067,7 +6072,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
         if self._command_running:
             _cprint(f"{_DIM}Wait for the current command to finish before opening the editor.{_RST}")
             return False
-        if self._sudo_state or self._secret_state or self._approval_state or getattr(self, "_slash_confirm_state", None) or self._clarify_state:
+        if self._sudo_state or self._secret_state or self._approval_state or getattr(self, "_slash_confirm_state", None) or self._clarify_state or self._auq_state:  # KENSEI CUSTOM: +_auq_state
             _cprint(f"{_DIM}Finish the active prompt before opening the editor.{_RST}")
             return False
         target_buffer = buffer or getattr(app, "current_buffer", None)
@@ -6827,7 +6832,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
         if is_token_provider(self.api_key):
             api_key_display = "Microsoft Entra ID"
         elif isinstance(self.api_key, str) and len(self.api_key) > 12:
-            api_key_display = f"{self.api_key[:8]}...{self.api_key[-4:]}"
+            api_key_display = "[set]"
         else:
             api_key_display = "Not set!"
         
@@ -11743,12 +11748,11 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
         Platform callback for the ask_user_questions tool (plan / UltraPlan
         / recon modes).  Called from the agent thread.
 
-        Per spec (2026-06-04): the new mode system uses a multi-question
-        batched prompt instead of single ClarifyPrompt.  The TUI renders a
-        proper boxed overlay; the CLI falls back to a numbered list with
-        per-question input.  This is intentionally simpler than the TUI —
-        the spec puts the polished UI in the TUI, the CLI is a flat
-        numbered interface that respects the same wire contract.
+        Uses the same prompt_toolkit queue+state pattern as _clarify_callback
+        — sets modal state on the CLI instance, triggers an immediate repaint,
+        then blocks on a queue.Queue for the user's selections.  This avoids
+        the raw input() deadlock that froze the terminal when stdin was
+        contested between the agent thread and prompt_toolkit's event loop.
 
         Sends "__other__" for the synthetic "Other" option; the Python
         tool's ``_coerce_answer`` translates that into a structured
@@ -11757,55 +11761,65 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
         """
         # ── KENSEI CUSTOM: ask_user_questions callback (plan/UltraPlan/recon) ──
         # See skill `agent-modes`.  Must survive upstream merges.
-        from tools.ask_user_questions_tool import OTHER_SENTINEL  # KENSEI CUSTOM
-        # ── END KENSEI CUSTOM ──
         import time as _time
+        import queue as _queue
 
-        answers = {}
-        for i, q in enumerate(questions):
-            text = q.get("question", "").strip()
+        timeout = CLI_CONFIG.get("clarify", {}).get("timeout", 120)
+        response_queue = _queue.Queue()
+        total = len(questions)
+
+        # Compute initial selections — pre-select recommended option or 0
+        selections = []
+        for q in questions:
             opts = q.get("options", [])
-            recommended_idx = next(
+            rec_idx = next(
                 (j for j, o in enumerate(opts) if o.get("recommended")),
                 None,
             )
+            selections.append(rec_idx if rec_idx is not None else 0)
 
-            _cprint(f"\n  {_BOLD}Q{i + 1}/{len(questions)}:{_RST} {text}")
-            for j, opt in enumerate(opts):
-                marker = "  (Recommended)" if j == recommended_idx else ""
-                desc = opt.get("description") or ""
-                _cprint(f"    {j + 1}. {opt.get('label', '')}{marker}")
-                if desc:
-                    _cprint(f"       {_DIM}{desc}{_RST}")
-            other_n = len(opts) + 1
-            _cprint(f"    {other_n}. Other (free-form follow-up)")
+        self._auq_state = {
+            "questions": questions,
+            "activeIdx": 0,
+            "selections": selections,
+            "response_queue": response_queue,
+        }
+        self._auq_deadline = _time.monotonic() + timeout
 
-            deadline = _time.monotonic() + 60
-            while True:
-                remaining = deadline - _time.monotonic()
+        # Capture current input draft, clear buffer for modal prompt
+        self._capture_modal_input_snapshot()
+        # Trigger immediate repaint from the agent thread
+        self._paint_now()
+
+        # Poll for the user's selections.  Arrow/number/Enter key bindings
+        # push answers into the queue as a dict[int, str].
+        _last_countdown_refresh = _time.monotonic()
+        while True:
+            try:
+                answers = response_queue.get(timeout=1)
+                self._auq_state = None
+                self._auq_deadline = 0
+                self._restore_modal_input_snapshot()
+                self._paint_now()
+                return answers
+            except _queue.Empty:
+                remaining = self._auq_deadline - _time.monotonic()
                 if remaining <= 0:
-                    _cprint(f"  {_DIM}(timed out — question skipped){_RST}")
                     break
-                try:
-                    raw = input(f"  {_DIM}Pick 1-{other_n}: {_RST}").strip()
-                except EOFError:
-                    raw = ""
-                if not raw:
-                    continue
-                try:
-                    n = int(raw)
-                except ValueError:
-                    _cprint(f"  {_DIM}Enter a number 1-{other_n}.{_RST}")
-                    continue
-                if n < 1 or n > other_n:
-                    _cprint(f"  {_DIM}Enter a number 1-{other_n}.{_RST}")
-                    continue
-                if n == other_n:
-                    answers[i] = OTHER_SENTINEL
-                else:
-                    answers[i] = opts[n - 1].get("label", "")
-                break
-        return answers
+                now = _time.monotonic()
+                if now - _last_countdown_refresh >= 1.0:
+                    _last_countdown_refresh = now
+                    self._paint_now()
+
+        # Timed out — tear down and return empty answers (agent decides)
+        self._auq_state = None
+        self._auq_deadline = 0
+        self._restore_modal_input_snapshot()
+        self._paint_now()
+        _cprint(f"\n{_DIM}(ask_user_questions timed out after {timeout}s — agent will decide){_RST}")
+        # Return sentinel so the tool knows it timed out
+        return {i: "__skipped__" for i in range(total)}
+        # ── END KENSEI CUSTOM ──
 
     def _sudo_password_callback(self) -> str:
         """
@@ -12212,6 +12226,19 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
                 pass
             self._clarify_state = None
             self._clarify_freetext = False
+        # ── KENSEI CUSTOM: cleanup auq overlay on interrupt ──
+        if self._auq_state:
+            try:
+                total = len(self._auq_state.get("questions", []))
+                self._auq_state["response_queue"].put(
+                    {i: "__skipped__" for i in range(total)}
+                )
+            except Exception:
+                pass
+            self._auq_state = None
+            self._auq_deadline = 0
+            self._restore_modal_input_snapshot()
+        # ── END KENSEI CUSTOM ──
         if self._sudo_state:
             try:
                 self._sudo_state["response_queue"].put("")
@@ -12628,7 +12655,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
                             # But if it does (race condition), don't interrupt —
                             # and don't drop the message either: park it in
                             # _pending_input so it runs as the next turn.
-                            if self._clarify_state or self._clarify_freetext:
+                            if self._clarify_state or self._clarify_freetext or self._auq_state:  # KENSEI CUSTOM: +_auq_state
                                 try:
                                     self._pending_input.put(interrupt_msg)
                                 except Exception:
@@ -13185,6 +13212,8 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             return _state_fragment("class:clarify-selected", "✎")
         if self._clarify_state:
             return _state_fragment("class:prompt-working", "?")
+        if self._auq_state:  # KENSEI CUSTOM
+            return _state_fragment("class:clarify-selected", "❓")
         if self._command_running:
             return _state_fragment("class:prompt-working", self._command_spinner_frame())
         if self._agent_running:
@@ -13284,6 +13313,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
         approval_widget,
         slash_confirm_widget=None,
         clarify_widget,
+        auq_widget=None,  # KENSEI CUSTOM
         model_picker_widget=None,
         spinner_widget=None,
         spacer,
@@ -13309,6 +13339,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
                 approval_widget,
                 slash_confirm_widget,
                 clarify_widget,
+                auq_widget,  # KENSEI CUSTOM
                 model_picker_widget,
                 spinner_widget,
                 spacer,
@@ -13797,7 +13828,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
         # in those IDEs and arrives here as ('escape', 'g') — register it as
         # a fallback so the editor handoff works inside Cursor/VSCode too.
         _editor_filter = Condition(
-            lambda: not self._clarify_state and not self._approval_state and not self._sudo_state and not self._secret_state
+            lambda: not self._clarify_state and not self._auq_state and not self._approval_state and not self._sudo_state and not self._secret_state  # KENSEI CUSTOM: +_auq_state
         )
 
         @kb.add('c-g', filter=_editor_filter)
@@ -13879,6 +13910,148 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             # 1-9 select items 0-8, 0 selects item 9 (10thitem)
             _idx = 9 if _num == 0 else _num - 1
             kb.add(str(_num), filter=Condition(lambda: bool(self._clarify_state) and not self._clarify_freetext))(_make_clarify_number_handler(_idx))
+
+        # --- AskUserQuestions tool: arrow/number/Enter navigation ---
+        # ── KENSEI CUSTOM: auq key bindings ──
+        # Mirrors the clarify pattern but supports multi-question batches.
+        # The state dict is self._auq_state with keys:
+        #   questions, activeIdx, selections (list[int]), response_queue
+
+        @kb.add('up', filter=Condition(lambda: bool(self._auq_state)))
+        def auq_up(event):
+            if self._auq_state:
+                qs = self._auq_state["questions"]
+                idx = self._auq_state["activeIdx"]
+                sel = self._auq_state["selections"]
+                sel[idx] = max(0, sel[idx] - 1)
+                event.app.invalidate()
+
+        @kb.add('down', filter=Condition(lambda: bool(self._auq_state)))
+        def auq_down(event):
+            if self._auq_state:
+                qs = self._auq_state["questions"]
+                idx = self._auq_state["activeIdx"]
+                opts = qs[idx].get("options", [])
+                # +1 for the synthetic "Other" option
+                max_idx = len(opts)
+                sel = self._auq_state["selections"]
+                sel[idx] = min(max_idx, sel[idx] + 1)
+                event.app.invalidate()
+
+        @kb.add('escape', filter=Condition(lambda: bool(self._auq_state)), eager=True)
+        def auq_escape(event):
+            """ESC cancels the entire ask_user_questions batch."""
+            if self._auq_state and self._auq_state.get("response_queue"):
+                total = len(self._auq_state["questions"])
+                self._auq_state["response_queue"].put(
+                    {i: "__skipped__" for i in range(total)}
+                )
+                self._auq_state = None  # cleared to prevent double-fire
+                self._auq_deadline = 0
+                self._restore_modal_input_snapshot()
+                event.app.current_buffer.reset()
+                event.app.invalidate()
+
+        def _make_auq_number_handler(q_idx: int, opt_idx: int):
+            def handler(event):
+                if not self._auq_state:
+                    return
+                state = self._auq_state
+                total = len(state["questions"])
+                state["selections"][q_idx] = opt_idx
+                if q_idx == total - 1:
+                    # Last question — finalize
+                    from tools.ask_user_questions_tool import OTHER_SENTINEL
+                    answers = {}
+                    for i, q in enumerate(state["questions"]):
+                        sel = state["selections"][i]
+                        opts = q.get("options", [])
+                        if sel >= len(opts):
+                            answers[i] = OTHER_SENTINEL
+                        else:
+                            answers[i] = opts[sel].get("label", "")
+                    state["response_queue"].put(answers)
+                    self._auq_state = None
+                    self._auq_deadline = 0
+                    self._restore_modal_input_snapshot()
+                else:
+                    state["activeIdx"] = q_idx + 1
+                event.app.current_buffer.reset()
+                event.app.invalidate()
+            return handler
+
+        # Number keys only apply to the *active* question — we'll use a
+        # generic handler that reads activeIdx at invocation time, so we
+        # don't need to re-bind when the active question changes.
+        def _make_auq_dynamic_number_handler(opt_idx: int):
+            def handler(event):
+                if not self._auq_state:
+                    return
+                state = self._auq_state
+                q_idx = state["activeIdx"]
+                total = len(state["questions"])
+                state["selections"][q_idx] = opt_idx
+                if q_idx == total - 1:
+                    from tools.ask_user_questions_tool import OTHER_SENTINEL
+                    answers = {}
+                    for i, q in enumerate(state["questions"]):
+                        sel = state["selections"][i]
+                        opts = q.get("options", [])
+                        if sel >= len(opts):
+                            answers[i] = OTHER_SENTINEL
+                        else:
+                            answers[i] = opts[sel].get("label", "")
+                    state["response_queue"].put(answers)
+                    self._auq_state = None
+                    self._auq_deadline = 0
+                    self._restore_modal_input_snapshot()
+                else:
+                    state["activeIdx"] = q_idx + 1
+                event.app.current_buffer.reset()
+                event.app.invalidate()
+            return handler
+
+        for _num in range(10):
+            _opt_idx = 9 if _num == 0 else _num - 1
+            kb.add(str(_num), filter=Condition(lambda: bool(self._auq_state)))(
+                _make_auq_dynamic_number_handler(_opt_idx)
+            )
+
+        # Enter / Tab: confirm current selection, advance or finalize
+        @kb.add('enter', filter=Condition(lambda: bool(self._auq_state)), eager=True)
+        @kb.add('tab', filter=Condition(lambda: bool(self._auq_state)), eager=True)
+        def auq_confirm(event):
+            if not self._auq_state:
+                return
+            state = self._auq_state
+            q_idx = state["activeIdx"]
+            total = len(state["questions"])
+            if q_idx == total - 1:
+                from tools.ask_user_questions_tool import OTHER_SENTINEL
+                answers = {}
+                for i, q in enumerate(state["questions"]):
+                    sel = state["selections"][i]
+                    opts = q.get("options", [])
+                    if sel >= len(opts):
+                        answers[i] = OTHER_SENTINEL
+                    else:
+                        answers[i] = opts[sel].get("label", "")
+                state["response_queue"].put(answers)
+                self._auq_state = None
+                self._auq_deadline = 0
+                self._restore_modal_input_snapshot()
+            else:
+                state["activeIdx"] = q_idx + 1
+            event.app.current_buffer.reset()
+            event.app.invalidate()
+
+        # Shift+Tab: go back to previous question
+        @kb.add('s-tab', filter=Condition(lambda: bool(self._auq_state)))
+        def auq_prev(event):
+            if self._auq_state and self._auq_state["activeIdx"] > 0:
+                self._auq_state["activeIdx"] -= 1
+                event.app.invalidate()
+        # ── END KENSEI CUSTOM ──
 
         # --- Dangerous command approval: arrow-key navigation ---
 
@@ -14638,6 +14811,17 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
                     ('class:clarify-countdown', countdown),
                 ]
 
+            # ── KENSEI CUSTOM: auq hint ──
+            if cli_ref._auq_state:
+                remaining = max(0, int(cli_ref._auq_deadline - time.monotonic()))
+                countdown = f'  ({remaining}s)' if cli_ref._auq_deadline else ''
+                total = len(cli_ref._auq_state.get("questions", []))
+                return [
+                    ('class:hint', f'  Q{cli_ref._auq_state["activeIdx"]+1}/{total} · ↑/↓/1-9 select · Enter/Tab next'),
+                    ('class:clarify-countdown', countdown),
+                ]
+            # ── END KENSEI CUSTOM ──
+
             if cli_ref._command_running:
                 frame = cli_ref._command_spinner_frame()
                 return [
@@ -14647,7 +14831,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             return []
 
         def get_hint_height():
-            if cli_ref._sudo_state or cli_ref._secret_state or cli_ref._approval_state or cli_ref._slash_confirm_state or cli_ref._clarify_state or cli_ref._command_running:
+            if cli_ref._sudo_state or cli_ref._secret_state or cli_ref._approval_state or cli_ref._slash_confirm_state or cli_ref._clarify_state or cli_ref._auq_state or cli_ref._command_running:  # KENSEI CUSTOM: +_auq_state
                 return 1
             # Keep a spacer while the agent runs on roomy terminals, but reclaim
             # the row on narrow/mobile screens where every line matters.
@@ -14905,6 +15089,101 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             filter=Condition(lambda: cli_ref._clarify_state is not None),
         )
 
+        # --- AskUserQuestions tool: display widget ---
+        # ── KENSEI CUSTOM: auq display ──
+
+        def _get_auq_display():
+            """Build styled text for the multi-question ask_user_questions panel.
+
+            Renders all questions stacked vertically.  The active question is
+            highlighted with a border accent; inactive questions are shown
+            dimmed with their current selection indicated.  Follows the same
+            box-drawing conventions as _get_clarify_display.
+            """
+            state = cli_ref._auq_state
+            if not state:
+                return []
+
+            questions = state["questions"]
+            active_idx = state["activeIdx"]
+            selections = state["selections"]
+            total = len(questions)
+
+            # Gather preview lines for width estimation
+            preview_lines = []
+            for i, q in enumerate(questions):
+                preview_lines.append(f"Q{i+1}/{total}: {q.get('question', '')}")
+                for j, opt in enumerate(q.get("options", [])):
+                    preview_lines.append(f"  {j+1}. {opt.get('label', '')}")
+                preview_lines.append(f"  {len(q['options'])+1}. Other")
+
+            title = f"{total} question{'s' if total > 1 else ''}"
+            box_width = _panel_box_width(title, preview_lines)
+            inner_text_width = max(8, box_width - 2)
+
+            lines = []
+            # Box top border
+            lines.append(('class:clarify-border', '╭─ '))
+            lines.append(('class:clarify-title', title))
+            lines.append(('class:clarify-border', ' ' + ('─' * max(0, box_width - len(title) - 3)) + '╮\n'))
+
+            # Navigation hint
+            nav = '↑/↓ select · 1-9 pick · Enter/Tab next · Shift+Tab prev · Esc cancel'
+            _append_panel_line(lines, 'class:clarify-border', 'class:clarify-question', nav, box_width)
+            _append_blank_panel_line(lines, 'class:clarify-border', box_width)
+
+            for i, q in enumerate(questions):
+                is_active = i == active_idx
+                border_style = 'class:clarify-border'
+                question_style = 'class:clarify-selected' if is_active else 'class:clarify-question'
+
+                # Question header
+                q_header = f"{'❯' if is_active else ' '} Q{i+1}/{total}: {q.get('question', '')}"
+                for wrapped in _wrap_panel_text(q_header, inner_text_width):
+                    _append_panel_line(lines, border_style, question_style, wrapped, box_width)
+
+                opts = q.get("options", [])
+                sel = selections[i] if i < len(selections) else 0
+                for j, opt in enumerate(opts):
+                    is_sel = sel == j and is_active
+                    opt_style = 'class:clarify-selected' if is_sel else 'class:clarify-choice'
+                    rec_mark = '  (Recommended)' if opt.get('recommended') else ''
+                    # Number prefix: 1-9 normal, 0 for 10th
+                    num = j + 1
+                    num_str = str(num) if num < 10 else ('0' if num == 10 else ' ')
+                    prefix = f'❯ {num_str}.' if is_sel else f'  {num_str}.'
+                    opt_text = f'{prefix} {opt.get("label", "")}{rec_mark}'
+                    for wrapped in _wrap_panel_text(opt_text, inner_text_width, subsequent_indent='    '):
+                        _append_panel_line(lines, border_style, opt_style, wrapped, box_width)
+
+                # "Other" option — only shown for active question
+                if is_active:
+                    other_idx = len(opts)
+                    other_num = other_idx + 1
+                    other_num_str = str(other_num) if other_num < 10 else ('0' if other_num == 10 else ' ')
+                    is_other = sel == other_idx
+                    other_style = 'class:clarify-selected' if is_other else 'class:clarify-choice'
+                    other_prefix = f'❯ {other_num_str}.' if is_other else f'  {other_num_str}.'
+                    other_text = f'{other_prefix} Other (free-form follow-up)'
+                    for wrapped in _wrap_panel_text(other_text, inner_text_width, subsequent_indent='    '):
+                        _append_panel_line(lines, border_style, other_style, wrapped, box_width)
+
+                # Separator between questions
+                if i < total - 1:
+                    _append_blank_panel_line(lines, border_style, box_width)
+
+            lines.append(('class:clarify-border', '╰' + ('─' * box_width) + '╯\n'))
+            return lines
+
+        auq_widget = ConditionalContainer(
+            Window(
+                FormattedTextControl(_get_auq_display),
+                wrap_lines=True,
+            ),
+            filter=Condition(lambda: cli_ref._auq_state is not None),
+        )
+        # ── END KENSEI CUSTOM ──
+
         # --- Sudo password: display widget ---
 
         def _get_sudo_display():
@@ -15142,6 +15421,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
                     approval_widget=approval_widget,
                     slash_confirm_widget=slash_confirm_widget,
                     clarify_widget=clarify_widget,
+                    auq_widget=auq_widget,  # KENSEI CUSTOM
                     model_picker_widget=model_picker_widget,
                     spinner_widget=spinner_widget,
                     spacer=spacer,

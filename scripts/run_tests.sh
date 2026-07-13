@@ -12,6 +12,7 @@
 #     is belt-and-suspenders for anyone running pytest outside our
 #     conftest path — e.g. on a single file)
 #   * Proper venv activation (probes .venv, venv, then ~/.hermes/...)
+#   * Falls back to `uv run` on a clean checkout with no venv
 #
 # Usage:
 #   scripts/run_tests.sh                            # full suite
@@ -37,21 +38,26 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-# ── Activate venv ───────────────────────────────────────────────────────────
-VENV=""
+# ── Locate Python launcher ─────────────────────────────────────────────────
+# Precedence: .venv > venv > hardcoded path > uv run fallback
+PY_LAUNCHER=()
 for candidate in "$REPO_ROOT/.venv" "$REPO_ROOT/venv" "$HOME/repos/KenseiAgent/.venv"; do
   if [ -f "$candidate/bin/activate" ]; then
-    VENV="$candidate"
+    PY_LAUNCHER=("$candidate/bin/python")
     break
   fi
 done
 
-if [ -z "$VENV" ]; then
-  echo "error: no virtualenv found in $REPO_ROOT/.venv or $REPO_ROOT/venv" >&2
-  exit 1
+if [ ${#PY_LAUNCHER[@]} -eq 0 ]; then
+  if command -v uv &>/dev/null; then
+    PY_LAUNCHER=(uv run -- python3)
+  else
+    echo "error: no virtualenv found in $REPO_ROOT/.venv or $REPO_ROOT/venv" >&2
+    echo "  Install one: python3 -m venv .venv && source .venv/bin/activate && pip install -e '.[dev]'" >&2
+    echo "  Or install uv: curl -LsSf https://astral.sh/uv/install.sh | sh" >&2
+    exit 1
+  fi
 fi
-
-PYTHON="$VENV/bin/python"
 
 
 # ── Live-gateway plugin (computed before we drop env) ───────────────────────
@@ -82,4 +88,4 @@ exec env -i \
   ${HERMES_RUN_SLOW_PET_TESTS:+HERMES_RUN_SLOW_PET_TESTS="$HERMES_RUN_SLOW_PET_TESTS"} \
   ${EXTRA_PYTHONPATH:+PYTHONPATH="$EXTRA_PYTHONPATH"} \
   ${EXTRA_PYTEST_PLUGINS:+PYTEST_PLUGINS="$EXTRA_PYTEST_PLUGINS"} \
-  "$PYTHON" "$SCRIPT_DIR/run_tests_parallel.py" "$@"
+  "${PY_LAUNCHER[@]}" "$SCRIPT_DIR/run_tests_parallel.py" "$@"

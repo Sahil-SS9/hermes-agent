@@ -301,7 +301,7 @@ export function useSubmission(opts: UseSubmissionOptions) {
   )
 
   const submit = useCallback(
-    (value: string) => {
+    (value: string, showUserMessage?: boolean, skipOptimization?: boolean) => {
       if (composerState.completions.length) {
         const row = composerState.completions[composerState.compIdx]
         const next = completionToApplyOnSubmit(value, row?.text, composerState.compReplace)

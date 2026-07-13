@@ -415,7 +415,7 @@
   "tests/cron/test_parallel_pool.py": 8.16,
   "tests/cron/test_rewrite_skill_refs.py": 13.139,
   "tests/cron/test_run_one_job.py": 10.712,
-  "tests/cron/test_scheduler.py": 107.19,
+  "tests/cron/test_scheduler.py": 17.595,
   "tests/cron/test_scheduler_mcp_init.py": 8.607,
   "tests/cron/test_scheduler_provider.py": 15.307,
   "tests/cron/test_scheduler_shutdown_guard.py": 5.017,

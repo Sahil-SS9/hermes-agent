@@ -25,9 +25,10 @@ export function PromptZone({
   onApprovalChoice,
   onAskUserQuestionsAnswer,
   onClarifyAnswer,
+  onPromptOptimizationChoice,
   onSecretSubmit,
   onSudoSubmit
-}: Pick<AppOverlaysProps, 'cols' | 'onApprovalChoice' | 'onAskUserQuestionsAnswer' | 'onClarifyAnswer' | 'onSecretSubmit' | 'onSudoSubmit'>) {
+}: Pick<AppOverlaysProps, 'cols' | 'onApprovalChoice' | 'onAskUserQuestionsAnswer' | 'onClarifyAnswer' | 'onPromptOptimizationChoice' | 'onSecretSubmit' | 'onSudoSubmit'>) {
   const overlay = useStore($overlayState)
   const theme = useStore($uiTheme)
 
@@ -86,12 +87,13 @@ export function PromptZone({
   }
 
   if (overlay.askUserQuestions) {
+    const askUserQuestions = overlay.askUserQuestions
     return (
       <Box flexDirection="column" flexShrink={0} paddingX={1} paddingY={1}>
         <AskUserQuestionsTool
           onAnswer={onAskUserQuestionsAnswer}
-          onCancel={() => onAskUserQuestionsAnswer({}, overlay.askUserQuestions.requestId)}
-          req={overlay.askUserQuestions}
+          onCancel={() => onAskUserQuestionsAnswer({}, askUserQuestions.requestId)}
+          req={askUserQuestions}
           t={theme}
         />
       </Box>

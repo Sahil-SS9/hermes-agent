@@ -1004,12 +1004,12 @@ export function useMainApp(gw: GatewayClient) {
       patchOverlayState({ promptOptimization: null })
 
       if (choice === 'accept' && opt.preview) {
-        submitRef.current(opt.preview.rewritten, true, true)
+        submitRef.current(opt.preview.rewritten)
       } else if (choice === 'edit' && opt.preview) {
         composerActions.setInput(opt.preview.rewritten)
         sys('optimised prompt loaded for editing')
       } else {
-        submitRef.current(opt.preview?.original ?? '', true, true)
+        submitRef.current(opt.preview?.original ?? '')
       }
     },
     [composerActions, overlay.promptOptimization, sys]
