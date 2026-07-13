@@ -15652,11 +15652,15 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
                             # and watch pattern matches) while agent is idle.
                             try:
                                 from tools.process_registry import process_registry
+                                from tools.async_delegation import (
+                                    claim_event_delivery, complete_event_delivery,
+                                )
                                 for _evt, _synth in process_registry.drain_notifications():
+                                    _claim = claim_event_delivery(_evt, "cli-idle")
+                                    if _claim is None:
+                                        continue
                                     self._pending_input.put(_synth)
-                                    if _evt.get("type") == "async_delegation":
-                                        from tools.async_delegation import mark_completion_delivered
-                                        mark_completion_delivered(str(_evt.get("delegation_id") or ""))
+                                    complete_event_delivery(_evt, _claim)
                             except Exception:
                                 pass
                         continue
@@ -15817,11 +15821,15 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
                         # that arrived while the agent was running.
                         try:
                             from tools.process_registry import process_registry
+                            from tools.async_delegation import (
+                                claim_event_delivery, complete_event_delivery,
+                            )
                             for _evt, _synth in process_registry.drain_notifications():
+                                _claim = claim_event_delivery(_evt, "cli-post-turn")
+                                if _claim is None:
+                                    continue
                                 self._pending_input.put(_synth)
-                                if _evt.get("type") == "async_delegation":
-                                    from tools.async_delegation import mark_completion_delivered
-                                    mark_completion_delivered(str(_evt.get("delegation_id") or ""))
+                                complete_event_delivery(_evt, _claim)
                         except Exception:
                             pass  # Non-fatal — don't break the main loop
 
