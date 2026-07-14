@@ -196,8 +196,11 @@ def test_bounded_grant_boundary_ordering(temp_ledger):
         object_type="tool", object_id="web_search", event_id="b-bnd",
         occurred_at=boundary, payload={"task_id": "t_bnd"},
     )
-    # Borrow at the boundary should be found (>= since).
-    assert tg.has_active_grant("octacon", "web_search") is True
+    # Exercise the inclusive ledger boundary directly; passing the same
+    # boundary avoids a wall-clock rollover between setup and assertion.
+    assert tg.has_active_grant(
+        "octacon", "web_search", since=boundary
+    ) is True
     # Now revoke it, also at the boundary.
     pal.append_event(
         source="t", event_type="tool.revoked", target_profile="octacon",
@@ -205,7 +208,9 @@ def test_bounded_grant_boundary_ordering(temp_ledger):
         occurred_at=boundary,
         payload={"borrow_event_id": "b-bnd", "task_result": "completed"},
     )
-    assert tg.has_active_grant("octacon", "web_search") is False
+    assert tg.has_active_grant(
+        "octacon", "web_search", since=boundary
+    ) is False
 
 
 def test_bounded_grant_task_id_scoping(temp_ledger):

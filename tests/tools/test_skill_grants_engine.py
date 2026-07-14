@@ -165,14 +165,18 @@ def test_bounded_grant_boundary_ordering(temp_ledger):
         object_type="skill", object_id="arxiv", event_id="b-bnd",
         occurred_at=boundary, payload={"task_id": "t_bnd"},
     )
-    assert sg.has_active_grant("octacon", "arxiv") is True
+    assert sg.has_active_grant(
+        "octacon", "arxiv", since=boundary
+    ) is True
     pal.append_event(
         source="t", event_type="skill.revoked", target_profile="octacon",
         object_type="skill", object_id="arxiv", event_id="r-bnd",
         occurred_at=boundary,
         payload={"borrow_event_id": "b-bnd", "task_result": "completed"},
     )
-    assert sg.has_active_grant("octacon", "arxiv") is False
+    assert sg.has_active_grant(
+        "octacon", "arxiv", since=boundary
+    ) is False
 
 
 def test_bounded_grant_task_id_scoping(temp_ledger):
