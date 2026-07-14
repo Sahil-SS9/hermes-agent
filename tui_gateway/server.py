@@ -10025,6 +10025,7 @@ def _(rid, params: dict) -> dict:
 from hermes_cli.mode_prompts import (  # KENSEI CUSTOM
     get_mode_prompt as _mode_prompt,    # KENSEI CUSTOM
     mode_label as _mode_label,           # KENSEI CUSTOM
+    validate_mode,                       # KENSEI CUSTOM
 )                                        # KENSEI CUSTOM
 
 
@@ -10193,11 +10194,15 @@ def _(rid, params: dict) -> dict:
     # ── KENSEI CUSTOM: agent mode (plan / gods_plan / recon / auto) ──
     # See skill `agent-modes` for full spec.  Must survive upstream merges.
     if key == "mode":
-        VALID_MODES = {"auto", "plan", "gods_plan", "recon"}
-        value = str(value or "").strip().lower()
-        if value not in VALID_MODES:
-            return _err(rid, 4002, f"unknown mode: {value} (valid: auto, plan, gods_plan, recon)")
-        nv = value
+        # Validate via the shared contract (case-insensitive).  The
+        # user-visible error text is preserved exactly — we catch
+        # ValueError and re-emit the original _err message rather than
+        # surfacing validate_mode()'s own wording.
+        raw = str(value or "").strip().lower()
+        try:
+            nv = validate_mode(raw)
+        except ValueError:
+            return _err(rid, 4002, f"unknown mode: {raw} (valid: auto, plan, gods_plan, recon)")
 
         # Store on session so it's applied to future agent turns
         if session:

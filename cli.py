@@ -9494,16 +9494,11 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
         """
         # ── KENSEI CUSTOM: shared mode prompts (plan/UltraPlan/recon/auto) ──
         from hermes_cli.mode_prompts import (                    # KENSEI CUSTOM
-            get_mode_prompt, detect_mode, mode_label,           # KENSEI CUSTOM
-        )                                                       # KENSEI CUSTOM
+            get_mode_prompt, detect_mode, mode_label,            # KENSEI CUSTOM
+            validate_mode,                                        # KENSEI CUSTOM
+        )                                                        # KENSEI CUSTOM
         # ── END KENSEI CUSTOM ──
 
-        VALID_MODES = {
-            "auto": None,
-            "plan": "plan",
-            "gods_plan": "gods_plan",
-            "recon": "recon",
-        }
         parts = cmd.strip().split(maxsplit=1)
         arg = parts[1].strip().lower() if len(parts) > 1 else ""
 
@@ -9515,12 +9510,17 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
                 _cprint(f"  {_DIM}/mode auto to reset{_RST}")
             return
 
-        if arg not in VALID_MODES:
+        # Validate via the shared contract (case-insensitive).  The
+        # user-visible error text is preserved exactly — we catch
+        # ValueError and re-emit the original messages rather than
+        # surfacing validate_mode()'s own wording.
+        try:
+            mode = validate_mode(arg)
+        except ValueError:
             _cprint(f"  \033[1;31mUnknown mode: {arg}{_RST}")
             _cprint(f"  Valid modes: auto, plan, gods_plan, recon")
             return
 
-        mode = arg
         prompt = get_mode_prompt(mode)
         if hasattr(self, "agent") and self.agent:
             self.agent.ephemeral_system_prompt = prompt

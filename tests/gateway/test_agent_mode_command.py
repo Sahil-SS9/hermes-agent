@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 from datetime import datetime
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -489,3 +489,169 @@ class TestArchivedVerifierContract:
         # Should not assert config.set.*mode in useInputHandlers
         # (because Shift+Tab now does yolo, not mode)
         assert 'config\\.set.*mode' not in content or 'useInputHandlers.ts' not in content
+
+
+# ===========================================================================
+# 9. CLI /mode command delegates validation to shared validate_mode()
+# ===========================================================================
+
+class TestCliModeCommandUsesSharedValidation:
+    """HermesCLI._handle_mode_command should validate via the shared
+    validate_mode() contract (no local VALID_MODES), preserving the
+    exact user-visible status/error/success outputs and lower-case
+    normalisation."""
+
+    def _make_cli(self, monkeypatch, capfd):
+        from cli import HermesCLI
+        cli = HermesCLI.__new__(HermesCLI)
+
+        class _Agent:
+            ephemeral_system_prompt = ""
+
+        cli.agent = _Agent()
+        cli.session_id = "test-mode-cli"
+        # Capture _cprint output
+        out = []
+        monkeypatch.setattr("cli._cprint", lambda s: out.append(s))
+        return cli, out
+
+    def test_status_reports_current(self, monkeypatch, capfd):
+        cli, out = self._make_cli(monkeypatch, capfd)
+        cli.agent.ephemeral_system_prompt = ""  # auto
+        cli._handle_mode_command("/mode status")
+        assert any("mode: auto" in line for line in out)
+
+    def test_valid_plan_sets_prompt_and_reports(self, monkeypatch, capfd):
+        cli, out = self._make_cli(monkeypatch, capfd)
+        cli._handle_mode_command("/mode plan")
+        from hermes_cli.mode_prompts import PLAN_PROMPT
+        assert cli.agent.ephemeral_system_prompt == PLAN_PROMPT
+        assert any("mode → plan" in line for line in out)
+        assert any("/mode auto to reset" in line for line in out)
+
+    def test_valid_auto_clears_prompt(self, monkeypatch, capfd):
+        cli, out = self._make_cli(monkeypatch, capfd)
+        cli.agent.ephemeral_system_prompt = "some plan prompt"
+        cli._handle_mode_command("/mode auto")
+        assert cli.agent.ephemeral_system_prompt is None
+        assert any("mode → auto" in line for line in out)
+        # auto should NOT show the reset hint
+        assert not any("/mode auto to reset" in line for line in out)
+
+    def test_case_insensitive_normalised(self, monkeypatch, capfd):
+        cli, out = self._make_cli(monkeypatch, capfd)
+        cli._handle_mode_command("/mode PLAN")
+        # validate_mode normalises to lowercase; prompt must be set
+        from hermes_cli.mode_prompts import PLAN_PROMPT
+        assert cli.agent.ephemeral_system_prompt == PLAN_PROMPT
+        assert any("mode → plan" in line for line in out)
+
+    def test_invalid_mode_exact_error_output(self, monkeypatch, capfd):
+        cli, out = self._make_cli(monkeypatch, capfd)
+        cli._handle_mode_command("/mode bogus")
+        # Exact user-visible error text preserved
+        assert any("Unknown mode: bogus" in line for line in out)
+        assert any("Valid modes: auto, plan, gods_plan, recon" in line for line in out)
+        # Agent prompt must NOT have changed
+        assert cli.agent.ephemeral_system_prompt == ""
+
+    def test_invalid_mode_does_not_touch_agent(self, monkeypatch, capfd):
+        cli, out = self._make_cli(monkeypatch, capfd)
+        cli.agent.ephemeral_system_prompt = "existing prompt"
+        cli._handle_mode_command("/mode nonsense")
+        assert cli.agent.ephemeral_system_prompt == "existing prompt"
+
+
+# ===========================================================================
+# 10. TUI gateway config.set mode delegates validation to shared validate_mode()
+# ===========================================================================
+
+class TestTuiConfigSetModeUsesSharedValidation:
+    """tui_gateway/server.py config.set key=mode should validate via the
+    shared validate_mode() contract (no local VALID_MODES), preserving the
+    exact _err/_ok outputs, lower-case normalisation, and session/DB
+    side-effects."""
+
+    def _setup(self, monkeypatch):
+        import importlib
+        with patch.dict("sys.modules", {
+            "hermes_constants": MagicMock(get_hermes_home=MagicMock(return_value="/tmp/hermes_test")),
+            "hermes_cli.env_loader": MagicMock(),
+            "hermes_cli.banner": MagicMock(),
+            "hermes_state": MagicMock(),
+        }):
+            server = importlib.import_module("tui_gateway.server")
+            # Avoid real DB / emit side-effects for the no-agent path
+            monkeypatch.setattr(server, "_get_db", lambda: None)
+            return server
+
+    def test_invalid_mode_returns_exact_error(self, monkeypatch):
+        server = self._setup(monkeypatch)
+        resp = server.handle_request({
+            "id": "r1",
+            "method": "config.set",
+            "params": {"key": "mode", "value": "bogus", "session_id": ""},
+        })
+        assert "error" in resp
+        assert resp["error"]["code"] == 4002
+        assert resp["error"]["message"] == "unknown mode: bogus (valid: auto, plan, gods_plan, recon)"
+
+    def test_empty_mode_returns_exact_error(self, monkeypatch):
+        server = self._setup(monkeypatch)
+        resp = server.handle_request({
+            "id": "r1",
+            "method": "config.set",
+            "params": {"key": "mode", "value": "", "session_id": ""},
+        })
+        assert "error" in resp
+        assert resp["error"]["code"] == 4002
+        assert "unknown mode:" in resp["error"]["message"]
+
+    def test_valid_plan_returns_ok_normalised(self, monkeypatch):
+        server = self._setup(monkeypatch)
+        resp = server.handle_request({
+            "id": "r1",
+            "method": "config.set",
+            "params": {"key": "mode", "value": "PLAN", "session_id": ""},
+        })
+        assert "result" in resp
+        assert resp["result"]["key"] == "mode"
+        assert resp["result"]["value"] == "plan"
+
+    def test_valid_recon_returns_ok_normalised(self, monkeypatch):
+        server = self._setup(monkeypatch)
+        resp = server.handle_request({
+            "id": "r1",
+            "method": "config.set",
+            "params": {"key": "mode", "value": "Recon", "session_id": ""},
+        })
+        assert "result" in resp
+        assert resp["result"]["value"] == "recon"
+
+    def test_valid_with_session_stores_agent_mode(self, monkeypatch):
+        server = self._setup(monkeypatch)
+        # Register a session with no live agent (skips _emit path)
+        sid = "s1"
+        session = {"session_key": "k1", "agent": None}
+        server._sessions[sid] = session
+        resp = server.handle_request({
+            "id": "r1",
+            "method": "config.set",
+            "params": {"key": "mode", "value": "plan", "session_id": sid},
+        })
+        assert "result" in resp
+        assert session["agent_mode"] == "plan"
+
+    def test_invalid_with_session_does_not_store(self, monkeypatch):
+        server = self._setup(monkeypatch)
+        sid = "s1"
+        session = {"session_key": "k1", "agent": None, "agent_mode": "auto"}
+        server._sessions[sid] = session
+        resp = server.handle_request({
+            "id": "r1",
+            "method": "config.set",
+            "params": {"key": "mode", "value": "bogus", "session_id": sid},
+        })
+        assert "error" in resp
+        # Prior mode must be untouched
+        assert session["agent_mode"] == "auto"
