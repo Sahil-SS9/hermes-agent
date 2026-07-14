@@ -15386,7 +15386,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 try:
                     from tools.async_delegation import claim_completion_delivery
 
-                    durable_claim_id = f"gateway:{id(self)}:{__import__("uuid").uuid4().hex}"
+                    durable_claim_id = f"gateway:{id(self)}:{__import__('uuid').uuid4().hex}"
                     if not claim_completion_delivery(
                         durable_delegation_id, durable_claim_id,
                     ):

@@ -124,6 +124,31 @@ def _connect() -> sqlite3.Connection:
     return conn
 
 
+def _redact_durable_value(value: Any) -> Any:
+    """Return a JSON-safe, secret-redacted value for at-rest delegation state."""
+    if isinstance(value, str):
+        try:
+            from agent.redact import redact_sensitive_text
+
+            return redact_sensitive_text(value, force=True)
+        except Exception:
+            # Durable recovery metadata is optional; fail closed rather than
+            # writing an unredacted credential when the redactor is unavailable.
+            return "«redacted-unavailable»"
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, list):
+        return [_redact_durable_value(item) for item in value]
+    if isinstance(value, tuple):
+        return [_redact_durable_value(item) for item in value]
+    if isinstance(value, dict):
+        return {
+            str(key): _redact_durable_value(item)
+            for key, item in value.items()
+        }
+    return None
+
+
 def _persist_dispatch(record: Dict[str, Any]) -> None:
     now = time.time()
     try:
@@ -131,11 +156,11 @@ def _persist_dispatch(record: Dict[str, Any]) -> None:
         owner_started_at = get_process_start_time(__import__("os").getpid())
     except Exception:
         owner_started_at = None
-    task_payload = {
+    task_payload = _redact_durable_value({
         key: record.get(key)
         for key in ("goal", "goals", "context", "toolsets", "role", "model", "is_batch")
         if key in record
-    }
+    })
     with _DB_LOCK, _connect() as conn:
         conn.execute(
             """INSERT OR REPLACE INTO async_delegations
@@ -196,15 +221,35 @@ def _prune_durable_records() -> None:
             )
 
 
-def _persist_completion(event: Dict[str, Any], result: Dict[str, Any]) -> None:
+def _persist_completion(event: Dict[str, Any], _result: Dict[str, Any]) -> None:
+    """Persist only the delivery-safe result envelope.
+
+    Child result dictionaries may contain non-JSON extension objects, messages,
+    or tool traces. Those are neither needed for completion replay nor safe to
+    retain in the durable database; the sanitised event is authoritative.
+    """
     now = time.time()
+    durable_event = _redact_durable_value(event)
+    durable_result = {
+        key: durable_event.get(key)
+        for key in (
+            "status",
+            "summary",
+            "error",
+            "api_calls",
+            "duration_seconds",
+            "model",
+            "exit_reason",
+        )
+        if durable_event.get(key) is not None
+    }
     with _DB_LOCK, _connect() as conn:
         conn.execute(
             """UPDATE async_delegations SET state=?, completed_at=?, updated_at=?,
                event_json=?, result_json=?, delivery_state='pending'
                WHERE delegation_id=?""",
             (event.get("status", "completed"), event.get("completed_at", now), now,
-             json.dumps(event), json.dumps(result), event["delegation_id"]),
+             json.dumps(durable_event), json.dumps(durable_result), event["delegation_id"]),
         )
 
 
@@ -915,7 +960,10 @@ def _reset_for_tests() -> None:
     global _executor, _executor_max_workers
     with _executor_lock:
         if _executor is not None:
-            _executor.shutdown(wait=False)
+            # Test isolation requires prior workers to finish before the next
+            # test drains the shared completion queue. Durable persistence makes
+            # the old fire-and-forget teardown race visible.
+            _executor.shutdown(wait=True)
         _executor = None
         _executor_max_workers = 0
     with _records_lock:

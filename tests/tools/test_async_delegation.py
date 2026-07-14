@@ -214,18 +214,37 @@ def test_completion_is_persisted_and_delivery_can_be_acknowledged(tmp_path, monk
     """A finished child remains pending on disk until its queue consumer acks it."""
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     dispatched = ad.dispatch_async_delegation(
-        goal="durable", context="ctx", toolsets=["terminal"], role="leaf",
+        goal="durable", context="PRIVATE_TOKEN=abc123randomopaquetokenvalue999",
+        toolsets=["terminal"], role="leaf",
         model="m", session_key="owner", parent_session_id="parent",
-        runner=lambda: {"status": "completed", "summary": "survived"},
+        runner=lambda: {
+            "status": "completed",
+            "summary": "survived",
+            "messages": [object()],
+            "tool_trace": [{"secret": "must-not-be-persisted"}],
+        },
     )
     assert _drain_one() is not None
 
     restored = queue.Queue()
     assert ad.restore_undelivered_completions(restored) == 1
     row = ad.get_durable_delegation(dispatched["delegation_id"])
+    assert row is not None
     assert row["origin_session"] == "owner"
     assert row["state"] == "completed"
     assert row["result"]["summary"] == "survived"
+    assert "messages" not in row["result"]
+    assert "tool_trace" not in row["result"]
+    assert "must-not-be-persisted" not in json.dumps(row)
+    with ad._DB_LOCK, ad._connect() as conn:
+        durable_json = conn.execute(
+            "SELECT task_json, event_json, result_json FROM async_delegations "
+            "WHERE delegation_id=?",
+            (dispatched["delegation_id"],),
+        ).fetchone()
+    assert durable_json is not None
+    assert "abc123randomopaquetokenvalue999" not in "".join(durable_json)
+    assert "must-not-be-persisted" not in "".join(durable_json)
     assert row["delivery_state"] == "pending"
     # Queue publication/restoration is not a destination delivery attempt.
     assert row["delivery_attempts"] == 0
@@ -902,10 +921,14 @@ def test_async_completion_strips_leaked_summary():
             task_index=0, goal="async review", child=child, parent_agent=None
         )
 
+    # Run the real child-result sanitisation seam synchronously. The async
+    # lifecycle under test starts from that result; unrelated plugin discovery
+    # must not turn this content-safety assertion into a timing test.
+    sanitised_result = runner()
     ad.dispatch_async_delegation(
         goal="async review", context=None, toolsets=None, role="leaf",
         model="m", session_key="agent:main:cli:dm:local",
-        runner=runner, max_async_children=3,
+        runner=lambda: sanitised_result, max_async_children=3,
     )
     evt = _drain_one()
     assert evt is not None
