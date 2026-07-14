@@ -12195,6 +12195,40 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
         except Exception:
             pass
 
+    def _is_normal_input_active(self) -> bool:
+        """True only when no input-blocking or foreground overlay is active.
+
+        Gates the generic history up/down filter (``_normal_input``) so it
+        stays disabled while *any* overlay — including ``_auq_state`` — is
+        showing, preventing the generic history handlers from overlapping
+        the overlay's own arrow/number handlers.
+        """
+        return not (
+            self._clarify_state
+            or self._approval_state
+            or self._slash_confirm_state
+            or self._sudo_state
+            or self._secret_state
+            or self._model_picker_state
+            or self._auq_state  # KENSEI CUSTOM
+        )
+
+    def _has_interruptible_overlay(self) -> bool:
+        """True when an agent-blocking overlay that Ctrl+C / Ctrl+Q must clear
+        is active: approval, clarify, AUQ, sudo, or secret.
+
+        Foreground-only UI (slash-confirm, model-picker) is handled earlier
+        in the Ctrl+C / Ctrl+Q handlers and is NOT included here — those
+        don't block a worker thread on a ``response_queue.get()``.
+        """
+        return bool(
+            self._sudo_state
+            or self._secret_state
+            or self._approval_state
+            or self._clarify_state
+            or self._auq_state  # KENSEI CUSTOM
+        )
+
     def _clear_active_overlays_for_interrupt(self) -> None:
         """Drain and clear every input-blocking overlay left by an interrupted agent.
 
@@ -13952,34 +13986,6 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
                 event.app.current_buffer.reset()
                 event.app.invalidate()
 
-        def _make_auq_number_handler(q_idx: int, opt_idx: int):
-            def handler(event):
-                if not self._auq_state:
-                    return
-                state = self._auq_state
-                total = len(state["questions"])
-                state["selections"][q_idx] = opt_idx
-                if q_idx == total - 1:
-                    # Last question — finalize
-                    from tools.ask_user_questions_tool import OTHER_SENTINEL
-                    answers = {}
-                    for i, q in enumerate(state["questions"]):
-                        sel = state["selections"][i]
-                        opts = q.get("options", [])
-                        if sel >= len(opts):
-                            answers[i] = OTHER_SENTINEL
-                        else:
-                            answers[i] = opts[sel].get("label", "")
-                    state["response_queue"].put(answers)
-                    self._auq_state = None
-                    self._auq_deadline = 0
-                    self._restore_modal_input_snapshot()
-                else:
-                    state["activeIdx"] = q_idx + 1
-                event.app.current_buffer.reset()
-                event.app.invalidate()
-            return handler
-
         # Number keys only apply to the *active* question — we'll use a
         # generic handler that reads activeIdx at invocation time, so we
         # don't need to re-bind when the active question changes.
@@ -14140,9 +14146,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
         # The TextArea is multiline, so by default up/down only move the cursor.
         # Buffer.auto_up/auto_down handle both: cursor movement when multi-line,
         # history browsing when on the first/last line (or single-line input).
-        _normal_input = Condition(
-            lambda: not self._clarify_state and not self._approval_state and not self._slash_confirm_state and not self._sudo_state and not self._secret_state and not self._model_picker_state
-        )
+        _normal_input = Condition(self._is_normal_input_active)  # KENSEI CUSTOM
 
         @kb.add('up', filter=_normal_input)
         def history_up(event):
@@ -14218,12 +14222,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             # (left behind by a previous interrupt) consumes the press without
             # ever reaching the agent-interrupt branch, leaving the chat frozen
             # (#14026).
-            _overlay_cleared = bool(
-                self._sudo_state
-                or self._secret_state
-                or self._approval_state
-                or self._clarify_state
-            )
+            _overlay_cleared = self._has_interruptible_overlay()  # KENSEI CUSTOM
             if _overlay_cleared:
                 self._clear_active_overlays_for_interrupt()
                 event.app.current_buffer.reset()
@@ -14305,12 +14304,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             # Clear all agent-blocking overlays in one shot, then fall through to
             # the agent-interrupt branch so a single Ctrl+Q both clears a stale
             # overlay and interrupts a still-running agent (#14026).
-            _overlay_cleared = bool(
-                self._sudo_state
-                or self._secret_state
-                or self._approval_state
-                or self._clarify_state
-            )
+            _overlay_cleared = self._has_interruptible_overlay()  # KENSEI CUSTOM
             if _overlay_cleared:
                 self._clear_active_overlays_for_interrupt()
                 event.app.current_buffer.reset()

@@ -2023,6 +2023,21 @@ def _enable_gateway_prompts() -> None:
 # ── Blocking prompt factory ──────────────────────────────────────────
 
 
+def _normalise_auq_callback_result(questions: list, result: object) -> dict:
+    """Normalise the return value of ``ask_user_questions_callback``.
+
+    The TUI renderer responds with a ``{index: label}`` dict on success.
+    On timeout or interruption, ``_block`` returns an empty string (or
+    ``None``); translate that into a per-question skipped dict so the tool
+    layer receives a well-formed dict instead of erroring on a non-dict.
+
+    KENSEI CUSTOM — see skill ``agent-modes``.  Must survive upstream merges.
+    """
+    if isinstance(result, dict):
+        return result
+    return {i: "__skipped__" for i in range(len(questions))}
+
+
 def _block(event: str, sid: str, payload: dict, timeout: int = 300) -> str:
     rid = uuid.uuid4().hex[:8]
     ev = threading.Event()
@@ -3851,9 +3866,12 @@ def _agent_cbs(sid: str) -> dict:
         # renders the AskUserQuestionsTool overlay and sends back
         # ask_user_questions.respond with a {index: label} dict.  See
         # skill `agent-modes`.  Must survive upstream merges.
-        "ask_user_questions_callback": lambda questions: _block(        # KENSEI CUSTOM
-            "ask_user_questions.request", sid,                          # KENSEI CUSTOM
-            {"questions": questions},                                    # KENSEI CUSTOM
+        "ask_user_questions_callback": lambda questions: _normalise_auq_callback_result(  # KENSEI CUSTOM
+            questions,                                                  # KENSEI CUSTOM
+            _block(                                                     # KENSEI CUSTOM
+                "ask_user_questions.request", sid,                      # KENSEI CUSTOM
+                {"questions": questions},                                # KENSEI CUSTOM
+            ),                                                          # KENSEI CUSTOM
         ),                                                              # KENSEI CUSTOM
         # read_terminal tool (desktop GUI): same blocking bridge as clarify — the
         # renderer answers terminal.read.respond with the serialized buffer.

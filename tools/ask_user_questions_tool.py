@@ -73,9 +73,9 @@ def _normalise_questions(raw_questions: Any) -> List[Dict[str, Any]]:
         if not text:
             raise ValueError(f"question[{i}].question is required")
         opts = q.get("options")
-        if not isinstance(opts, list) or not opts:
+        if not isinstance(opts, list) or len(opts) < 2:
             raise ValueError(
-                f"question[{i}] needs at least one option in `options`"
+                f"question[{i}] needs at least 2 options in `options`"
             )
         if len(opts) > MAX_OPTIONS_PER_QUESTION:
             raise ValueError(
@@ -102,10 +102,10 @@ def _normalise_questions(raw_questions: Any) -> List[Dict[str, Any]]:
                 "description": str(opt.get("description", "")).strip() or None,
                 "recommended": is_rec,
             })
-        if recommended_count > 1:
+        if recommended_count != 1:
             raise ValueError(
                 f"question[{i}] has {recommended_count} recommended options "
-                "(exactly one is allowed)"
+                "(exactly one is required)"
             )
         cleaned.append({
             "question": text,
