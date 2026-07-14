@@ -192,14 +192,11 @@ async def test_restart_shutdown_warning_uses_restart_command_reply_anchor_for_ac
 
     await runner._notify_active_sessions_of_shutdown()
 
-    assert len(adapter.sent_calls) == 1
-    chat_id, message, metadata = adapter.sent_calls[0]
-    assert chat_id == source.chat_id
-    assert "Gateway restarting" in message
-    assert metadata["thread_id"] == source.thread_id
-    assert metadata["telegram_dm_topic_reply_fallback"] is True
-    assert metadata["direct_messages_topic_id"] == source.thread_id
-    assert metadata["telegram_reply_to_message_id"] == "restart-command"
+    # Intentional early return: _restart_requested=True AND _restart_command_source
+    # is set => the method returns immediately without sending any notification.
+    # The user who issued /restart from within a chat already knows it's restarting.
+    assert len(adapter.sent_calls) == 0
+    assert adapter.sent == []
 
 
 @pytest.mark.asyncio
@@ -221,11 +218,10 @@ async def test_in_chat_restart_skips_home_shutdown_even_with_active_session():
 
     await runner._notify_active_sessions_of_shutdown()
 
-    assert len(adapter.sent_calls) == 1
-    chat_id, message, metadata = adapter.sent_calls[0]
-    assert chat_id == source.chat_id
-    assert "Gateway restarting" in message
-    assert metadata["telegram_reply_to_message_id"] == "restart-command"
+    # Intentional early return: _restart_requested=True AND _restart_command_source
+    # is set => no notification sent (in-chat restart, user already knows).
+    assert len(adapter.sent_calls) == 0
+    assert adapter.sent == []
 
 
 @pytest.mark.asyncio

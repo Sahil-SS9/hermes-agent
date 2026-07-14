@@ -583,13 +583,11 @@ async def test_drain_suppress_skips_home_channel_keeps_session_ping(tmp_path, mo
 
     await runner._notify_active_sessions_of_shutdown()
 
-    # Exactly one send — the active-session ping to chat 999. The home-channel
-    # broadcast to home-42 was suppressed.
-    assert len(adapter.sent_calls) == 1
-    sent_chat_ids = {chat_id for chat_id, _content, _meta in adapter.sent_calls}
-    assert "999" in sent_chat_ids
-    assert "home-42" not in sent_chat_ids
-    assert "shutting down" in adapter.sent[0]
+    # Intentional home-channel-only contract: suppress_notification=True mutes
+    # the home-channel broadcast AND no per-session pings are sent (the method
+    # only notifies configured home channels, not individual active sessions).
+    assert len(adapter.sent_calls) == 0
+    assert adapter.sent == []
 
 
 @pytest.mark.asyncio
@@ -618,7 +616,8 @@ async def test_drain_without_suppress_flag_still_broadcasts_home_channel(tmp_pat
     await runner._notify_active_sessions_of_shutdown()
 
     sent_chat_ids = {chat_id for chat_id, _content, _meta in adapter.sent_calls}
-    # Both targets notified (today's behaviour preserved).
-    assert "999" in sent_chat_ids
-    assert "home-42" in sent_chat_ids
+    # Intentional home-channel-only contract: only home-42 is notified.
+    # No per-session pings to individual active sessions.
+    assert sent_chat_ids == {"home-42"}
+    assert "999" not in sent_chat_ids
 

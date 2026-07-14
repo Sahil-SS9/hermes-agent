@@ -3303,7 +3303,7 @@ def run_conversation(
                 if (
                     classified.is_auth
                     and not _retry.auth_failover_attempted
-                    and agent._fallback_index < len(agent._fallback_chain)
+                    and agent._has_pending_non_floor_fallback()
                 ):
                     _retry.auth_failover_attempted = True
                     agent._buffer_status(

@@ -914,7 +914,7 @@ class GatewayStreamConsumer:
         """
         text = _BasePlatformAdapter.strip_media_directives_for_display(text)
         # Defence-in-depth: never deliver recalled memory blocks to the user.
-        text = stream_consumer._strip_memory_leak(text)
+        text = GatewayStreamConsumer._strip_memory_leak(text)
         return text
 
     async def _send_new_chunk(
@@ -1516,12 +1516,13 @@ class GatewayStreamConsumer:
         ``finalize`` is True when this is the last edit in a streaming
         sequence.
         """
-        # Strip MEDIA: directives so they don't appear as visible text.
-        # Media files are delivered as native attachments after the stream
-        # finishes (via _deliver_media_from_response in gateway/run.py).
-        text = self._clean_for_display(text)
-        # A bare streaming cursor is not meaningful user-visible content and
-        # can render as a stray tofu/white-box message on some clients.
+        # Cursor-only guard — run BEFORE _clean_for_display so that
+        # _strip_memory_leak's .strip() side-effect cannot destroy the
+        # leading-space invariant the cursor match depends on.  A bare
+        # cursor (" ▉") is not meaningful user-visible content and renders
+        # as a stray tofu/white-box message on some clients.  The cursor
+        # itself contains no <memory-context> tags, so skipping
+        # _clean_for_display for cursor-only text is safe.
         visible_without_cursor = text
         if self.cfg.cursor:
             visible_without_cursor = visible_without_cursor.replace(self.cfg.cursor, "")
@@ -1530,6 +1531,14 @@ class GatewayStreamConsumer:
             return True  # cursor-only / whitespace-only update
         if not text.strip():
             return True  # nothing to send is "success"
+        # Strip MEDIA: directives so they don't appear as visible text.
+        # Media files are delivered as native attachments after the stream
+        # finishes (via _deliver_media_from_response in gateway/run.py).
+        text = self._clean_for_display(text)
+        # After cleaning, text may collapse to empty (e.g. MEDIA:-only
+        # input).  Re-check so we never send a blank message.
+        if not text.strip():
+            return True  # nothing left after cleaning
         # Guard: do not create a brand-new standalone message when the only
         # visible content is a handful of characters alongside the streaming
         # cursor.  During rapid tool-calling the model often emits 1-2 tokens

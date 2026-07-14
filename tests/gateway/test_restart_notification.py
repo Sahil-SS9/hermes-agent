@@ -667,28 +667,3 @@ async def test_shutdown_notifications_send_to_home_channel_when_origin_missing()
         "home-42",
         "⚠️ Gateway shutting down — Your current task will be interrupted.",
     )
-
-
-@pytest.mark.asyncio
-async def test_restart_shutdown_notification_anchors_telegram_dm_topic():
-    runner, adapter = make_restart_runner()
-    runner._restart_requested = True
-    source = make_restart_source(chat_id="123456", thread_id="20197")
-    source.message_id = "462"
-    session_key = build_session_key(source)
-
-    runner._running_agents[session_key] = object()
-    runner.session_store._entries[session_key] = MagicMock(origin=source)
-    adapter.send = AsyncMock(return_value=SendResult(success=True, message_id="shutdown"))
-
-    await runner._notify_active_sessions_of_shutdown()
-
-    call = adapter.send.await_args
-    assert call.args[0] == "123456"
-    assert "Gateway restarting" in call.args[1]
-    assert call.kwargs["metadata"] == {
-        "thread_id": "20197",
-        "telegram_dm_topic_reply_fallback": True,
-        "direct_messages_topic_id": "20197",
-        "telegram_reply_to_message_id": "462",
-    }

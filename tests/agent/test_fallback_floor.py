@@ -8,7 +8,7 @@ def test_appends_floor_to_empty_chain():
     # The bug we are fixing: an agent initialised with no fallback chain still
     # gets a reliable escape when its primary is rate-limited.
     chain = apply_fallback_floor([], FLOOR, primary_provider="ollama-cloud", primary_model="deepseek-v4-flash")
-    assert chain == [FLOOR]
+    assert chain == [{**FLOOR, "is_floor": True}]
 
 
 def test_appends_floor_after_existing_entries():
@@ -16,7 +16,7 @@ def test_appends_floor_after_existing_entries():
         [{"provider": "nous", "model": "x"}], FLOOR,
         primary_provider="ollama-cloud", primary_model="deepseek-v4-flash",
     )
-    assert chain[-1] == FLOOR and len(chain) == 2
+    assert chain[-1] == {**FLOOR, "is_floor": True} and len(chain) == 2
 
 
 def test_skips_when_floor_already_in_chain():
@@ -44,7 +44,7 @@ def test_dedup_is_case_insensitive():
 def test_non_mutating():
     src = []
     out = apply_fallback_floor(src, FLOOR, primary_provider="p", primary_model="m")
-    assert src == [] and out == [FLOOR]
+    assert src == [] and out == [{**FLOOR, "is_floor": True}]
 
 
 def test_noop_on_malformed_or_disabled_floor():

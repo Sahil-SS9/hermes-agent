@@ -85,7 +85,7 @@ def apply_fallback_floor(chain, floor, *, primary_provider="", primary_model="")
         if (str(e.get("provider", "")).strip().lower() == fp_l
                 and str(e.get("model", "")).strip().lower() == fm_l):
             return chain
-    return list(chain) + [dict(floor)]
+    return list(chain) + [{**floor, "is_floor": True}]
 
 
 def _ra():

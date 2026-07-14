@@ -109,6 +109,7 @@ class TestCleanShutdownMarker:
         runner._pending_messages = {}
         runner._pending_approvals = {}
         runner._background_tasks = set()
+        runner._cron_stop_event = None
         runner._shutdown_event = MagicMock()
         runner._restart_drain_timeout = 5
         runner._exit_code = None
@@ -203,6 +204,7 @@ class TestCleanShutdownMarker:
         runner._pending_messages = {}
         runner._pending_approvals = {}
         runner._background_tasks = set()
+        runner._cron_stop_event = None
         runner._shutdown_event = MagicMock()
         runner._restart_drain_timeout = 5
         runner._exit_code = None

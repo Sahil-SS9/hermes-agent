@@ -146,6 +146,7 @@ async def test_shutdown_fires_finalize_for_active_agents(mock_invoke_hook):
     runner._restart_drain_timeout = 0.0
     runner._stop_task = None
     runner._running_agents_ts = {}
+    runner._cron_stop_event = None
     runner._update_runtime_status = MagicMock()
 
     agent1 = MagicMock()

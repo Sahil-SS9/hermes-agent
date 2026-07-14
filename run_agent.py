@@ -4775,6 +4775,20 @@ class AIAgent:
         index = getattr(self, "_fallback_index", 0)
         return index < len(chain)
 
+    def _has_pending_non_floor_fallback(self) -> bool:
+        """Like _has_pending_fallback but excludes implicit floor entries.
+
+        The auth-failover gate uses this so it does not buffer a "switching to
+        fallback..." status it will then refuse to perform (the floor is never
+        auth-eligible).  The rate-limit/billing gate still uses
+        _has_pending_fallback — the floor counts there.
+        """
+        chain = getattr(self, "_fallback_chain", None) or []
+        index = getattr(self, "_fallback_index", 0)
+        return index < len(chain) and any(
+            not e.get("is_floor") for e in chain[index:]
+        )
+
     # ── Per-turn primary restoration ─────────────────────────────────────
 
     def _restore_primary_runtime(self) -> bool:

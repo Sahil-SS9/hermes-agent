@@ -958,6 +958,7 @@ class TestVoiceChannelCommands:
         mock_adapter._client = MagicMock()
         mock_adapter._client.get_channel = MagicMock(return_value=mock_channel)
         mock_adapter.handle_message = AsyncMock()
+        mock_adapter._voice_log_only = False
         runner.adapters[Platform.DISCORD] = mock_adapter
         await runner._handle_voice_channel_input(111, 42, "Hello from VC")
         mock_adapter.handle_message.assert_called_once()
@@ -988,6 +989,7 @@ class TestVoiceChannelCommands:
         mock_adapter._client = MagicMock()
         mock_adapter._client.get_channel = MagicMock(return_value=mock_channel)
         mock_adapter.handle_message = AsyncMock()
+        mock_adapter._voice_log_only = False
         runner.adapters[Platform.DISCORD] = mock_adapter
 
         await runner._handle_voice_channel_input(111, 42, "Hello from VC")
@@ -1029,6 +1031,7 @@ class TestVoiceChannelCommands:
         mock_adapter._client = MagicMock()
         mock_adapter._client.get_channel = MagicMock(return_value=mock_channel)
         mock_adapter.handle_message = AsyncMock()
+        mock_adapter._voice_log_only = False
         runner.adapters[Platform.DISCORD] = mock_adapter
 
         await runner._handle_voice_channel_input(111, 42, "Hello from VC")
@@ -1049,6 +1052,7 @@ class TestVoiceChannelCommands:
         mock_adapter._client = MagicMock()
         mock_adapter._client.get_channel = MagicMock(return_value=mock_channel)
         mock_adapter.handle_message = AsyncMock()
+        mock_adapter._voice_log_only = False
         runner.adapters[Platform.DISCORD] = mock_adapter
 
         await runner._handle_voice_channel_input(111, 42, "This is a test of the voice system")
@@ -2584,6 +2588,7 @@ class TestVoiceReception:
         vc.channel.members = []
         receiver = VoiceReceiver(vc)
         receiver.start()
+        receiver._vad_enabled = False
         # Pre-map SSRCs if provided
         if mapped_ssrcs:
             for ssrc, uid in mapped_ssrcs.items():

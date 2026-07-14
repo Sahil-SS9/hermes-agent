@@ -1268,6 +1268,14 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
             )
         return False
     fb = agent._fallback_chain[agent._fallback_index]
+    # Implicit fallback floor must not activate on auth/credential failures —
+    # it would silently switch the user's intended provider and mask a broken
+    # key/OAuth.  A user-configured (non-floor) entry is an explicit opt-in and
+    # remains auth-eligible.  Floor is last in the chain, so skipping it here
+    # exhausts the chain and returns False (terminal auth handling).
+    if fb.get("is_floor") and reason in {FailoverReason.auth, FailoverReason.auth_permanent}:
+        agent._fallback_index += 1
+        return agent._try_activate_fallback(reason)
     agent._fallback_index += 1
     fb_key = _fallback_entry_key(fb)
     unavailable = getattr(agent, "_unavailable_fallback_keys", None)
