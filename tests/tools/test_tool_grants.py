@@ -125,3 +125,158 @@ def test_tool_request_grants_existing_tool(temp_ledger, monkeypatch):
     out = json.loads(st.tool_request("web_search", "t_1", "need it"))
     assert out["success"] is True and out["granted"] is True
     assert tg.has_active_grant("octacon", "web_search") is True
+
+
+# ---------------------------------------------------------------------------
+# C006: bounded-query contract for has_active_grant + governance whitelist +
+# never-grant toolset resolution logging.
+# ---------------------------------------------------------------------------
+
+def test_bounded_grant_old_grant_later_revoke_within_window(temp_ledger):
+    """C006-F1: a grant borrowed 3d ago and revoked 2d ago must be inactive
+    under the default bounded lookback (both events within the 7-day window)."""
+    import time as _t
+    now = int(_t.time())
+    pal.append_event(
+        source="t", event_type="tool.borrowed", target_profile="octacon",
+        object_type="tool", object_id="web_search", event_id="b-old-rev",
+        occurred_at=now - 3 * 86400, payload={"task_id": "t_old"},
+    )
+    pal.append_event(
+        source="t", event_type="tool.revoked", target_profile="octacon",
+        object_type="tool", object_id="web_search", event_id="r-old-rev",
+        occurred_at=now - 2 * 86400,
+        payload={"borrow_event_id": "b-old-rev", "task_result": "completed"},
+    )
+    assert tg.has_active_grant("octacon", "web_search") is False
+
+
+def test_bounded_grant_old_still_active_within_window(temp_ledger):
+    """C006-F1: a grant borrowed 3d ago with no revocation must remain active
+    under the default bounded lookback (borrow within the 7-day window)."""
+    import time as _t
+    now = int(_t.time())
+    pal.append_event(
+        source="t", event_type="tool.borrowed", target_profile="octacon",
+        object_type="tool", object_id="web_search", event_id="b-old-active",
+        occurred_at=now - 3 * 86400, payload={"task_id": "t_old"},
+    )
+    assert tg.has_active_grant("octacon", "web_search") is True
+
+
+def test_bounded_grant_crosses_boundary_revoked(temp_ledger):
+    """C006-F1: a grant borrowed 8d ago (outside the 7-day window) and revoked
+    6d ago (inside) — the bounded query misses the borrow and correctly
+    returns False (the grant was revoked)."""
+    import time as _t
+    now = int(_t.time())
+    pal.append_event(
+        source="t", event_type="tool.borrowed", target_profile="octacon",
+        object_type="tool", object_id="web_search", event_id="b-cross",
+        occurred_at=now - 8 * 86400, payload={"task_id": "t_cross"},
+    )
+    pal.append_event(
+        source="t", event_type="tool.revoked", target_profile="octacon",
+        object_type="tool", object_id="web_search", event_id="r-cross",
+        occurred_at=now - 6 * 86400,
+        payload={"borrow_event_id": "b-cross", "task_result": "completed"},
+    )
+    # Borrow is outside window → not found → False.  Correct: it was revoked.
+    assert tg.has_active_grant("octacon", "web_search") is False
+
+
+def test_bounded_grant_boundary_ordering(temp_ledger):
+    """C006-F1: events exactly at the since boundary (>=) are included."""
+    import time as _t
+    now = int(_t.time())
+    # Place a borrow exactly at the boundary (now - window).
+    boundary = now - tg._GRANT_SCAN_WINDOW_SECONDS
+    pal.append_event(
+        source="t", event_type="tool.borrowed", target_profile="octacon",
+        object_type="tool", object_id="web_search", event_id="b-bnd",
+        occurred_at=boundary, payload={"task_id": "t_bnd"},
+    )
+    # Borrow at the boundary should be found (>= since).
+    assert tg.has_active_grant("octacon", "web_search") is True
+    # Now revoke it, also at the boundary.
+    pal.append_event(
+        source="t", event_type="tool.revoked", target_profile="octacon",
+        object_type="tool", object_id="web_search", event_id="r-bnd",
+        occurred_at=boundary,
+        payload={"borrow_event_id": "b-bnd", "task_result": "completed"},
+    )
+    assert tg.has_active_grant("octacon", "web_search") is False
+
+
+def test_bounded_grant_task_id_scoping(temp_ledger):
+    """C006-F1: revoking grants for one task must not affect grants for a
+    different task under the bounded query."""
+    tg.grant_tool("octacon", "web_search", "t_a")
+    tg.grant_tool("octacon", "web_extract", "t_b")
+    n = tg.revoke_grants_for_task("t_a", "completed")
+    assert n == 1
+    assert tg.has_active_grant("octacon", "web_search") is False
+    assert tg.has_active_grant("octacon", "web_extract") is True
+
+
+def test_bounded_grant_explicit_since(temp_ledger):
+    """C006-F1: an explicit since parameter bounds the query — events before
+    since are excluded."""
+    import time as _t
+    now = int(_t.time())
+    pal.append_event(
+        source="t", event_type="tool.borrowed", target_profile="octacon",
+        object_type="tool", object_id="web_search", event_id="b-explicit",
+        occurred_at=now - 10 * 86400, payload={"task_id": "t_explicit"},
+    )
+    # With a 5-day lookback, the 10-day-old borrow is missed → False.
+    assert tg.has_active_grant(
+        "octacon", "web_search", since=now - 5 * 86400
+    ) is False
+    # With a 15-day lookback, the 10-day-old borrow is found → True.
+    assert tg.has_active_grant(
+        "octacon", "web_search", since=now - 15 * 86400
+    ) is True
+
+
+def test_effective_never_grant_warns_on_unresolvable_toolset(temp_ledger, monkeypatch, caplog):
+    """C006-F4: unresolved never-grant toolset resolution must log WARNING,
+    not DEBUG, while the hardcoded deny floor still holds."""
+    import logging
+
+    def boom(_name, *args, **kwargs):
+        raise RuntimeError("toolset module unavailable")
+
+    monkeypatch.setattr("tools.tool_grants.resolve_toolset", boom, raising=False)
+    # Patch at the import site used inside _effective_never_grant.
+    import toolsets as _ts_mod
+    monkeypatch.setattr(_ts_mod, "resolve_toolset", boom)
+
+    with caplog.at_level(logging.WARNING, logger="tools.tool_grants"):
+        deny = tg._effective_never_grant()
+    # Hardcoded floor must hold.
+    assert "terminal" in deny
+    assert "kanban_profile_edit" in deny
+    # A WARNING must have been emitted for the failed resolution.
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any("resolve_toolset" in (r.getMessage() or "") or "toolsets" in (r.getMessage() or "") for r in warnings), \
+        "expected a WARNING log for unresolved toolset"
+
+
+def test_governance_whitelist_allows_denji_tool(temp_ledger, monkeypatch):
+    """C006-F5: GOVERNANCE_GRANT_WHITELIST lets a governance profile bypass
+    the NEVER_GRANT floor for whitelisted tools."""
+    monkeypatch.setattr(tg, "GOVERNANCE_GRANT_WHITELIST",
+                        {"denji": {"terminal"}})
+    d = tg.grant_tool("denji", "terminal", "t_1")
+    assert d["granted"] is True
+
+
+def test_governance_whitelist_denies_non_governance_profile(temp_ledger, monkeypatch):
+    """C006-F5: a non-governance profile is still denied even when the
+    whitelist has entries for other profiles."""
+    monkeypatch.setattr(tg, "GOVERNANCE_GRANT_WHITELIST",
+                        {"denji": {"terminal"}})
+    d = tg.grant_tool("octacon", "terminal", "t_1")
+    assert d["granted"] is False
+    assert "NEVER_GRANT" in d["reason"]

@@ -81,20 +81,39 @@ def revoked_borrow_ids(*, since: Optional[int] = None) -> set:
     }
 
 
-def has_active_grant(profile: Optional[str], skill: str) -> bool:
+def has_active_grant(
+    profile: Optional[str], skill: str, *, since: Optional[int] = None
+) -> bool:
     """True if ``profile`` holds a live (unrevoked) grant for ``skill``.
+
+    Bounded query contract: when ``since`` is None the lookback defaults
+    to ``_GRANT_SCAN_WINDOW_SECONDS`` (7 days) so the hot-path scan does
+    not grow with total historical ledger size.  Because a revoke can only
+    occur *after* its borrow, the same ``since`` bound applied to the
+    revoke query safely covers every revoke for every borrow within the
+    window — a revoke cannot fall outside the window when its borrow is
+    inside it.  Grants older than the window are assumed to have been
+    swept by the TTL fallback.
 
     Fails CLOSED: any ledger error returns False so a broken ledger never
     silently unblocks access under enforcement."""
     if not profile:
         return False
     try:
-        borrows = query_events(event_types=[EV_BORROW], target_profile=profile, object_id=skill)
+        if since is None:
+            since = int(time.time() - _GRANT_SCAN_WINDOW_SECONDS)
+        borrows = query_events(
+            event_types=[EV_BORROW], target_profile=profile, object_id=skill,
+            since=since,
+        )
         if not borrows:
             return False
         revoked = {
             (e.get("payload") or {}).get("borrow_event_id")
-            for e in query_events(event_types=[EV_REVOKE], target_profile=profile, object_id=skill)
+            for e in query_events(
+                event_types=[EV_REVOKE], target_profile=profile, object_id=skill,
+                since=since,
+            )
         }
         return any(b.get("event_id") not in revoked for b in borrows)
     except Exception as e:  # noqa: BLE001

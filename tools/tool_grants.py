@@ -90,7 +90,9 @@ def _effective_never_grant() -> set:
 
     Computed lazily so an import error degrades safely: on failure this falls
     back to the curated NEVER_GRANT_TOOLS set alone (fail closed on at least
-    that set, rather than raising)."""
+    that set, rather than raising).  Resolution failures are logged at
+    WARNING (not DEBUG) so a silently unresolvable toolset is visible in
+    normal logs; the hardcoded floor above remains the primary deny set."""
     deny = set(NEVER_GRANT_TOOLS)
     try:
         from toolsets import resolve_toolset
@@ -99,9 +101,9 @@ def _effective_never_grant() -> set:
             try:
                 deny.update(resolve_toolset(toolset_name) or [])
             except Exception as e:  # noqa: BLE001
-                logger.debug("resolve_toolset(%s) failed: %s", toolset_name, e)
+                logger.warning("resolve_toolset(%s) failed: %s", toolset_name, e)
     except Exception as e:  # noqa: BLE001
-        logger.debug("_effective_never_grant: toolsets import failed: %s", e)
+        logger.warning("_effective_never_grant: toolsets import failed: %s", e)
     return deny
 
 
@@ -118,20 +120,39 @@ def revoked_borrow_ids(*, since: Optional[int] = None) -> set:
     }
 
 
-def has_active_grant(profile: Optional[str], tool: str) -> bool:
+def has_active_grant(
+    profile: Optional[str], tool: str, *, since: Optional[int] = None
+) -> bool:
     """True if ``profile`` holds a live (unrevoked) grant for ``tool``.
+
+    Bounded query contract: when ``since`` is None the lookback defaults
+    to ``_GRANT_SCAN_WINDOW_SECONDS`` (7 days) so the hot-path scan does
+    not grow with total historical ledger size.  Because a revoke can only
+    occur *after* its borrow, the same ``since`` bound applied to the
+    revoke query safely covers every revoke for every borrow within the
+    window — a revoke cannot fall outside the window when its borrow is
+    inside it.  Grants older than the window are assumed to have been
+    swept by the TTL fallback.
 
     Fails CLOSED: any ledger error returns False so a broken ledger never
     silently unblocks access under enforcement."""
     if not profile:
         return False
     try:
-        borrows = query_events(event_types=[EV_BORROW], target_profile=profile, object_id=tool)
+        if since is None:
+            since = int(time.time() - _GRANT_SCAN_WINDOW_SECONDS)
+        borrows = query_events(
+            event_types=[EV_BORROW], target_profile=profile, object_id=tool,
+            since=since,
+        )
         if not borrows:
             return False
         revoked = {
             (e.get("payload") or {}).get("borrow_event_id")
-            for e in query_events(event_types=[EV_REVOKE], target_profile=profile, object_id=tool)
+            for e in query_events(
+                event_types=[EV_REVOKE], target_profile=profile, object_id=tool,
+                since=since,
+            )
         }
         return any(b.get("event_id") not in revoked for b in borrows)
     except Exception as e:  # noqa: BLE001
