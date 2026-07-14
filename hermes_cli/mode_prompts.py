@@ -237,6 +237,30 @@ _MODE_PROMPTS = {
 }
 
 
+
+# Set of all valid internal mode values.  Used by validate_mode() and
+# imported by the gateway /mode handler and the CLI /mode command so
+# validation lives in one place.
+VALID_MODES = frozenset(MODE_LABELS.keys())
+
+
+def validate_mode(mode: str) -> str:
+    """Validate and normalise a mode string.
+
+    Accepts case-insensitive input, returns the canonical lowercase
+    internal value (e.g. ``PLAN`` -> ``plan``).  Raises ``ValueError``
+    for empty or unknown modes.
+    """
+    if not mode or not isinstance(mode, str):
+        raise ValueError(f"Invalid agent mode: {mode!r}")
+    normalised = mode.strip().lower()
+    if normalised not in VALID_MODES:
+        raise ValueError(
+            f"Unknown agent mode: {mode!r}. Valid modes: {', '.join(sorted(VALID_MODES))}"
+        )
+    return normalised
+
+
 def get_mode_prompt(mode: str) -> Optional[str]:
     """Return the ephemeral_system_prompt for a mode, or None for auto.
 

@@ -56,8 +56,10 @@ check_ts "ui-tui/src/app/interfaces.ts" "AskUserQuestionsReq" "AskUserQuestionsR
 check_ts "ui-tui/src/app/uiStore.ts" "agentMode: 'auto'" "buildUiState default agentMode='auto'"
 
 # 3) TypeScript: useInputHandlers.ts
-check_ts "ui-tui/src/app/useInputHandlers.ts" "KENSEI CUSTOM: shift-tab cycles agent mode" "Shift+Tab mode cycling handler"
-check_ts "ui-tui/src/app/useInputHandlers.ts" "config\.set.*mode" "Shift+Tab sets gateway mode"
+# Shift+Tab is YOLO-only (not mode cycling).  Dead AgentMode/AGENT_MODES
+# imports have been removed.  Mode is set via /mode slash command or
+# config.set key=mode, not Shift+Tab.
+check_ts "ui-tui/src/app/useInputHandlers.ts" "key: 'yolo'" "Shift+Tab toggles YOLO (not mode cycling)"
 
 # 4) TypeScript: appLayout.tsx
 check_ts "ui-tui/src/components/appLayout.tsx" "MODE_BADGE" "Mode badge emoji map"

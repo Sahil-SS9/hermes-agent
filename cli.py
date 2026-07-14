@@ -9512,7 +9512,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             mode = detect_mode(current)
             _cprint(f"  mode: {mode_label(mode)}")
             if mode != "auto":
-                _cprint(f"  {_DIM}Shift+Tab to cycle, /mode auto to reset{_RST}")
+                _cprint(f"  {_DIM}/mode auto to reset{_RST}")
             return
 
         if arg not in VALID_MODES:
@@ -9526,7 +9526,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             self.agent.ephemeral_system_prompt = prompt
         _cprint(f"  mode → {mode_label(mode)}")
         if mode != "auto":
-            _cprint(f"  {_DIM}Shift+Tab to cycle, /mode auto to reset{_RST}")
+            _cprint(f"  {_DIM}/mode auto to reset{_RST}")
 
     # ── KENSEI CUSTOM: detect current mode for status bar ──
     def _detect_current_mode(self) -> str:

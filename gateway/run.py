@@ -9648,6 +9648,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if canonical == "model":
             return await self._handle_model_command(event)
 
+        if canonical == "mode":
+            return await self._handle_mode_command(event)
+
         if canonical == "codex-runtime":
             return await self._handle_codex_runtime_command(event)
 
@@ -17817,6 +17820,21 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             )
             if cfg_channel_prompt:
                 combined_ephemeral = (combined_ephemeral + "\n\n" + cfg_channel_prompt).strip()
+
+            # Compose the session-scoped agent mode prompt (plan/gods_plan/
+            # recon) into combined_ephemeral.  This is signature-safe:
+            # combined_ephemeral participates in _agent_config_signature,
+            # so changing the mode busts the cache and rebuilds the agent
+            # with the new ephemeral prompt.  auto returns None (no overlay)
+            # so the existing combined_ephemeral is unchanged.
+            _session_agent_mode = self.session_store.get_agent_mode(session_key)
+            if _session_agent_mode and _session_agent_mode != "auto":
+                from hermes_cli.mode_prompts import get_mode_prompt as _gmp
+                _mode_prompt = _gmp(_session_agent_mode)
+                if _mode_prompt:
+                    combined_ephemeral = (
+                        combined_ephemeral + "\n\n" + _mode_prompt
+                    ).strip()
 
             max_iterations = _current_max_iterations()
 

@@ -189,6 +189,13 @@ class GatewaySlashCommandsMixin:
         if hasattr(self, "_pending_model_notes"):
             self._pending_model_notes.pop(session_key, None)
 
+        # Clear session-scoped agent mode so /new starts fresh in auto mode.
+        # reset_session() already creates a new SessionEntry with the default
+        # agent_mode="auto", but we also evict the cached agent so the next
+        # turn rebuilds without a stale mode prompt in the cache signature.
+        # (reset_session swaps the entry, so get_agent_mode on the new entry
+        # already returns "auto"; the eviction ensures no stale agent reuse.)
+
         # Clear the per-session last-resolved-model cache so the next turn
         # reads from current config instead of falling back to a stale model
         # after a config change (#58403).
@@ -1377,6 +1384,66 @@ class GatewaySlashCommandsMixin:
             "\n".join(lines),
             getattr(getattr(event, "source", None), "platform", None),
         )
+
+    async def _handle_mode_command(self, event: MessageEvent) -> Optional[str]:
+        """Handle /mode command — set or query agent execution mode.
+
+        Supports:
+          /mode              — show current mode
+          /mode status       — show current mode
+          /mode auto         — clear mode overlay (back to normal)
+          /mode plan         — plan mode
+          /mode gods_plan    — UltraPlan mode
+          /mode recon        — recon mode
+
+        Mode prompts live in hermes_cli/mode_prompts.py (single source of
+        truth).  The mode is persisted via SessionStore.set_agent_mode so
+        it survives gateway restarts, and cleared on /new.  The cached
+        agent is evicted so the next turn picks up the new ephemeral
+        prompt (signature-safe: combined_ephemeral participates in the
+        agent-cache signature).
+        """
+        from hermes_cli.mode_prompts import (
+            validate_mode, get_mode_prompt, detect_mode, mode_label,
+        )
+
+        source = event.source
+        source = await asyncio.to_thread(self._normalize_source_for_session_key, source)
+        session_key = self._session_key_for_source(source)
+
+        raw_args = event.get_command_args().strip()
+        arg = raw_args.lower() if raw_args else ""
+
+        # /mode or /mode status — report current mode
+        if not arg or arg == "status":
+            current_mode = self.session_store.get_agent_mode(session_key)
+            label = mode_label(current_mode)
+            return f"  mode: {label}"
+
+        # Validate — raises ValueError on invalid mode
+        try:
+            mode = validate_mode(arg)
+        except ValueError:
+            return "  ❌ Unknown mode: " + raw_args + chr(10) + "  Valid modes: auto, plan, gods_plan, recon"
+
+        # Persist to SessionStore (survives restarts, cleared on /new)
+        self.session_store.set_agent_mode(session_key, mode)
+
+        # Evict cached agent so next turn rebuilds with the new
+        # ephemeral_prompt (signature-safe via combined_ephemeral).
+        self._evict_cached_agent(session_key)
+
+        # If a live agent exists, update its ephemeral_system_prompt now
+        # so the change takes effect on the next message without waiting
+        # for cache eviction + rebuild.  Guard against the pending sentinel.
+        _running = getattr(self, "_running_agents", {}).get(session_key)
+        if _running is not None and hasattr(_running, "ephemeral_system_prompt"):
+            try:
+                _running.ephemeral_system_prompt = get_mode_prompt(mode)
+            except Exception:
+                pass
+
+        return f"  mode → {mode_label(mode)}"
 
     async def _handle_model_command(self, event: MessageEvent) -> Optional[str]:
         """Handle /model command — switch model.

@@ -717,6 +717,13 @@ class SessionEntry:
     # (see sanitize_model_override / SessionStore.set_model_override).
     model_override: Optional[Dict[str, str]] = None
 
+    # Session-scoped agent mode (auto/plan/gods_plan/recon).  Persisted to
+    # sessions.json so it survives gateway restarts, and cleared on /new
+    # (reset_session creates a fresh entry with the default "auto").  The
+    # gateway /mode handler and the TUI config.set key=mode handler both
+    # write here via SessionStore.set_agent_mode.  See skill agent-modes.
+    agent_mode: str = "auto"
+
     def to_dict(self) -> Dict[str, Any]:
         result = {
             "session_key": self.session_key,
@@ -752,6 +759,7 @@ class SessionEntry:
             # Defence-in-depth: strip credentials even if a caller stored an
             # unsanitized dict directly on the entry.
             result["model_override"] = sanitize_model_override(self.model_override)
+        result["agent_mode"] = self.agent_mode
         if self.origin:
             result["origin"] = self.origin.to_dict()
         return result
@@ -823,6 +831,7 @@ class SessionEntry:
             auto_reset_reason=data.get("auto_reset_reason"),
             reset_had_activity=data.get("reset_had_activity", False),
             model_override=sanitize_model_override(data.get("model_override")),
+            agent_mode=data.get("agent_mode", "auto") or "auto",
         )
 
 
@@ -1928,6 +1937,34 @@ class SessionStore:
             if entry is None:
                 return None
             return dict(entry.model_override) if entry.model_override else None
+
+    def set_agent_mode(self, session_key: str, mode: str) -> None:
+        """Persist the session-scoped agent mode (auto/plan/gods_plan/recon).
+
+        Mirrors the set_model_override pattern: writes the field on the
+        SessionEntry and saves to disk so it survives gateway restarts.
+        Pass "auto" to reset.  No-op when the session does not exist.
+        """
+        with self._lock:
+            self._ensure_loaded_locked()
+            entry = self._entries.get(session_key)
+            if entry is None:
+                return
+            normalised = (mode or "auto").strip().lower()
+            if entry.agent_mode == normalised:
+                return
+            entry.agent_mode = normalised
+            entry.updated_at = _now()
+            self._save()
+
+    def get_agent_mode(self, session_key: str) -> str:
+        """Return the persisted agent mode for *session_key*, or "auto"."""
+        with self._lock:
+            self._ensure_loaded_locked()
+            entry = self._entries.get(session_key)
+            if entry is None:
+                return "auto"
+            return entry.agent_mode or "auto"
 
     def suspend_session(self, session_key: str) -> bool:
         """Mark a session as suspended so it auto-resets on next access.
