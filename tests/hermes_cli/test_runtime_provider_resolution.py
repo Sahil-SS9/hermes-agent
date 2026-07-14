@@ -310,6 +310,13 @@ def test_resolve_runtime_provider_qwen_oauth(monkeypatch):
         lambda provider: type("P", (), {"has_credentials": lambda self: False})(),
     )
     monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "qwen-oauth")
+    # Mock an empty credential pool so the singleton resolver path runs
+    # instead of a real pool entry (which would yield test-access-token).
+    monkeypatch.setattr(
+        rp,
+        "load_pool",
+        lambda provider: type("P", (), {"has_credentials": lambda self: False})(),
+    )
     monkeypatch.setattr(
         rp,
         "resolve_qwen_runtime_credentials",
@@ -377,6 +384,13 @@ def test_qwen_oauth_auto_fallthrough_on_auth_failure(monkeypatch):
         lambda provider: type("P", (), {"has_credentials": lambda self: False})(),
     )
     monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "qwen-oauth")
+    # Mock an empty credential pool so the AuthError fallthrough path is
+    # actually exercised instead of short-circuiting on real pool creds.
+    monkeypatch.setattr(
+        rp,
+        "load_pool",
+        lambda provider: type("P", (), {"has_credentials": lambda self: False})(),
+    )
     monkeypatch.setattr(
         rp,
         "resolve_qwen_runtime_credentials",

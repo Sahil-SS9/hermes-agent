@@ -130,27 +130,56 @@ def is_camofox_mode() -> bool:
     return bool(get_camofox_url())
 
 
+def _is_camofox_health_shape(data: Any) -> bool:
+    """Return True when *data* looks like a Camofox /health response.
+
+    A bare HTTP 200 is not enough: the same port may be served by an
+    unrelated HTML endpoint (e.g. Netdata on port 19999).  Camofox's
+    /health returns a JSON object; we accept it when it is a JSON object
+    (dict) — optionally carrying ``vncPort`` — so a non-Camofox HTML page
+    that happens to return 200 is rejected here instead of masquerading
+    as a live Camofox server.
+    """
+    return isinstance(data, dict)
+
+
 def check_camofox_available() -> bool:
-    """Verify the Camofox server is reachable."""
+    """Verify the Camofox server is reachable and is actually Camofox.
+
+    A bare HTTP 200 from the configured URL is **not** sufficient — the
+    same port may be occupied by an unrelated HTML endpoint (e.g.
+    Netdata on port 19999).  The response must parse as JSON and look
+    like a Camofox /health payload (a JSON object).  Non-JSON or
+    non-Camofox responses are treated as "unavailable" so the caller
+    falls back rather than routing browser actions through a foreign
+    service.
+    """
     global _vnc_url, _vnc_url_checked
     url = get_camofox_url()
     if not url:
         return False
     try:
         resp = requests.get(f"{url}/health", timeout=5)
-        if resp.status_code == 200 and not _vnc_url_checked:
-            try:
-                data = resp.json()
-                vnc_port = data.get("vncPort")
-                if isinstance(vnc_port, int) and 1 <= vnc_port <= 65535:
-                    from urllib.parse import urlparse
-                    parsed = urlparse(url)
-                    host = parsed.hostname or "localhost"
-                    _vnc_url = f"http://{host}:{vnc_port}"
-            except (ValueError, KeyError):
-                pass
+        if resp.status_code != 200:
+            return False
+        # Validate the response is meaningful JSON with a Camofox shape.
+        # A non-JSON HTML body (Netdata, etc.) raises ValueError on
+        # .json(); a JSON array/string is not a Camofox health object.
+        try:
+            data = resp.json()
+        except ValueError:
+            return False
+        if not _is_camofox_health_shape(data):
+            return False
+        if not _vnc_url_checked:
+            vnc_port = data.get("vncPort")
+            if isinstance(vnc_port, int) and 1 <= vnc_port <= 65535:
+                from urllib.parse import urlparse
+                parsed = urlparse(url)
+                host = parsed.hostname or "localhost"
+                _vnc_url = f"http://{host}:{vnc_port}"
             _vnc_url_checked = True
-        return resp.status_code == 200
+        return True
     except Exception:
         return False
 
@@ -565,6 +594,19 @@ def camofox_navigate(url: str, task_id: Optional[str] = None) -> str:
             "error": f"Cannot connect to Camofox at {get_camofox_url()}. "
                      "Is the server running? Start with: npm start (in camofox-browser dir) "
                      "or: docker run -p 9377:9377 -e CAMOFOX_PORT=9377 jo-inc/camofox-browser",
+        })
+    except (ValueError, json.JSONDecodeError):
+        # resp.json() raises ValueError (json.JSONDecodeError) when the
+        # configured URL returns a non-JSON body — e.g. an HTML page from
+        # an unrelated service (Netdata, etc.) squatting on the same port.
+        # Surface a clear "not a Camofox endpoint" error instead of the
+        # raw "Expecting value: line 1 column 1" decode syntax message.
+        return json.dumps({
+            "success": False,
+            "error": f"Camofox at {get_camofox_url()} returned a non-JSON "
+                     f"response — the URL does not point to a Camofox server. "
+                     f"Check CAMOFOX_URL (is another service like Netdata on "
+                     f"that port?).",
         })
     except Exception as e:
         return tool_error(str(e), success=False)

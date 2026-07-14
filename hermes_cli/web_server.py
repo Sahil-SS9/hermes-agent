@@ -741,6 +741,10 @@ _CATEGORY_MERGE: Dict[str, str] = {
     # field — fold it into the agent tab rather than spawning a one-field
     # orphan category.
     "computer_use": "agent",
+    # `governance.profile_activity_ledger` is the only schema-surfaced
+    # governance field — fold it into the agent tab rather than spawning
+    # a one-field orphan category.
+    "governance": "agent",
 }
 
 # Display order for tabs — unlisted categories sort alphabetically after these.

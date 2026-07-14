@@ -1998,7 +1998,7 @@ class TestSendDiscordMedia:
         assert result["success"] is True
 
     def test_multiple_media_files_uploaded_separately(self, tmp_path):
-        """Each media file gets its own multipart POST."""
+        """Two media files batch into one multipart POST (Discord <=10 attachments per message) + one text JSON POST = 2 requests total."""
         img1 = tmp_path / "a.png"
         img1.write_bytes(b"img1")
         img2 = tmp_path / "b.jpg"
@@ -2013,8 +2013,14 @@ class TestSendDiscordMedia:
             )
 
         assert result["success"] is True
-        # 1 text POST + 2 media POSTs = 3
-        assert mock_session.post.call_count == 3
+        # 1 text JSON POST + 1 multipart batch (both files) = 2
+        assert mock_session.post.call_count == 2
+        first_kwargs = mock_session.post.call_args_list[0].kwargs
+        assert "json" in first_kwargs, "first POST should be text JSON"
+        second_data = mock_session.post.call_args_list[1].kwargs.get("data")
+        assert second_data is not None, "multipart batch missing FormData"
+        batch_names = {f[0].get("filename") for f in getattr(second_data, "_fields", []) if f and hasattr(f[0], "get") and f[0].get("filename")}
+        assert batch_names == {"a.png", "b.jpg"}, batch_names
 
 
 class TestSendToPlatformDiscordMedia:
@@ -3374,17 +3380,24 @@ class TestSendTelegramThreadNotFoundRetry:
                 os.unlink(media_path)
 
 
-def test_cli_send_strips_memory_context_before_delivery():
+def test_cli_send_strips_memory_context_before_delivery(tmp_path, monkeypatch):
     """Regression: the CLI `hermes send` path must strip recalled
     <memory-context> blocks (defense-in-depth, mirroring the scheduler)."""
     from tools.send_message_tool import send_message_tool
+
+    # Build a real, allowlisted media fixture so the MEDIA: tag survives
+    # BasePlatformAdapter.filter_media_delivery_paths (which rejects paths
+    # that do not exist or fall outside the allowed roots).
+    proof_path = tmp_path / "proof.txt"
+    proof_path.write_bytes(b"proof")
+    monkeypatch.setenv("HERMES_MEDIA_ALLOW_DIRS", str(tmp_path))
 
     msg = (
         "Normal line.\n\n"
         "<memory-context>\n"
         "[2026-05-31] Sahil wants GBrain in KenseiAgent memory layer.\n"
         "</memory-context>\n\n"
-        "MEDIA:/tmp/proof.txt"
+        f"MEDIA:{proof_path}"
     )
 
     captured = {}

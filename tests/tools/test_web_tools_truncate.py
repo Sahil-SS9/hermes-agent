@@ -11,6 +11,7 @@ from unittest.mock import patch
 import pytest
 
 import tools.web_tools as wt
+from tests.content_trust_helpers import loads_fenced_json
 
 
 class TestImageConversion:
@@ -117,7 +118,7 @@ class TestEndToEnd:
              patch("tools.web_tools._get_extract_backend", return_value="fake"), \
              patch("tools.web_tools.async_is_safe_url", new=_AsyncTrue()), \
              patch("agent.web_search_registry.get_provider", return_value=FakeProvider()):
-            result = json.loads(asyncio.new_event_loop().run_until_complete(
+            result = loads_fenced_json(asyncio.new_event_loop().run_until_complete(
                 wt.web_extract_tool(["https://example.com/big"], char_limit=5000)
             ))
 

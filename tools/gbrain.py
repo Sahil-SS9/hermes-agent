@@ -161,7 +161,7 @@ def _search_keyword(query: str, limit: int) -> str:
         ]
 
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=15, stdin=subprocess.DEVNULL)
         if result.returncode not in (0, 1):  # 1 = no match (not an error)
             return tool_error(f"keyword search failed: {result.stderr.strip()[:200]}")
     except subprocess.TimeoutExpired:

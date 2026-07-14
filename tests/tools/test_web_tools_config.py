@@ -16,6 +16,8 @@ import types
 import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
 
+from tests.content_trust_helpers import loads_fenced_json
+
 
 class TestFirecrawlClientConfig:
     """Test suite for Firecrawl client initialization."""
@@ -485,7 +487,7 @@ class TestWebSearchSchema:
              patch("tools.interrupt.is_interrupted", return_value=False), \
              patch.object(tools.web_tools._debug, "log_call"), \
              patch.object(tools.web_tools._debug, "save"):
-            result = json.loads(tools.web_tools.web_search_tool("docs", limit=500))
+            result = loads_fenced_json(tools.web_tools.web_search_tool("docs", limit=500))
 
         assert result == {"success": True, "data": {"web": []}}
         fake_search.assert_called_once_with("docs", 100)
@@ -585,7 +587,16 @@ class TestCheckWebApiKey:
 
     def test_no_keys_returns_false(self):
         from tools.web_tools import check_web_api_key
-        with patch("tools.web_tools._ddgs_package_importable", return_value=False):
+        # Mock all credential/config seams so no live config reads,
+        # auth.json token, or registry-registered provider leaks a
+        # False-positive. Only ddgs was mocked before; the registry
+        # fallback (get_active_search/extract_provider) and the managed
+        # gateway token reader also need to report "nothing available".
+        with patch("tools.web_tools._ddgs_package_importable", return_value=False), \
+             patch("tools.web_tools._peek_nous_access_token", return_value=None), \
+             patch("tools.web_tools._read_nous_access_token", return_value=None), \
+             patch("agent.web_search_registry.get_active_search_provider", return_value=None), \
+             patch("agent.web_search_registry.get_active_extract_provider", return_value=None):
             assert check_web_api_key() is False
 
     def test_both_keys_returns_true(self):

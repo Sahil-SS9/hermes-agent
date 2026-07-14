@@ -67,7 +67,7 @@ class TestStdioInitializeTimeout:
         from tools import mcp_tool
 
         server = mcp_tool.MCPServerTask("leak-guard")
-        config = {"command": "fake-mcp", "args": [], "connect_timeout": 0.2}
+        config = {"command": "python3", "args": [], "connect_timeout": 0.2}
 
         async def drive():
             with patch.object(mcp_tool, "stdio_client", _fake_stdio_client), \

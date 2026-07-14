@@ -2498,7 +2498,19 @@ def _build_user_local_paths(home: Path, path_entries: list[str]) -> list[str]:
         str(home / "go" / "bin"),  # Go tools
         str(home / ".npm-global" / "bin"),  # npm global packages
     ]
-    return [p for p in candidates if p not in path_entries and Path(p).exists()]
+    result = []
+    for p in candidates:
+        if p in path_entries:
+            continue
+        try:
+            if Path(p).exists():
+                result.append(p)
+        except (PermissionError, OSError):
+            # Inaccessible user-local dir (e.g. another user's home on a
+            # shared host).  Skip the unreadable candidate rather than
+            # crashing the unit generator (#58281).
+            continue
+    return result
 
 
 def _build_wsl_interop_paths(path_entries: list[str]) -> list[str]:

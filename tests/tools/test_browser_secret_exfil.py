@@ -4,6 +4,8 @@ import json
 from unittest.mock import patch, MagicMock
 import pytest
 
+from tests.content_trust_helpers import loads_fenced_json
+
 
 @pytest.fixture(autouse=True)
 def _ensure_redaction_enabled(monkeypatch):
@@ -194,7 +196,7 @@ class TestWebExtractSecretExfil:
         finally:
             web_search_registry._reset_for_tests()
 
-        parsed = json.loads(result)
+        parsed = loads_fenced_json(result)
         assert parsed["results"][0]["url"] == "https://wttr.in/K%C3%B6ln"
 
 

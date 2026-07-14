@@ -12,6 +12,7 @@ from model_tools import (
     _LEGACY_TOOLSET_MAP,
     TOOL_TO_TOOLSET_MAP,
 )
+from tests.content_trust_helpers import loads_fenced_json
 
 
 # =========================================================================
@@ -31,9 +32,10 @@ class TestHandleFunctionCall:
         assert "totally_fake_tool_xyz" in result["error"]
 
     def test_exception_returns_json_error(self):
-        # Even if something goes wrong, should return valid JSON
+        # Even if something goes wrong, should return valid JSON inside the
+        # UNTRUSTED_DOCUMENT fence that web_search applies to its output.
         result = handle_function_call("web_search", None)  # None args may cause issues
-        parsed = json.loads(result)
+        parsed = loads_fenced_json(result)
         assert isinstance(parsed, dict)
         assert "error" in parsed
         assert len(parsed["error"]) > 0

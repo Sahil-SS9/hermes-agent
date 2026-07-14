@@ -13,6 +13,7 @@ import asyncio
 import pytest
 from unittest.mock import patch, MagicMock
 
+from tests.content_trust_helpers import loads_fenced_json
 from tests.tools.conftest import register_all_web_providers
 
 
@@ -184,9 +185,10 @@ class TestWebSearchTavily:
         with patch("tools.web_tools._get_backend", return_value="tavily"), \
              patch.dict(os.environ, {"TAVILY_API_KEY": "tvly-test"}), \
              patch("tools.web_tools.httpx.post", return_value=mock_response), \
-             patch("tools.interrupt.is_interrupted", return_value=False):
+             patch("tools.interrupt.is_interrupted", return_value=False), \
+             patch("plugins.web.tavily.provider._check_cooldown", return_value=False):
             from tools.web_tools import web_search_tool
-            result = json.loads(web_search_tool("test query", limit=3))
+            result = loads_fenced_json(web_search_tool("test query", limit=3))
             assert result["success"] is True
             assert len(result["data"]["web"]) == 1
             assert result["data"]["web"][0]["title"] == "Result"
@@ -232,9 +234,14 @@ class TestWebSearchTavily:
             register_provider(FailingTavily())
             register_provider(FirecrawlFallback())
 
+            # Per-test plugin-manager reset (tests/conftest.py) means plugin
+            # discovery re-runs inside web_search_tool and would re-register
+            # the real providers over the fakes above — suppress it, as the
+            # other fake-provider tests do.
             with patch("tools.web_tools._get_backend", return_value="tavily"), \
+                 patch("tools.web_tools._ensure_web_plugins_loaded"), \
                  patch("tools.interrupt.is_interrupted", return_value=False):
-                result = json.loads(web_search_tool("quota fallback", limit=3))
+                result = loads_fenced_json(web_search_tool("quota fallback", limit=3))
 
             assert result["success"] is True
             assert result["fallback_from"] == "tavily"
@@ -268,9 +275,10 @@ class TestWebExtractTavily:
 
         with patch("tools.web_tools._get_backend", return_value="tavily"), \
              patch.dict(os.environ, {"TAVILY_API_KEY": "tvly-test"}), \
-             patch("tools.web_tools.httpx.post", return_value=mock_response):
+             patch("tools.web_tools.httpx.post", return_value=mock_response), \
+             patch("plugins.web.tavily.provider._check_cooldown", return_value=False):
             from tools.web_tools import web_extract_tool
-            result = json.loads(asyncio.get_event_loop().run_until_complete(
+            result = loads_fenced_json(asyncio.get_event_loop().run_until_complete(
                 web_extract_tool(["https://example.com"])
             ))
             assert "results" in result

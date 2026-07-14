@@ -3043,7 +3043,23 @@ def _blank_slate_minimal_toolsets(config: dict):
                 # minimal Blank Slate surface (#57315).
             all_keys.add(k)
 
-        disabled = sorted(all_keys - keep)
+        # A single tool can belong to several toolsets (e.g. read_file
+        # lives in both file and audit).  disabled_toolsets is applied at
+        # tool granularity in model_tools, so any disabled entry whose
+        # resolved tools overlap a kept toolset would silently strip those
+        # tools from the blank-slate agent (#57315, #58281).  Filter such
+        # overlapping aggregates out of the disabled list; the kept
+        # toolsets already guarantee their tools survive.
+        from toolsets import resolve_toolset
+
+        kept_tools = set()
+        for ts in keep:
+            kept_tools.update(resolve_toolset(ts))
+
+        disabled = sorted(
+            ts for ts in (all_keys - keep)
+            if not set(resolve_toolset(ts)).intersection(kept_tools)
+        )
         if disabled:
             config.setdefault("agent", {})["disabled_toolsets"] = disabled
     except Exception as exc:

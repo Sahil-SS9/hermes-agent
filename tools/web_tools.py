@@ -1075,10 +1075,27 @@ def check_web_api_key() -> bool:
     has credentials (issues #28651, #31873). Resolution funnels through
     :func:`_is_backend_available`, which delegates non-legacy names to the
     registry.
+
+    An explicit recognized configured backend (``web.backend``) is
+    **authoritative**: its availability alone determines the result, and
+    fallback discovery runs only when the configured backend is absent or
+    not a recognized name.  This mirrors the resolution priority in
+    :func:`_get_backend` and prevents a configured-but-unconfigured backend
+    (e.g. ``web.backend: parallel`` with no ``PARALLEL_API_KEY``) from being
+    masked by an available fallback (e.g. a managed Firecrawl gateway).
     """
     configured = _load_web_config().get("backend", "").lower().strip()
-    if configured and _is_backend_available(configured):
-        return True
+    if configured:
+        # Explicit recognized backend is authoritative — return its
+        # availability only. Fallback discovery is skipped so the user
+        # sees the precise "X not configured" error instead of silently
+        # routing to a different available backend.
+        if configured in _LEGACY_WEB_BACKENDS or _registered_web_provider(configured) is not None:
+            return _is_backend_available(configured)
+        # An unrecognized configured name falls through to discovery
+        # (treated as invalid/absent config) so a stale or typo'd value
+        # doesn't dead-end the tools when a real provider is available.
+    # Fallback discovery — only for absent / invalid config.
     # Any built-in backend with credentials present. This is a boolean OR, so
     # unlike _get_backend() the probe order is irrelevant.
     if any(_is_backend_available(backend) for backend in _LEGACY_WEB_BACKENDS):
