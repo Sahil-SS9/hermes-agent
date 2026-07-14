@@ -4034,12 +4034,18 @@ class GatewaySlashCommandsMixin:
 
         # `/usage reset [--force]` — redeem one banked Codex rate-limit reset
         # credit. Parsed before the display path so it never mixes with the
-        # stats rendering below.
+        # stats rendering below. Argument parsing is strict: only "reset" and
+        # "reset --force" are valid; any other extra args are rejected so
+        # unknown input cannot silently trigger a destructive action.
         raw_args = event.get_command_args().strip()
         args = [a.lower() for a in raw_args.split()] if raw_args else []
         wants_reset = bool(args) and args[0] == "reset"
         if args and not wants_reset:
             return t("gateway.usage.unknown_subcommand", args=raw_args)
+        if wants_reset:
+            rest = args[1:]
+            if rest and not (len(rest) == 1 and rest[0] == "--force"):
+                return t("gateway.usage.unknown_subcommand", args=raw_args)
 
         # Try running agent first (mid-turn), then cached agent (between turns)
         agent = self._running_agents.get(session_key)
@@ -4072,7 +4078,17 @@ class GatewaySlashCommandsMixin:
             normalized_provider = str(provider or "").strip().lower()
             if normalized_provider != "openai-codex":
                 return t("gateway.usage.reset_wrong_provider")
-            force = "--force" in args[1:]
+            # Account-binding guard (fail-closed): the destructive reset must
+            # be bound to the active/cached agent's exact api_key. When
+            # provider/base_url come only from persisted billing state (no
+            # agent credential), refuse BEFORE calling the helper — the
+            # singleton/pool fallback is acceptable for read-only /usage
+            # display but NOT for consuming a scarce banked reset. One session
+            # must not borrow another session's cached credential: api_key is
+            # only read from THIS session's running/cached agent above.
+            if not str(api_key or "").strip():
+                return t("gateway.usage.reset_no_credential")
+            force = bool(args[1:])
             from agent.account_usage import redeem_codex_reset_credit
 
             result = await asyncio.to_thread(

@@ -606,10 +606,41 @@ def redeem_codex_reset_credit(
        backend picks the next available credit, exactly like the CLI's
        default "Full reset" option.
 
+    Account-binding guard (fail-closed):
+        Unlike the read-only ``/usage`` display (``_fetch_codex_account_usage``),
+        which may fall back to singleton/credential-pool state to show *any*
+        account's limits, this destructive path MUST be bound to an explicit,
+        account-identified ``api_key`` forwarded by the invoking surface (the
+        active/cached agent's exact credential). Without it the helper would
+        silently resolve singleton/pool state and spend a banked reset
+        belonging to an account the caller never authenticated as in this
+        session. So when ``api_key`` is absent/empty we refuse BEFORE any
+        credential resolution or network call.
+
+    ``redeem_request_id`` is a fresh UUID per call (request identity for the
+    backend's per-request idempotency check), NOT a durable cross-command
+    idempotency key. We do not persist it; two separate ``/usage reset``
+    invocations produce two distinct IDs by design.
+
     Never raises: every failure mode returns a ``CodexResetRedeemResult``
     with a user-renderable message.
     """
     import uuid
+
+    # Fail-closed account-binding guard: refuse before credential resolution
+    # or any network call when no explicit, account-bound api_key was
+    # forwarded by the invoking surface. The singleton/pool fallback in
+    # _resolve_codex_usage_credentials is acceptable for read-only /usage
+    # display but NOT for consuming a scarce banked reset.
+    if not str(api_key or "").strip():
+        return CodexResetRedeemResult(
+            status="unavailable",
+            message=(
+                "No active account credential is bound to this session — "
+                "cannot safely redeem a reset credit. Send a message to "
+                "establish the active account, then run `/usage reset`."
+            ),
+        )
 
     try:
         token, resolved_base_url, account_id = _resolve_codex_usage_credentials(base_url, api_key)
@@ -667,6 +698,8 @@ def redeem_codex_reset_credit(
                     available_count=available,
                 )
 
+            # Fresh per-request UUID — request identity for the backend's
+            # idempotency check, NOT a durable cross-command idempotency key.
             consume_resp = client.post(
                 consume_url,
                 headers={**headers, "Content-Type": "application/json"},

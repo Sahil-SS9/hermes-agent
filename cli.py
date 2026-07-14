@@ -9737,12 +9737,19 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
 
         Bare `/usage` keeps the classic display. `/usage reset` redeems one
         banked Codex rate-limit reset credit (guarded: refuses when limits
-        aren't exhausted unless --force).
+        aren't exhausted unless --force). Argument parsing is strict: only
+        `reset` and `reset --force` are valid; any other extra args are
+        rejected so unknown input cannot silently trigger a destructive action.
         """
         parts = cmd_original.split()
         args = [p.lower() for p in parts[1:]]
         if args and args[0] == "reset":
-            self._usage_reset(force="--force" in args[1:])
+            rest = args[1:]
+            # Strict: only --force (or nothing) is valid after "reset".
+            if rest and not (len(rest) == 1 and rest[0] == "--force"):
+                print(f"  Unknown /usage reset argument: {' '.join(parts[2:])}. Try /usage reset [--force].")
+                return
+            self._usage_reset(force=bool(rest))
             return
         if args:
             print(f"  Unknown /usage subcommand: {' '.join(parts[1:])}. Try /usage or /usage reset [--force].")
@@ -9750,7 +9757,14 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
         self._show_usage()
 
     def _usage_reset(self, force: bool = False):
-        """`/usage reset [--force]` — redeem one banked Codex reset credit."""
+        """`/usage reset [--force]` — redeem one banked Codex reset credit.
+
+        Account-binding guard: the destructive reset must be bound to the
+        active agent's exact api_key. Without it the helper would silently
+        resolve singleton/pool state and spend a reset belonging to an
+        account the CLI session never authenticated as. The read-only
+        /usage display fallback is unaffected (separate code path).
+        """
         provider = (
             (getattr(self.agent, "provider", None) if self.agent else None)
             or getattr(self, "provider", None)
@@ -9762,6 +9776,14 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             return
         base_url = (getattr(self.agent, "base_url", None) if self.agent else None) or getattr(self, "base_url", None)
         api_key = (getattr(self.agent, "api_key", None) if self.agent else None) or getattr(self, "api_key", None)
+
+        # Fail-closed: refuse before helper/network when no explicit
+        # account-bound api_key is available. The active agent's credential
+        # is the only safe binding for consuming a scarce banked reset.
+        if not str(api_key or "").strip():
+            print("  ⚠️ No active account credential is bound to this session — cannot safely redeem a reset credit.")
+            print("  Send a message to establish the active account, then run `/usage reset`.")
+            return
 
         from agent.account_usage import redeem_codex_reset_credit
 

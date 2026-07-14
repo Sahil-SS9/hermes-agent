@@ -376,3 +376,185 @@ class TestUsageContextBreakdown:
         assert "📊 **Session Token Usage**" in result
         assert "50,000" in result  # total tokens
         assert "Context breakdown" not in result
+
+
+# ── Account-binding guard: gateway /usage reset must be session-bound ──────
+
+class TestUsageResetAccountBinding:
+    """The destructive /usage reset must only proceed when an active/cached
+    agent's exact api_key is available — NOT when provider/base_url come only
+    from persisted billing state (which carries no credential). Without a
+    session-bound credential the helper would silently resolve singleton/pool
+    state and spend a reset belonging to an account the gateway session never
+    authenticated as."""
+
+    def _event(self, args):
+        event = MagicMock()
+        event.get_command_args.return_value = args
+        return event
+
+    @pytest.mark.asyncio
+    async def test_reset_refuses_when_only_persisted_billing(self, monkeypatch):
+        """provider/base_url from persisted billing, no active/cached agent
+        credential (api_key=None) → fail-closed before calling the helper."""
+        runner = _make_runner(SK)
+        runner._session_db = AsyncSessionDB(MagicMock())
+        runner._session_db._db.get_session.return_value = {
+            "billing_provider": "openai-codex",
+            "billing_base_url": "https://chatgpt.com/backend-api/codex",
+        }
+        session_entry = MagicMock()
+        session_entry.session_id = "sess-1"
+        runner.session_store.get_or_create_session.return_value = session_entry
+
+        def _must_not_redeem(**kw):
+            raise AssertionError("redeem must not run without session-bound credential")
+
+        monkeypatch.setattr("agent.account_usage.redeem_codex_reset_credit", _must_not_redeem)
+
+        result = await runner._handle_usage_command(self._event("reset"))
+
+        assert "send a message" in result.lower() or "authenticate" in result.lower()
+
+    @pytest.mark.asyncio
+    async def test_reset_forwards_active_agent_credential(self, monkeypatch):
+        """Active/cached agent with exact api_key and base_url → those are
+        forwarded to the helper, not resolved from singleton/pool."""
+        agent = _make_mock_agent(provider="openai-codex",
+                                 base_url="https://chatgpt.com/backend-api/codex",
+                                 api_key="session-bound-token")
+        runner = _make_runner(SK, cached_agent=agent)
+
+        seen = {}
+
+        def fake_redeem(*, base_url=None, api_key=None, force=False):
+            seen.update(base_url=base_url, api_key=api_key, force=force)
+            from agent.account_usage import CodexResetRedeemResult
+            return CodexResetRedeemResult(status="reset", message="✅ redeemed", available_count=1)
+
+        monkeypatch.setattr("agent.account_usage.redeem_codex_reset_credit", fake_redeem)
+
+        result = await runner._handle_usage_command(self._event("reset"))
+
+        assert result == "✅ redeemed"
+        assert seen["api_key"] == "session-bound-token"
+        assert seen["base_url"] == "https://chatgpt.com/backend-api/codex"
+
+    @pytest.mark.asyncio
+    async def test_reset_cannot_borrow_other_session_credential(self, monkeypatch):
+        """Session A has a cached codex agent; session B has none. B's
+        /usage reset must NOT use A's cached credential."""
+        agent_a = _make_mock_agent(provider="openai-codex",
+                                   base_url="https://chatgpt.com/backend-api/codex",
+                                   api_key="session-a-token")
+        SK_B = "agent:main:telegram:private:99999"
+        runner = _make_runner(SK, cached_agent=agent_a)
+        # Session B has no running agent and no cached agent.
+        runner._session_key_for_source = MagicMock(side_effect=lambda source: SK_B)
+        runner._session_db = AsyncSessionDB(MagicMock())
+        runner._session_db._db.get_session.return_value = {
+            "billing_provider": "openai-codex",
+            "billing_base_url": "https://chatgpt.com/backend-api/codex",
+        }
+        session_entry = MagicMock()
+        session_entry.session_id = "sess-b"
+        runner.session_store.get_or_create_session.return_value = session_entry
+
+        def _must_not_redeem(**kw):
+            raise AssertionError("must not borrow session A's credential")
+
+        monkeypatch.setattr("agent.account_usage.redeem_codex_reset_credit", _must_not_redeem)
+
+        result = await runner._handle_usage_command(self._event("reset"))
+
+        assert "send a message" in result.lower() or "authenticate" in result.lower()
+
+    @pytest.mark.asyncio
+    async def test_reset_force_does_not_bypass_credential_guard(self, monkeypatch):
+        """--force bypasses the exhaustion guard but NOT the account-binding
+        guard: no credential → still refused."""
+        runner = _make_runner(SK)
+        runner._session_db = AsyncSessionDB(MagicMock())
+        runner._session_db._db.get_session.return_value = {
+            "billing_provider": "openai-codex",
+            "billing_base_url": "https://chatgpt.com/backend-api/codex",
+        }
+        session_entry = MagicMock()
+        session_entry.session_id = "sess-1"
+        runner.session_store.get_or_create_session.return_value = session_entry
+
+        def _must_not_redeem(**kw):
+            raise AssertionError("force must not bypass credential guard")
+
+        monkeypatch.setattr("agent.account_usage.redeem_codex_reset_credit", _must_not_redeem)
+
+        result = await runner._handle_usage_command(self._event("reset --force"))
+
+        assert "send a message" in result.lower() or "authenticate" in result.lower()
+
+    @pytest.mark.asyncio
+    async def test_bare_usage_display_unchanged_with_persisted_billing(self, monkeypatch):
+        """Bare /usage (display) must still work with persisted billing state —
+        the credential guard is scoped to the destructive reset path only."""
+        runner = _make_runner(SK)
+        runner._session_db = AsyncSessionDB(MagicMock())
+        runner._session_db._db.get_session.return_value = {
+            "billing_provider": "openai-codex",
+            "billing_base_url": "https://chatgpt.com/backend-api/codex",
+        }
+        session_entry = MagicMock()
+        session_entry.session_id = "sess-1"
+        runner.session_store.get_or_create_session.return_value = session_entry
+        runner.session_store.load_transcript.return_value = [
+            {"role": "user", "content": "earlier"},
+        ]
+
+        monkeypatch.setattr("gateway.slash_commands.fetch_account_usage",
+                            lambda provider, base_url=None, api_key=None: object())
+        monkeypatch.setattr("gateway.slash_commands.render_account_usage_lines",
+                            lambda snapshot, markdown=False: ["📈 **Account limits**"])
+        monkeypatch.setattr("agent.account_usage.nous_credits_lines", lambda markdown=False: [])
+
+        event = MagicMock()
+        result = await runner._handle_usage_command(event)
+
+        # Display path still works — account lines present.
+        assert "📈 **Account limits**" in result
+
+
+class TestUsageResetArgParsing:
+    """Unknown extra args on /usage reset must NOT silently trigger the
+    destructive action. Only `reset` and `reset --force` are valid."""
+
+    def _event(self, args):
+        event = MagicMock()
+        event.get_command_args.return_value = args
+        return event
+
+    @pytest.mark.asyncio
+    async def test_reset_with_unknown_extra_arg_refused(self, monkeypatch):
+        agent = _make_mock_agent(provider="openai-codex", api_key="tok")
+        runner = _make_runner(SK, cached_agent=agent)
+
+        def _must_not_redeem(**kw):
+            raise AssertionError("unknown extra arg must not trigger redeem")
+
+        monkeypatch.setattr("agent.account_usage.redeem_codex_reset_credit", _must_not_redeem)
+
+        result = await runner._handle_usage_command(self._event("reset bogus"))
+
+        assert "unknown" in result.lower() or "unrecognized" in result.lower() or "try" in result.lower()
+
+    @pytest.mark.asyncio
+    async def test_reset_force_with_extra_arg_refused(self, monkeypatch):
+        agent = _make_mock_agent(provider="openai-codex", api_key="tok")
+        runner = _make_runner(SK, cached_agent=agent)
+
+        def _must_not_redeem(**kw):
+            raise AssertionError("extra arg after --force must not trigger redeem")
+
+        monkeypatch.setattr("agent.account_usage.redeem_codex_reset_credit", _must_not_redeem)
+
+        result = await runner._handle_usage_command(self._event("reset --force bogus"))
+
+        assert "unknown" in result.lower() or "unrecognized" in result.lower() or "try" in result.lower()
