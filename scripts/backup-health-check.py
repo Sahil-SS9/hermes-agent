@@ -12,7 +12,8 @@ from pathlib import Path
 
 BACKUP_ROOT = Path(os.path.expanduser("~/backups/daily"))
 MAX_AGE_HOURS = 36  # Alert if newest backup is older than this
-CRITICAL_FILES = ["config.yaml", "auth.json", "kanban.db"]
+# Files that must be present — auth.json excluded (secrets need separate encrypted backup)
+CRITICAL_FILES = ["config.yaml", "kanban.db"]
 
 def parse_backup_ts(archive: Path) -> str:
     """Extract timestamp from archive name: kensei-YYYYMMDD-HHMM.tar.gz -> YYYYMMDD-HHMM"""
