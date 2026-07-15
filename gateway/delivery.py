@@ -332,9 +332,9 @@ class DeliveryRouter:
     ) -> None:
         """Best-effort Profile Activity Ledger hook for gateway delivery."""
         try:
-            from governance.profile_activity_ledger import record_if_enabled
+            from hermes_cli.profile_activity_ledger import record_event_if_enabled
 
-            record_if_enabled(
+            record_event_if_enabled(
                 source="gateway-dispatcher",
                 event_type="delivery_ok" if success else "delivery_error",
                 severity="info" if success else "error",

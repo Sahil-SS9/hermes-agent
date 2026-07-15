@@ -342,7 +342,7 @@ def ensure_dirs():
 def _record_cron_activity(event_type: str, job: Dict[str, Any], **extra: Any) -> None:
     """Best-effort Profile Activity Ledger hook for cron job changes."""
     try:
-        from governance.profile_activity_ledger import record_if_enabled
+        from hermes_cli.profile_activity_ledger import record_event_if_enabled
 
         job_id = str(job.get("id") or "")
         idempotency_key = extra.pop("idempotency_key", None)
@@ -356,7 +356,7 @@ def _record_cron_activity(event_type: str, job: Dict[str, Any], **extra: Any) ->
             "profile": job.get("profile"),
         }
         payload.update(extra)
-        record_if_enabled(
+        record_event_if_enabled(
             source="cron",
             profile=job.get("profile"),
             event_type=event_type,
