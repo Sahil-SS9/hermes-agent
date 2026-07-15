@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
 """
-GitRadar Upstream Monitor — Weekly check on seeded repos.
-Reads ~/wiki/repos/*.md, queries GitHub API for upstream status,
-reports: new releases, dormancy, star growth.
+GitRadar Upstream Monitor - Weekly check on seeded repos.
+Reads repo pages from the shared GitRadar runbook root
+(<repo>/runbooks/github-radar/repos/), queries GitHub API for upstream
+status, reports: new releases, dormancy, star growth.
+Falls back to ~/wiki/repos if the shared runbook dir doesn't exist yet.
 Output: JSON to stdout + optional kanban task creation.
+
+C030: aligned to the same runbook root as github-radar-discover.py
+(producer) so both share a single source of truth.
 """
 
 import json
@@ -15,10 +20,25 @@ import urllib.request
 from datetime import datetime, timezone, timedelta
 
 # ── Config ──────────────────────────────────────────────────────────
+# Shared runbook root (C030): aligned with github-radar-discover.py
+# producer, which writes to <repo>/runbooks/github-radar/. The consumer
+# reads seeded repo pages from the same runbook tree so producer and
+# consumer share a single root instead of diverging across ~/wiki and
+# <repo>/runbooks.
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_RUNBOOK_ROOT = os.path.join(_REPO_ROOT, "runbooks", "github-radar")
+REPOS_DIR = os.path.join(_RUNBOOK_ROOT, "repos")
+META_INDEX = os.path.join(_RUNBOOK_ROOT, "repo-index.md")
+LOG_FILE = os.path.join(_RUNBOOK_ROOT, "log.md")
 
-REPOS_DIR = os.path.expanduser("~/wiki/repos")
-META_INDEX = os.path.expanduser("~/wiki/_meta/repo-index.md")
-LOG_FILE = os.path.expanduser("~/wiki/log.md")
+# Backward-compat: if the shared runbook dirs don't exist yet, fall back
+# to the legacy ~/wiki paths so the monitor still works during migration.
+if not os.path.isdir(REPOS_DIR):
+    _legacy_repos = os.path.expanduser("~/wiki/repos")
+    if os.path.isdir(_legacy_repos):
+        REPOS_DIR = _legacy_repos
+        META_INDEX = os.path.expanduser("~/wiki/_meta/repo-index.md")
+        LOG_FILE = os.path.expanduser("~/wiki/log.md")
 DORMANCY_THRESHOLD_DAYS = 90
 STAR_GROWTH_THRESHOLD_PCT = 50  # alert if stars grew by >50% since last check
 

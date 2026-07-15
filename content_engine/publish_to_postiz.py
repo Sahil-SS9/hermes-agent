@@ -23,7 +23,7 @@ ARTICLE_OUTPUT = CE_DIR / "output" / "articles"
 sys.path.insert(0, str(CE_DIR))
 
 from postiz_bridge import queue_post
-from database import mark_published, get_draft
+from database import mark_published, get_draft, claim_for_enqueue, release_enqueue_claim
 
 # Only publish personal accounts
 ACTIVE_BRANDS = {"sahil_twitter", "sahil_linkedin"}
@@ -94,6 +94,7 @@ def publish_approved_drafts() -> int:
            WHERE brand IN (?, ?)
              AND status = 'approved'
              AND postiz_id IS NULL
+             AND (enqueue_state IS NULL OR enqueue_state = 'pending')
            ORDER BY approved_at ASC""",
         tuple(ACTIVE_BRANDS),
     )
@@ -109,6 +110,11 @@ def publish_approved_drafts() -> int:
         draft_id = draft["id"]
         brand = draft["brand"]
         platform = draft["platform"]
+
+        # Idempotent claim: atomically mark this draft as "claiming" so
+        # a concurrent cron run or retry cannot double-enqueue it.
+        if not claim_for_enqueue(draft_id):
+            continue
 
         # Map platform to postiz bridge key
         bridge_platform = PLATFORM_MAP.get(platform, platform or "twitter")
@@ -153,19 +159,17 @@ def publish_approved_drafts() -> int:
             )
 
             if postiz_id:
-                # Mark as published in content engine DB
-                c.execute(
-                    "UPDATE drafts SET status = 'published', published_at = ?, postiz_id = ? WHERE id = ?",
-                    (datetime.now(timezone.utc).isoformat(), postiz_id, draft_id),
-                )
-                conn.commit()
+                # Mark as published (also sets enqueue_state='enqueued')
+                mark_published(draft_id, postiz_id)
                 published += 1
                 img_status = "with image" if media_path else "text-only"
                 print(f"  Published: {draft_id} ({brand}/{platform}) {img_status} -> Postiz:{postiz_id[:8]}")
             else:
+                release_enqueue_claim(draft_id)
                 print(f"  Failed: {draft_id} ({brand}/{platform}) — no integration or insert failed")
 
         except Exception as e:
+            release_enqueue_claim(draft_id)
             print(f"  Error publishing {draft_id}: {e}")
 
     conn.close()

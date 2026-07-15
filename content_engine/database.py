@@ -84,6 +84,7 @@ def init_db() -> None:
         ("slop_issues", "TEXT"),
         ("source_provenance", "TEXT"),
         ("editorial_rationale", "TEXT"),
+        ("enqueue_state", "TEXT"),
     ]:
         if col_name not in cols:
             try:
@@ -256,8 +257,47 @@ def reject_draft(draft_id: str) -> None:
 def mark_published(draft_id: str, postiz_id: Optional[str] = None) -> None:
     conn = sqlite3.connect(str(DB_PATH))
     conn.execute(
-        "UPDATE drafts SET status = 'published', published_at = ?, postiz_id = ? WHERE id = ?",
+        "UPDATE drafts SET status = 'published', published_at = ?, postiz_id = ?, enqueue_state = 'enqueued' WHERE id = ?",
         (datetime.utcnow().isoformat(), postiz_id, draft_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def claim_for_enqueue(draft_id: str) -> bool:
+    """Idempotently claim a draft for Postiz enqueue.
+
+    Atomically transitions enqueue_state from NULL/'pending' to 'claiming'
+    using a conditional UPDATE. Returns True if this caller won the claim
+    (and should proceed with the enqueue), False if another process already
+    claimed it or it was already enqueued. This prevents duplicate enqueues
+    when the publish_to_postiz cron runs concurrently or is retried.
+
+    State machine: NULL -> 'claiming' -> 'enqueued' (on success) or
+    NULL (on failure, so a retry can pick it up again).
+    """
+    conn = sqlite3.connect(str(DB_PATH))
+    try:
+        # Only claim if not already claimed/enqueued. The WHERE clause
+        # makes this atomic at the SQLite row level.
+        cur = conn.execute(
+            "UPDATE drafts SET enqueue_state = 'claiming' "
+            "WHERE id = ? AND (enqueue_state IS NULL OR enqueue_state = 'pending')",
+            (draft_id,),
+        )
+        conn.commit()
+        won = cur.rowcount > 0
+        return won
+    finally:
+        conn.close()
+
+
+def release_enqueue_claim(draft_id: str) -> None:
+    """Release a failed enqueue claim so a retry can pick it up."""
+    conn = sqlite3.connect(str(DB_PATH))
+    conn.execute(
+        "UPDATE drafts SET enqueue_state = 'pending' WHERE id = ? AND enqueue_state = 'claiming'",
+        (draft_id,),
     )
     conn.commit()
     conn.close()

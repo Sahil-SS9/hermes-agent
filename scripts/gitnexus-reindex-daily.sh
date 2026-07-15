@@ -1,14 +1,31 @@
 #!/usr/bin/env bash
-# GitNexus daily re-index of KenseiAgent codebase
-# Keeps the code knowledge graph current with HEAD
-# Detaches to background via setsid+disown to avoid cron scheduler timeout
+# GitNexus daily re-index of KenseiAgent codebase.
+# Keeps the code knowledge graph current with HEAD.
+# Detaches to background via setsid+disown to avoid cron scheduler timeout.
+#
+# Repaired 2026-07-15 (C019):
+#   - RUNNER path resolved relative to this script (was hardcoded to a
+#     .hermes/scripts path that may not exist on fresh installs).
+#   - Explicit failure reporting: logs when the runner or gitnexus binary
+#     is missing instead of failing silently under set -e.
 set -euo pipefail
 
 REPO="/home/kensei/repos/KenseiAgent"
 GITNEXUS="/home/kensei/.hermes/node/bin/gitnexus"
-RUNNER="/home/kensei/.hermes/scripts/gitnexus-reindex-runner.sh"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RUNNER="${SCRIPT_DIR}/gitnexus-reindex-runner.sh"
 LOG_DIR="/home/kensei/.hermes/logs/gitnexus"
 mkdir -p "$LOG_DIR"
+
+# Explicit pre-flight checks (fail with a message, not a silent set -e abort).
+if [ ! -x "$RUNNER" ]; then
+    echo "[$(date -Iseconds)] ERROR: GitNexus re-index runner not found or not executable: $RUNNER" >&2
+    exit 1
+fi
+if [ ! -x "$GITNEXUS" ]; then
+    echo "[$(date -Iseconds)] ERROR: gitnexus binary not found or not executable: $GITNEXUS" >&2
+    exit 1
+fi
 
 # Get current HEAD (full SHA)
 HEAD_COMMIT=$(cd "$REPO" && git rev-parse HEAD)

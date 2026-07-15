@@ -66,15 +66,19 @@ def safe_extract(archive: Path, destination: Path) -> None:
             target = (destination / member.name).resolve()
             if not target.is_relative_to(destination_root):
                 raise RuntimeError(f"Unsafe archive member path: {member.name}")
-            if member.issym() or member.islnk() or not member.isfile():
-                raise RuntimeError(f"Unsupported archive member type: {member.name}")
+            if member.issym() or member.islnk():
+                raise RuntimeError(f"Unsupported archive link: {member.name}")
         tar.extractall(destination, members=members, filter="data")
 
 
 def verify_extracted(destination: Path, manifest: dict) -> int:
     files = manifest.get("files")
-    if not isinstance(files, list):
-        raise RuntimeError("Manifest has no files list")
+    if not isinstance(files, list) or not files:
+        raise RuntimeError("Manifest files list is absent or empty")
+    if manifest.get("file_count") != len(files):
+        raise RuntimeError(
+            f"Manifest file_count mismatch: declared {manifest.get('file_count')}, listed {len(files)}"
+        )
     expected: dict[str, int] = {}
     for item in files:
         if not isinstance(item, dict) or not isinstance(item.get("path"), str) or not isinstance(item.get("size"), int):

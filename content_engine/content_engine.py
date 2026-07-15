@@ -532,12 +532,18 @@ def main() -> int:
         return 0 if ok else 1
 
     elif args.cmd == "approve":
+        # Approval is state-only (C026/C027): mark the draft as approved
+        # and generate any missing media, but do NOT enqueue to Postiz
+        # here. The single authoritative enqueue route is
+        # publish_to_postiz.py (the no-agent cron), which polls approved
+        # drafts and calls postiz_bridge.queue_post. This prevents
+        # duplicate enqueues when both the approve command and the cron
+        # race on the same draft.
         approve_draft(args.draft_id)
         print(f"Approved {args.draft_id}")
         d = get_draft(args.draft_id)
         if d:
             brand = d["brand"]
-            platform = d["platform"]
             ct = d.get("content_type", "text")
             from draft_media import generate_post_image, generate_draft_video
 
@@ -549,30 +555,14 @@ def main() -> int:
                     d["ai_image_path"] = img
 
             # Video is generated on approval (cheapest: free ffmpeg motion clip).
-            media_path = None
             if "video" in ct:
                 if not d.get("ai_video_path"):
                     vid = generate_draft_video(d.get("ai_image_path"), d.get("body_text", ""), brand, d["id"])
                     if vid:
                         update_draft_ai_video_path(d["id"], vid)
                         d["ai_video_path"] = vid
-                media_path = d.get("ai_video_path") or d.get("ai_image_path")
-            elif "image" in ct:
-                media_path = d.get("ai_image_path")
 
-            from postiz_bridge import queue_post
-            post_id = queue_post(
-                body_text=d["body_text"],
-                brand=brand,
-                platform=platform,
-                title=d.get("title"),
-                media_path=media_path,
-            )
-            if post_id:
-                print(f"  Queued in Postiz: {post_id}")
-            else:
-                print(f"  No Postiz integration for {brand}/{platform} — exported to data/publish_queue/ for manual posting.")
-                print(f"  To link this platform, log into Postiz at http://localhost:8080 and add the social account.")
+            print(f"  Draft approved. Postiz enqueue handled by publish_to_postiz cron.")
         return 0
 
     elif args.cmd == "reject":

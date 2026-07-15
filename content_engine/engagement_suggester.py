@@ -1069,9 +1069,9 @@ def configure_xurl_from_postiz() -> bool:
     # Postiz DB connection details from docker-compose
     db_host = "127.0.0.1"
     db_port = "5432"
-    db_user = "postiz-user"
-    db_password = "postiz-password"
-    db_name = "postiz-db-local"
+    db_user = os.getenv("POSTIZ_DB_USER", "postiz-user")
+    db_password = os.getenv("POSTIZ_DB_PASS", "postiz-password")
+    db_name = os.getenv("POSTIZ_DB_NAME", "postiz-db-local")
 
     # Query the Integration table for X accounts
     query = (
@@ -1166,8 +1166,30 @@ default_app: kensei-digest
 
     xurl_path = os.path.expanduser("~/.xurl")
     try:
-        with open(xurl_path, "w") as f:
-            f.write(xurl_config)
+        # Atomic write (C028): write to a temp file in the same directory,
+        # fsync, set restrictive permissions (0o600 — the file contains
+        # OAuth tokens), then os.replace into place. This prevents a
+        # partial write from corrupting an existing config and avoids the
+        # TOCTOU window of write-then-chmod.
+        import tempfile
+        xurl_dir = os.path.dirname(xurl_path)
+        fd, tmp_path = tempfile.mkstemp(
+            prefix=".xurl-", suffix=".tmp", dir=xurl_dir
+        )
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write(xurl_config)
+                f.flush()
+                os.fsync(f.fileno())
+            os.chmod(tmp_path, 0o600)
+            os.replace(tmp_path, xurl_path)
+        except Exception:
+            # Clean up the temp file on any failure
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
         print(f"[engagement] xurl config written to {xurl_path} for @{profile}")
         return True
     except OSError as exc:

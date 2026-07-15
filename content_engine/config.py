@@ -6,7 +6,15 @@ platform formats, image providers, and budget.
 import os
 from pathlib import Path
 
-BASE_DIR = Path("/home/kensei/repos/KenseiAgent/content_engine")
+# Resolve deployment root relative to this file so the engine works
+# from any checkout location, not just /home/kensei/repos/KenseiAgent.
+# Falls back to the hardcoded path only if the relative resolution
+# fails (e.g. running from a frozen binary).
+BASE_DIR = Path(__file__).resolve().parent
+if not (BASE_DIR / "db").exists():
+    _fallback = Path("/home/kensei/repos/KenseiAgent/content_engine")
+    if _fallback.exists():
+        BASE_DIR = _fallback
 OUTPUT_DIR = BASE_DIR / "output"
 DB_PATH = BASE_DIR / "db" / "content_engine.db"
 

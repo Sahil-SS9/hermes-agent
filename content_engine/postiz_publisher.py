@@ -2,6 +2,15 @@
 Postiz publisher — inserts posts directly into Postiz database.
 The POST /api/posts endpoint is broken (rejects valid payloads),
 so we write directly to the DB.
+
+DEPRECATED (C026/C027): This module is a duplicate enqueue route.
+The single authoritative Postiz enqueue route is
+``publish_to_postiz.py`` via ``postiz_bridge.queue_post``. Approval is
+state-only; the publish_to_postiz cron polls approved drafts and enqueues
+them with idempotent claim guards. This class is kept for read-only
+queries (get_upcoming_posts, get_post_counts_by_state, delete_post) but
+its insert_post / insert_posts_batch methods should NOT be called for
+enqueue — use postiz_bridge.queue_post instead.
 """
 
 import os
@@ -22,7 +31,7 @@ class PostizPublisher:
         port: int = 5432,
         dbname: str = "postiz-db-local",
         user: str = "postiz-user",
-        password: str = "postiz-password",
+        password: str = os.getenv("POSTIZ_DB_PASS", "postiz-password"),
     ):
         # Docker container exposes postgres internally; default credentials from compose
         self.conn_params = {
@@ -243,7 +252,7 @@ def get_default_publisher() -> PostizPublisher:
     return PostizPublisher(
         host="localhost",
         port=5432,
-        dbname="postiz-db-local",
-        user="postiz-user",
-        password="postiz-password",
+        dbname=os.getenv("POSTIZ_DB_NAME", "postiz-db-local"),
+        user=os.getenv("POSTIZ_DB_USER", "postiz-user"),
+        password=os.getenv("POSTIZ_DB_PASS", "postiz-password"),
     )
