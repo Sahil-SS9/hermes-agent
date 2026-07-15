@@ -1,113 +1,123 @@
 #!/usr/bin/env python3
-"""Backup restore drill — proves we can restore from the latest verified archive.
+"""Disposable backup restore proof.
 
-Extracts to a disposable temp directory, verifies every file in the manifest
-matches (count, path, SHA-256), reports success/failure, cleans up.
+Selects the newest archive whose archive SHA-256 matches its manifest,
+extracts it only to a temporary directory, and verifies the extracted file set
+and each manifest-recorded byte size. It never restores over live state.
 
-Usage: python3 backup-restore.py
-Exit 0 = restore successful. Exit 1 = restore failed.
+The current backup-producer manifest records archive SHA-256 plus per-file
+path and size (not per-file digests), so extracted-file verification is bounded
+to the fields the manifest actually contains.
 """
-import hashlib, json, os, shutil, sys, tarfile, tempfile
-from datetime import datetime, timezone
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import shutil
+import sys
+import tarfile
+import tempfile
 from pathlib import Path
 
 BACKUP_ROOT = Path(os.path.expanduser("~/backups/daily"))
 
-def find_latest_verified() -> tuple[Path, Path] | None:
-    """Return (archive, manifest) of the most recent backup with a valid manifest."""
-    archives = sorted(BACKUP_ROOT.glob("kensei-*.tar.gz"), reverse=True)
-    for archive in archives:
-        # Derive manifest name: kensei-YYYYMMDD-HHMM.tar.gz → kensei-YYYYMMDD-HHMM.manifest.json
-        name = archive.name
-        for suffix in [".tar.gz", ".tar"]:
-            if name.endswith(suffix):
-                stem = name[:-len(suffix)]
-                break
-        else:
-            continue
-        manifest = BACKUP_ROOT / f"{stem}.manifest.json"
-        if not manifest.is_file():
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def manifest_path_for(archive: Path) -> Path:
+    if not archive.name.endswith(".tar.gz"):
+        raise ValueError(f"Unsupported archive name: {archive.name}")
+    return archive.with_name(f"{archive.name[:-len('.tar.gz')]}.manifest.json")
+
+
+def load_verified_latest() -> tuple[Path, dict]:
+    for archive in sorted(BACKUP_ROOT.glob("kensei-*.tar.gz"), reverse=True):
+        manifest_path = manifest_path_for(archive)
+        if not manifest_path.is_file():
             continue
         try:
-            with open(manifest) as f:
-                m = json.load(f)
-            if m.get("sha256"):
-                return archive, manifest
-        except json.JSONDecodeError:
-            pass
-    return None
+            manifest = json.loads(manifest_path.read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            print(f"SKIP {archive.name}: unreadable manifest ({exc})", file=sys.stderr)
+            continue
+        expected = manifest.get("sha256")
+        if not isinstance(expected, str) or len(expected) != 64:
+            print(f"SKIP {archive.name}: manifest missing valid archive SHA-256", file=sys.stderr)
+            continue
+        if sha256_file(archive) != expected:
+            print(f"SKIP {archive.name}: archive SHA-256 mismatch", file=sys.stderr)
+            continue
+        return archive, manifest
+    raise RuntimeError(f"No SHA-verified backup archive found in {BACKUP_ROOT}")
 
-def verify_checksum(archive: Path, expected_sha256: str) -> str | None:
-    """Return None if checksum matches, error string if not."""
-    sha = hashlib.sha256()
-    with open(archive, "rb") as af:
-        for chunk in iter(lambda: af.read(8192), b""):
-            sha.update(chunk)
-    actual = sha.hexdigest()
-    if actual != expected_sha256:
-        return f"Archive checksum mismatch: expected {expected_sha256[:16]}..., got {actual[:16]}..."
-    return None
 
-def main():
-    result = find_latest_verified()
-    if not result:
-        print("FAIL: No verified backup archive found")
-        sys.exit(1)
-    
-    archive, manifest_path = result
-    print(f"Restore drill — {archive.name}")
-    
-    # Load manifest
-    with open(manifest_path) as f:
-        manifest = json.load(f)
-    
-    # Verify archive checksum
-    err = verify_checksum(archive, manifest["sha256"])
-    if err:
-        print(f"FAIL: {err}")
-        sys.exit(1)
-    
-    # Extract to temp directory
-    tmpdir = tempfile.mkdtemp(prefix="restore-")
+def safe_extract(archive: Path, destination: Path) -> None:
+    destination_root = destination.resolve()
+    with tarfile.open(archive, "r:gz") as tar:
+        members = tar.getmembers()
+        for member in members:
+            target = (destination / member.name).resolve()
+            if not target.is_relative_to(destination_root):
+                raise RuntimeError(f"Unsafe archive member path: {member.name}")
+            if member.issym() or member.islnk() or not member.isfile():
+                raise RuntimeError(f"Unsupported archive member type: {member.name}")
+        tar.extractall(destination, members=members, filter="data")
+
+
+def verify_extracted(destination: Path, manifest: dict) -> int:
+    files = manifest.get("files")
+    if not isinstance(files, list):
+        raise RuntimeError("Manifest has no files list")
+    expected: dict[str, int] = {}
+    for item in files:
+        if not isinstance(item, dict) or not isinstance(item.get("path"), str) or not isinstance(item.get("size"), int):
+            raise RuntimeError("Manifest contains an invalid file entry")
+        if item["path"] in expected:
+            raise RuntimeError(f"Manifest contains duplicate path: {item['path']}")
+        expected[item["path"]] = item["size"]
+
+    actual: dict[str, int] = {}
+    for root, _, names in os.walk(destination):
+        for name in names:
+            path = Path(root) / name
+            relative = path.relative_to(destination).as_posix()
+            actual[relative] = path.stat().st_size
+
+    missing = sorted(set(expected) - set(actual))
+    extra = sorted(set(actual) - set(expected))
+    mismatched = sorted(path for path in set(expected) & set(actual) if expected[path] != actual[path])
+    if missing or extra or mismatched:
+        lines = []
+        if missing:
+            lines.append(f"missing={', '.join(missing)}")
+        if extra:
+            lines.append(f"extra={', '.join(extra)}")
+        if mismatched:
+            lines.append(f"size-mismatch={', '.join(mismatched)}")
+        raise RuntimeError("Extracted files do not match manifest: " + "; ".join(lines))
+    return len(actual)
+
+
+def main() -> int:
     try:
-        with tarfile.open(archive, "r:gz") as tar:
-            tar.extractall(path=tmpdir)
-        
-        # Verify every file in manifest
-        manifest_files = {f["path"]: f["size"] for f in manifest.get("files", [])}
-        actual_count = 0
-        
-        for root, dirs, files in os.walk(tmpdir):
-            for fname in files:
-                actual_count += 1
-                fpath = Path(root) / fname
-                rel_path = str(fpath.relative_to(tmpdir))
-                
-                # Check file is in manifest
-                if rel_path not in manifest_files:
-                    print(f"FAIL: Extra file not in manifest: {rel_path}")
-                    sys.exit(1)
-                
-                # Check size matches
-                actual_size = fpath.stat().st_size
-                expected_size = manifest_files[rel_path]
-                if actual_size != expected_size:
-                    print(f"FAIL: Size mismatch for {rel_path}: expected {expected_size}, got {actual_size}")
-                    sys.exit(1)
-        
-        # Check no files missing from manifest
-        if actual_count != manifest["file_count"]:
-            print(f"FAIL: File count mismatch: manifest={manifest['file_count']}, extracted={actual_count}")
-            sys.exit(1)
-        
-        # All checks passed
-        print(f"RESTORE OK — {actual_count} files verified, {manifest['file_count']} in manifest")
-        print(f"Extracted to: {tmpdir}")
-        print(f"Archive: {archive}")
-        
-    finally:
-        # Clean up
-        shutil.rmtree(tmpdir, ignore_errors=True)
+        archive, manifest = load_verified_latest()
+        with tempfile.TemporaryDirectory(prefix="kensei-backup-restore-") as temp_dir:
+            destination = Path(temp_dir)
+            safe_extract(archive, destination)
+            count = verify_extracted(destination, manifest)
+        print(f"RESTORE OK: {archive.name}; SHA-256 verified; {count} manifest files extracted and verified in a disposable directory")
+        return 0
+    except (OSError, RuntimeError, tarfile.TarError, ValueError) as exc:
+        print(f"RESTORE FAILED: {exc}", file=sys.stderr)
+        return 1
+
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
