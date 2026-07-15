@@ -10226,13 +10226,42 @@ def _is_profile_spawnable(name: str) -> bool:
         from hermes_cli.config import load_config_readonly
         cfg = load_config_readonly()
         blocked = cfg.get("kanban", {}).get("nonspawnable_profiles", [])
-        return name not in blocked
+        if name in blocked:
+            return False
     except Exception as exc:
         _log.error(
             "_is_profile_spawnable(%s): could not load config (%s); "
             "treating as non-spawnable (fail-closed)", name, exc,
         )
         return False
+    # Tier gate: Tier-3 (dormant/specialized) profiles are never spawnable.
+    # They require explicit Sahil approval and runtime proof before activation.
+    # Fails open for profile-level config reads (tier is advisory);
+    # fails closed for the root nonspawnable list above.
+    try:
+        from hermes_cli.profiles import get_profile_dir
+        import yaml as _yaml
+        _profile_dir = get_profile_dir(name)
+        _config_path = _profile_dir / "config.yaml"
+        if _config_path.is_file():
+            with open(_config_path) as _fh:
+                _profile_cfg = _yaml.safe_load(_fh) or {}
+            _tier = _profile_cfg.get("tier")
+            if _tier is not None:
+                try:
+                    if int(_tier) == 3:
+                        _log.info(
+                            "_is_profile_spawnable(%s): tier 3 profile — "
+                            "not spawnable", name,
+                        )
+                        return False
+                except (ValueError, TypeError):
+                    pass
+    except Exception as exc:
+        _log.warning(
+            "_is_profile_spawnable(%s): tier check skipped (%s)", name, exc,
+        )
+    return True
 
 
 def _hours_since_last_event(

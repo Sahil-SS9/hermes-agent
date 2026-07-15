@@ -1,0 +1,21 @@
+[Unit]
+Description=Turbohaul Main — Darwin 28B (Sirvir primary)
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=kensei
+ExecStart=/home/sahil/ai/turbohaul-manager/vendor/turboquant-bin/llama-server \
+    -m /home/sahil/ai/models/llm/Darwin-28B-REASON.Q5_K_M.gguf \
+    --host 127.0.0.1 --port 11500 \
+    -ngl 99 --ctx-size 65536 \
+    --threads 8 --threads-batch 8 \
+    --mlock --no-mmap
+Restart=on-failure
+RestartSec=5
+Environment=OMP_NUM_THREADS=8
+LimitNOFILE=65536
+
+[Install]
+WantedBy=default.target

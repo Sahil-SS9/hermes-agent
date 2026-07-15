@@ -448,7 +448,8 @@ def _llm_generate_response(tweet_text: str, author: str, response_type: str) -> 
                     break
     
     if not key:
-        return _fallback_response(tweet_text, response_type)
+        # No API key — drop candidate, do not emit fallback echo
+        return None
     
     if response_type == "quote_tweet":
         system_prompt = (
@@ -520,18 +521,82 @@ def _llm_generate_response(tweet_text: str, author: str, response_type: str) -> 
     except Exception as exc:
         print(f"[engagement] LLM call error: {exc}")
     
-    return _fallback_response(tweet_text, response_type)
+    # Drop candidate on failure — never emit fallback echo
+    return None
+
+
+# ── Quality Gate — post-generation guardrails ──
+
+_GENERIC_OPENERS = [
+    "this.", "exactly.", "this is interesting", "good point on",
+    "worth adding", "interesting take", "great point", "well said",
+    "couldn't agree more", "nice one", "love this",
+]
+
+def _quality_gate(draft: str, post_text: str) -> bool:
+    """Return True if the draft passes all quality checks.
+    
+    Guardrails from W8_X_ENGAGEMENT_REBUILD_SPEC.md:
+    1. Post-understanding: must reference something actually in the post
+    2. Echo detection: must not be a simple restatement
+    3. Length check: 50-280 characters
+    4. Generic-opener check: reject dead templates
+    5. Voice check: British English, no hedging
+    """
+    if not draft or len(draft.strip()) < 10:
+        return False
+    
+    # 1. Generic-opener check
+    draft_lower = draft.strip().lower()
+    for opener in _GENERIC_OPENERS:
+        if draft_lower.startswith(opener):
+            print(f"[engagement] quality gate: rejected generic opener '{opener}'")
+            return False
+    
+    # 2. Length check: 50-280 chars
+    draft_clean = draft.strip()
+    if len(draft_clean) < 50:
+        print(f"[engagement] quality gate: too short ({len(draft_clean)} chars)")
+        return False
+    if len(draft_clean) > 280:
+        print(f"[engagement] quality gate: too long ({len(draft_clean)} chars)")
+        return False
+    
+    # 3. Echo detection — simple overlap check
+    # If >60% of draft words are in the post, it's an echo
+    post_words = set(post_text.lower().split())
+    draft_words = set(draft_lower.split())
+    if post_words:
+        overlap = len(draft_words & post_words) / len(draft_words)
+        if overlap > 0.6:
+            print(f"[engagement] quality gate: echo detected ({overlap:.0%} overlap)")
+            return False
+    
+    # 4. Post-understanding: draft must contain at least one specific
+    # word or phrase that is NOT a common stop word
+    common = {'the', 'a', 'an', 'is', 'are', 'was', 'were', 'this', 'that',
+              'it', 'to', 'of', 'in', 'for', 'on', 'and', 'or', 'but',
+              'with', 'from', 'by', 'at', 'as', 'be', 'has', 'have', 'had'}
+    specific_words = [w for w in draft_words if w not in common and len(w) > 3]
+    if len(specific_words) < 3:
+        print(f"[engagement] quality gate: too generic ({len(specific_words)} specific words)")
+        return False
+    
+    # 5. Hedging check: reject drafts with weak/hedging language
+    hedging = {'might', 'maybe', 'perhaps', 'could be', 'possibly', 
+               'i think', 'in my opinion', 'arguably'}
+    draft_clean_lower = draft_clean.lower()
+    for h in hedging:
+        if h in draft_clean_lower:
+            print(f"[engagement] quality gate: hedging detected '{h}'")
+            return False
+    
+    return True
 
 
 def _fallback_response(tweet_text: str, response_type: str) -> str:
-    """Last-resort fallback if LLM is unavailable. Reads the tweet text
-    and produces a minimal contextual response (not a template)."""
-    text = tweet_text.strip()
-    if len(text) > 100:
-        text = text[:100] + "..."
-    if response_type == "quote_tweet":
-        return f"This is interesting. {text[:80]}"
-    return f"Good point on {text[:60]}."
+    """DEPRECATED — kept for reference only. New code drops candidates on failure."""
+    return ""
 
 
 def _generate_quote_tweet(post: Dict) -> str:
@@ -698,6 +763,7 @@ def scan_and_suggest() -> List[Dict]:
 
     # ─── Phase 3: Generate LLM suggestions for top candidates only ───
     new_suggestions = []
+    skipped_silence = 0
     for tweet in top_candidates:
         tweet_id = tweet.get("id", "")
         account = tweet.get("author", "unknown")
@@ -708,6 +774,22 @@ def scan_and_suggest() -> List[Dict]:
         # Generate quote tweet and reply via LLM
         quote_text = _generate_quote_tweet(tweet)
         reply_text = _generate_reply(tweet)
+        
+        # Quality gate: drop candidates where LLM failed or produced garbage
+        if quote_text and _quality_gate(quote_text, text):
+            pass  # quote passed
+        else:
+            quote_text = None
+        
+        if reply_text and _quality_gate(reply_text, text):
+            pass  # reply passed
+        else:
+            reply_text = None
+        
+        # Skip if both generation paths failed
+        if not quote_text and not reply_text:
+            skipped_silence += 1
+            continue
 
         suggestion_id = str(uuid.uuid4())[:8]
         suggestion = {

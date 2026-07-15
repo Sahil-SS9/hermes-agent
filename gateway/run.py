@@ -20801,17 +20801,35 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
     # historical in-process 60s ticker; an external provider (e.g. chronos)
     # may arm a schedule and return. Pass the event loop so cron delivery can
     # use live adapters (E2EE support).
-    from cron.scheduler_provider import resolve_cron_scheduler
+    #
+    # Central scheduler gate: cron ticker is only started when the profile
+    # config explicitly enables it (cron.ticker_enabled: true). Specialist
+    # profiles must set ticker_enabled: false — only the Kensei root gateway
+    # runs the central scheduler. This prevents token collision and duplicate
+    # cron execution across the fleet.
+    from hermes_cli.config import load_config_readonly
+    _cfg = load_config_readonly()
+    _cron_cfg = _cfg.get("cron", {}) if _cfg else {}
+    _ticker_enabled = _cron_cfg.get("ticker_enabled", True)  # default true for root
     cron_stop = threading.Event()
-    cron_provider = resolve_cron_scheduler()
-    cron_thread = threading.Thread(
-        target=cron_provider.start,
-        args=(cron_stop,),
-        kwargs={"adapters": runner.adapters, "loop": asyncio.get_running_loop()},
-        daemon=True,
-        name="cron-scheduler",
-    )
-    cron_thread.start()
+    if not _ticker_enabled:
+        logger.info(
+            "Cron ticker disabled (cron.ticker_enabled=false) — "
+            "central scheduler running on Kensei root gateway only"
+        )
+        cron_stop.set()  # Already stopped — prevent housekeeping from waiting
+        cron_thread = None
+    else:
+        from cron.scheduler_provider import resolve_cron_scheduler
+        cron_provider = resolve_cron_scheduler()
+        cron_thread = threading.Thread(
+            target=cron_provider.start,
+            args=(cron_stop,),
+            kwargs={"adapters": runner.adapters, "loop": asyncio.get_running_loop()},
+            daemon=True,
+            name="cron-scheduler",
+        )
+        cron_thread.start()
 
     # Gateway-only periodic housekeeping (channel dir, cache cleanup, paste
     # sweep, curator) — runs independently of which cron provider is active.
@@ -20850,15 +20868,16 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
     # silently dropped (#58818). Awaiting keeps the loop alive so the in-flight
     # delivery finishes before we tear down.
     cron_stop.set()
-    try:
-        cron_provider.stop()
-    except Exception as e:
-        logger.debug("Cron provider stop() error: %s", e)
-    if not await _await_thread_exit(cron_thread, timeout=_CRON_SHUTDOWN_DRAIN_TIMEOUT):
-        logger.warning(
-            "Cron ticker did not exit within %.0fs of shutdown — an in-flight "
-            "delivery may have been dropped.", _CRON_SHUTDOWN_DRAIN_TIMEOUT,
-        )
+    if cron_thread is not None:
+        try:
+            cron_provider.stop()
+        except Exception as e:
+            logger.debug("Cron provider stop() error: %s", e)
+        if not await _await_thread_exit(cron_thread, timeout=_CRON_SHUTDOWN_DRAIN_TIMEOUT):
+            logger.warning(
+                "Cron ticker did not exit within %.0fs of shutdown — an in-flight "
+                "delivery may have been dropped.", _CRON_SHUTDOWN_DRAIN_TIMEOUT,
+            )
     await _await_thread_exit(
         housekeeping_thread, timeout=_HOUSEKEEPING_SHUTDOWN_DRAIN_TIMEOUT
     )

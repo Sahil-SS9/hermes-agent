@@ -1211,6 +1211,22 @@ def _build_child_agent(
         if os.path.isfile(_soul_path):
             with open(_soul_path) as _f:
                 loaded_profile_cfg["soul_md"] = _f.read()
+        # Tier gate: Tier-3 profiles are dormant/specialized — they cannot
+        # be delegated to without explicit Sahil approval and runtime proof.
+        _pcfg = loaded_profile_cfg.get("config") or {}
+        _tier = _pcfg.get("tier")
+        if _tier is not None:
+            try:
+                _tier_int = int(_tier)
+            except (ValueError, TypeError):
+                pass  # Non-integer tier — let it pass
+            else:
+                if _tier_int == 3:
+                    raise RuntimeError(
+                        f"Profile '{profile}' is tier 3 (dormant/specialized). "
+                        "Tier 3 profiles require explicit Sahil approval and "
+                        "runtime proof before delegation."
+                    )
 
     # Apply profile settings to effective child config.
     # Explicit override_* params (from delegation config or per-task) always win.
