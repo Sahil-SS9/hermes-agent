@@ -45,9 +45,16 @@ import sqlite3
 import sys
 import tempfile
 import time
+import secrets
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
+
+# Direct ``python scripts/...`` execution does not put the repository root on
+# sys.path. Keep this entrypoint self-contained; tests otherwise mask this.
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 # Overrides that, if ambient, could redirect disposable proof I/O to a
 # live board. Every one is cleared (and re-pinned to the owned root)
@@ -62,6 +69,13 @@ _OVERRIDE_ENV_KEYS = (
 )
 
 _OWNERSHIP_MARKER = ".p04_owned_root"
+# A marker file alone is forgeable. Keep the process-owned token registry on
+# ``sys`` so it survives isolated module reloads used by the proof tests.
+_registry = getattr(sys, "_p04_owned_root_tokens", None)
+if _registry is None:
+    _registry = {}
+    setattr(sys, "_p04_owned_root_tokens", _registry)
+_OWNED_ROOT_TOKENS: Dict[Path, str] = _registry
 
 
 # ---------------------------------------------------------------------------
@@ -75,8 +89,10 @@ def make_owned_root() -> Path:
     Returns the Path. The root carries an ownership marker and is the ONLY
     place the proof is permitted to read or write board data.
     """
-    root = Path(tempfile.mkdtemp(prefix="p04-hermetic-"))
-    (root / _OWNERSHIP_MARKER).write_text(str(os.getpid()) + "\n", encoding="utf-8")
+    root = Path(tempfile.mkdtemp(prefix="p04-hermetic-")).resolve()
+    token = secrets.token_urlsafe(32)
+    (root / _OWNERSHIP_MARKER).write_text(token + "\n", encoding="utf-8")
+    _OWNED_ROOT_TOKENS[root] = token
     return root
 
 
@@ -101,10 +117,15 @@ def guard_owned_root(root: Path) -> None:
     - The root must live under the system temp dir (disposable).
     - No symlink escape from the resolved root.
     """
+    root = root.resolve()
     if not root.exists():
         raise RuntimeError(f"refusing unowned root (absent): {root}")
-    if not (root / _OWNERSHIP_MARKER).exists():
+    expected_token = _OWNED_ROOT_TOKENS.get(root)
+    marker = root / _OWNERSHIP_MARKER
+    if expected_token is None or not marker.is_file() or marker.is_symlink():
         raise RuntimeError(f"refusing unowned root (no marker): {root}")
+    if marker.read_text(encoding="utf-8").strip() != expected_token:
+        raise RuntimeError(f"refusing unowned root (invalid marker): {root}")
     tmp = Path(tempfile.gettempdir()).resolve()
     if not _is_under(tmp, root):
         raise RuntimeError(f"refusing non-temporary root: {root}")
@@ -400,6 +421,69 @@ def _validate_attachment(stored_path: Path, src_root: Path) -> Dict[str, Any]:
     return {"size": len(data), "sha256": hashlib.sha256(data).hexdigest()}
 
 
+def _publish_attachment(stage: Path, target: Path) -> None:
+    """Publish an already-validated stage; isolated for post-copy failure tests."""
+    if target.exists() or target.is_symlink():
+        raise RuntimeError(f"refusing attachment target conflict: {target}")
+    stage.replace(target)
+
+
+def _preflight_transfer(conn: sqlite3.Connection, src_epic_ids: List[str],
+                        preserved_links: List[Dict[str, str]]) -> None:
+    """Reject unsupported or conflicting state before either DB is mutated."""
+    pending = conn.execute(
+        "SELECT id, status FROM profile_lifecycle_approvals "
+        "WHERE status IN (?, ?) LIMIT 1", ("pending", "approved"),
+    ).fetchone()
+    if pending:
+        raise RuntimeError(f"unsupported lifecycle approval: {pending['id']} ({pending['status']})")
+    inflight = conn.execute(
+        "SELECT id FROM tasks WHERE status = ? OR current_run_id IS NOT NULL "
+        "OR claim_lock IS NOT NULL OR claim_expires IS NOT NULL "
+        "OR worker_pid IS NOT NULL OR last_heartbeat_at IS NOT NULL LIMIT 1",
+        ("running",),
+    ).fetchone()
+    if inflight:
+        raise RuntimeError(f"unsupported in-flight task: {inflight['id']}")
+    active_run = conn.execute(
+        "SELECT id FROM task_runs WHERE status IN (?, ?) LIMIT 1", ("running", "claimed"),
+    ).fetchone()
+    if active_run:
+        raise RuntimeError(f"unsupported in-flight run: {active_run['id']}")
+    task_conflict = conn.execute(
+        "SELECT s.id FROM tasks s JOIN tgt.tasks t ON t.id = s.id LIMIT 1"
+    ).fetchone()
+    if task_conflict:
+        raise RuntimeError(f"target task conflict: {task_conflict['id']}")
+    if src_epic_ids:
+        epic_conflict = conn.execute(
+            "SELECT s.id FROM epics s JOIN tgt.epics t ON t.id = s.id "
+            "WHERE s.id IN (" + ",".join("?" for _ in src_epic_ids) + ") LIMIT 1",
+            src_epic_ids,
+        ).fetchone()
+        if epic_conflict:
+            raise RuntimeError(f"target epic conflict: {epic_conflict['id']}")
+    sub_conflict = conn.execute(
+        "SELECT s.task_id FROM kanban_notify_subs s JOIN tgt.kanban_notify_subs t "
+        "ON t.task_id=s.task_id AND t.platform=s.platform AND t.chat_id=s.chat_id "
+        "AND t.thread_id=s.thread_id AND t.user_id=s.user_id LIMIT 1"
+    ).fetchone()
+    if sub_conflict:
+        raise RuntimeError(f"target notify subscription conflict: {sub_conflict['task_id']}")
+    approval_conflict = conn.execute(
+        "SELECT s.id FROM profile_lifecycle_approvals s "
+        "JOIN tgt.profile_lifecycle_approvals t ON t.id=s.id LIMIT 1"
+    ).fetchone()
+    if approval_conflict:
+        raise RuntimeError(f"target lifecycle approval conflict: {approval_conflict['id']}")
+    for link in preserved_links:
+        if conn.execute(
+            "SELECT 1 FROM tgt.task_links WHERE parent_id=? AND child_id=?",
+            (link["parent_id"], link["child_id"]),
+        ).fetchone():
+            raise RuntimeError("target task-link conflict")
+
+
 def _do_migration_transfer(src_path: Path, tgt_path: Path,
                             src_att_root: Path, tgt_att_root: Path) -> Dict[str, Any]:
     """The true default->core migration: transfer ALL source tasks + rows.
@@ -418,6 +502,7 @@ def _do_migration_transfer(src_path: Path, tgt_path: Path,
     now = int(time.time())
     conn = None
     staged: List[Path] = []
+    published: List[Path] = []
     try:
         conn = sqlite3.connect(str(src_path))
         conn.row_factory = sqlite3.Row
@@ -459,6 +544,10 @@ def _do_migration_transfer(src_path: Path, tgt_path: Path,
             res["transferred_link_parent"] = preserved_links[0]["parent_id"]
             res["transferred_link_child"] = preserved_links[0]["child_id"]
 
+        # Reject unsupported states and every key conflict before any insert,
+        # attachment publication or source deletion.
+        _preflight_transfer(conn, src_epic_ids, preserved_links)
+
         remap_offsets = {tbl: _max_int_pk(conn, "tgt", tbl) for tbl in _INT_PK_TABLES}
         res["remap_offsets"] = remap_offsets
 
@@ -470,7 +559,7 @@ def _do_migration_transfer(src_path: Path, tgt_path: Path,
             if epic_row is None:
                 continue
             conn.execute(
-                "INSERT OR IGNORE INTO tgt.epics "
+                "INSERT INTO tgt.epics "
                 "(id, title, description, board_slug, status, parent_epic_id, created_at, updated_at) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (epic_row["id"], epic_row["title"], epic_row["description"],
@@ -554,7 +643,10 @@ def _do_migration_transfer(src_path: Path, tgt_path: Path,
             # Verify the staged copy matches the source SHA-256 before commit.
             if hashlib.sha256(stage.read_bytes()).hexdigest() != info["sha256"]:
                 raise RuntimeError(f"attachment copy mismatch for {stored_path}")
-            stage.replace(new_stored)
+            # Record the intended target before publication so an injected or
+            # real post-publication exception is compensated as well.
+            published.append(new_stored)
+            _publish_attachment(stage, new_stored)
             cols = [r["name"] for r in conn.execute(
                 "PRAGMA table_info(task_attachments)").fetchall() if r["name"] != "id"]
             values = []
@@ -579,15 +671,14 @@ def _do_migration_transfer(src_path: Path, tgt_path: Path,
             placeholders = ", ".join("?" for _ in cols)
             col_list = ", ".join(cols)
             conn.execute(
-                "INSERT OR IGNORE INTO tgt.kanban_notify_subs (" + col_list + ") "
+                "INSERT INTO tgt.kanban_notify_subs (" + col_list + ") "
                 "VALUES (" + placeholders + ")", values,
             )
 
-        # profile_lifecycle_approvals (text PK, terminal only).
+        # profile_lifecycle_approvals (text PK). Pending/approved states were
+        # rejected in preflight; all supported terminal rows are preserved.
         approvals = conn.execute(
-            "SELECT * FROM profile_lifecycle_approvals "
-            "WHERE status IN (?, ?, ?) ORDER BY id",
-            ("executed", "rejected", "failed"),
+            "SELECT * FROM profile_lifecycle_approvals ORDER BY id"
         ).fetchall()
         for appr in approvals:
             cols = [r["name"] for r in conn.execute(
@@ -596,27 +687,18 @@ def _do_migration_transfer(src_path: Path, tgt_path: Path,
             placeholders = ", ".join("?" for _ in cols)
             col_list = ", ".join(cols)
             conn.execute(
-                "INSERT OR IGNORE INTO tgt.profile_lifecycle_approvals (" + col_list + ") "
+                "INSERT INTO tgt.profile_lifecycle_approvals (" + col_list + ") "
                 "VALUES (" + placeholders + ")", values,
             )
 
-        # tasks (text PK; PRESERVE epic_id; clear runtime state).
+        # tasks (text PK; preserve every supported field exactly). In-flight
+        # task state was explicitly rejected in preflight rather than nulled.
         task_cols = [r["name"] for r in conn.execute("PRAGMA table_info(tasks)").fetchall()]
         for t in src_tasks:
-            values = []
-            for c in task_cols:
-                if c == "id":
-                    continue
-                if c in ("current_run_id", "claim_lock", "claim_expires",
-                         "worker_pid", "last_heartbeat_at"):
-                    values.append(None)
-                else:
-                    values.append(t[c])
             non_id_cols = [c for c in task_cols if c != "id"]
+            values = [t[c] for c in non_id_cols]
             placeholders = ", ".join("?" for _ in non_id_cols)
             col_list = ", ".join(non_id_cols)
-            # Explicit epic handling: preserve source epic_id (carried via
-            # the transferred epic row). Never hide loss behind IGNORE.
             conn.execute(
                 "INSERT INTO tgt.tasks (id, " + col_list + ") VALUES (?, " + placeholders + ")",
                 (t["id"], *values),
@@ -625,7 +707,7 @@ def _do_migration_transfer(src_path: Path, tgt_path: Path,
         # Preserve task_links where BOTH endpoints transferred.
         for l in preserved_links:
             conn.execute(
-                "INSERT OR IGNORE INTO tgt.task_links (parent_id, child_id) VALUES (?, ?)",
+                "INSERT INTO tgt.task_links (parent_id, child_id) VALUES (?, ?)",
                 (l["parent_id"], l["child_id"]),
             )
 
@@ -658,12 +740,13 @@ def _do_migration_transfer(src_path: Path, tgt_path: Path,
     except Exception as exc:
         res["ok"] = False
         res["error"] = str(exc)
-        # Clean any staged target attachment files so a failed copy leaves
-        # no half-written artefacts on the target.
-        for s in staged:
+        # Roll back SQLite first, then remove both still-staged and already
+        # published fixture attachments. Filesystem publication is outside the
+        # SQLite transaction and must be compensated explicitly.
+        for p in (*staged, *published):
             try:
-                if s.exists():
-                    s.unlink()
+                if p.exists() and not p.is_symlink():
+                    p.unlink()
             except OSError:
                 pass
         if conn is not None:
@@ -746,10 +829,15 @@ def _dispose_fixtures(src_path: Path, tgt_path: Path,
     disposed = {"src_db": False, "tgt_db": False, "src_att": False, "tgt_att": False}
     for p, key in ((src_path, "src_db"), (tgt_path, "tgt_db")):
         try:
-            if p.exists():
-                guard_owned_path(root, p)  # safety: only our own files
-                p.unlink()
-                disposed[key] = True
+            removed_main = False
+            for candidate in (p, Path(str(p) + "-wal"), Path(str(p) + "-shm"), Path(str(p) + "-journal")):
+                if candidate.exists():
+                    guard_owned_path(root, candidate)
+                    if candidate.is_symlink():
+                        raise RuntimeError(f"refusing symlink sidecar: {candidate}")
+                    candidate.unlink()
+                    removed_main = removed_main or candidate == p
+            disposed[key] = removed_main
         except OSError:
             pass
     for d, key in ((src_att_root, "src_att"), (tgt_att_root, "tgt_att")):
@@ -797,6 +885,14 @@ def board_transfer_preserving(root: Path) -> Dict[str, Any]:
         tgt_hash_before = _file_hash(tgt_path)
         src_sig_before = _db_content_signature(src_path)
         tgt_sig_before = _db_content_signature(tgt_path)
+        conn_before = sqlite3.connect(str(src_path))
+        try:
+            attachment_hashes_before = [
+                _file_hash(Path(row[0]))
+                for row in conn_before.execute("SELECT stored_path FROM task_attachments ORDER BY id")
+            ]
+        finally:
+            conn_before.close()
         result["src_hash_before"] = src_hash_before
         result["tgt_hash_before"] = tgt_hash_before
 
@@ -865,6 +961,28 @@ def board_transfer_preserving(root: Path) -> Dict[str, Any]:
                 tuple(remapped_run_ids),
             ).fetchone()
             row_invariants["event_run_id_remapped_count"] = ev_rows[0] if ev_rows else 0
+            # Every fixture-owned table must be depleted on source and appear
+            # as an equal count delta on target; FK checks alone do not cover
+            # these relations in the current schema.
+            state_counts = {}
+            for table in _MANIFEST_TABLES:
+                source_before = before_default[table]
+                source_after = after_default[table]
+                target_delta = after_core[table] - before_core[table]
+                state_counts[table] = {
+                    "source_before": source_before,
+                    "source_after": source_after,
+                    "target_delta": target_delta,
+                    "preserved": source_after == 0 and target_delta == source_before,
+                }
+            row_invariants["state_counts"] = state_counts
+            target_attachment_hashes = [
+                _file_hash(Path(row[0]))
+                for row in conn.execute("SELECT stored_path FROM task_attachments ORDER BY id")
+            ]
+            row_invariants["attachment_hashes_preserved"] = (
+                sorted(target_attachment_hashes) == sorted(attachment_hashes_before)
+            )
         finally:
             conn.close()
         result["row_invariants"] = row_invariants
@@ -890,8 +1008,11 @@ def board_transfer_preserving(root: Path) -> Dict[str, Any]:
         invariants_ok = (
             all(v.get("present") for k, v in row_invariants.items()
                 if isinstance(k, str) and k not in (
-                    "epic_transferred", "task_links",
-                    "archived_preserved_count", "event_run_id_remapped_count"))
+                    "epic_transferred", "task_links", "state_counts",
+                    "attachment_hashes_preserved", "archived_preserved_count",
+                    "event_run_id_remapped_count"))
+            and all(v["preserved"] for v in row_invariants.get("state_counts", {}).values())
+            and row_invariants.get("attachment_hashes_preserved", False)
             and row_invariants.get("archived_preserved_count", 0) >= 1
             and row_invariants.get("event_run_id_remapped_count", 0) >= 1
             and row_invariants.get("epic_transferred", {}).get("present")
@@ -1081,8 +1202,8 @@ def main() -> int:
         migration = board_transfer_preserving(root)
 
         # Proof B: fresh fixture (A disposed its own).
-        from hermes_cli import kanban_db as kb
         with owned_env(root):
+            kb = _load_kb()
             kb.init_db(board="default")
             kb.init_db(board="core")
             with kb.connect_closing(board="default") as conn:

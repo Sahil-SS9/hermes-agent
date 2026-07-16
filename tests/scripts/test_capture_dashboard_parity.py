@@ -65,7 +65,7 @@ def test_expected_workflow_statuses():
     assert seed["parity-dash-task"].startswith("review"), \
         f"expected honest review status, got: {seed['parity-dash-task']}"
     # Both render sides agree on 'review'.
-    dash = report["captured_output"]["dashboard_side"]["status_counts"]
+    dash = report["captured_output"]["dashboard_side_after_cli_recompute"]["status_counts"]
     cli = report["captured_output"]["cli_side"]["status_counts"]
     assert dash.get("review", 0) >= 1
     assert cli.get("review", 0) >= 1
@@ -84,30 +84,39 @@ def test_temp_root_cleaned_after_capture():
     assert not leaked, f"capture() leaked temp roots: {leaked}"
 
 
-def test_no_default_repository_write(tmp_path, monkeypatch):
-    """capture() does not write to the repo by default; it returns the dict.
-    An explicit --output is required to write, and that path is honoured."""
+def test_no_default_repository_write_and_safe_explicit_output(tmp_path, monkeypatch):
+    """capture() cannot mutate the tracked artifact; explicit output must be
+    new and outside Hermes data paths."""
     mod = _load_capture()
-    report = mod.capture()
-    assert isinstance(report, dict)
-    assert report["verdict"] == "PARITY-PROVEN-BY-CAPTURE"
-    # The dated tracked report must NOT have been written by capture() alone.
     tracked = REPO_ROOT / "migration" / "evidence" / "2026-07-16" / "P04-dashboard-parity-report.json"
-    # (We don't assert absence globally because the candidate commit may add
-    #  it; we assert capture() itself didn't mutate the repo tree by checking
-    #  it is not created as a side effect of the function call.)
-    before_mtime = tracked.stat().st_mtime if tracked.exists() else None
+    before = tracked.read_bytes() if tracked.exists() else None
+    report = mod.capture()
+    assert report["verdict"] == "PARITY-PROVEN-BY-CAPTURE"
+    assert (tracked.read_bytes() if tracked.exists() else None) == before
 
-    # Explicit --output writes to the requested path only.
     out = tmp_path / "parity-out.json"
-    rc = mod.main.__wrapped__(out) if hasattr(mod.main, "__wrapped__") else None
-    # Drive via argparse by monkeypatching sys.argv.
     monkeypatch.setattr(sys, "argv", ["capture_dashboard_parity.py", "--output", str(out)])
-    rc = mod.main()
-    assert rc == 0
-    assert out.exists()
-    written = json.loads(out.read_text())
-    assert written["verdict"] == "PARITY-PROVEN-BY-CAPTURE"
-    # Tracked report mtime unchanged by capture()/main() (no silent overwrite).
-    if before_mtime is not None:
-        assert tracked.stat().st_mtime == before_mtime
+    assert mod.main() == 0
+    assert json.loads(out.read_text())["verdict"] == "PARITY-PROVEN-BY-CAPTURE"
+
+    # Existing files and live-Hermes paths are non-clobbering hard failures.
+    monkeypatch.setattr(sys, "argv", ["capture_dashboard_parity.py", "--output", str(out)])
+    assert mod.main() == 2
+    live = tmp_path / "live-hermes"
+    live.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(live))
+    dangerous = live / "kanban.db"
+    monkeypatch.setattr(sys, "argv", ["capture_dashboard_parity.py", "--output", str(dangerous)])
+    assert mod.main() == 2
+    assert not dangerous.exists()
+
+
+def test_capture_restores_caller_environment(monkeypatch):
+    """No caller env variable may point at the deleted TemporaryDirectory."""
+    mod = _load_capture()
+    monkeypatch.setenv("HERMES_HOME", "/tmp/caller-home")
+    monkeypatch.setenv("HERMES_KANBAN_HOME", "/tmp/caller-kanban")
+    report = mod.capture()
+    assert report["provenance"]["temp_root_cleaned"] is True
+    assert os.environ["HERMES_HOME"] == "/tmp/caller-home"
+    assert os.environ["HERMES_KANBAN_HOME"] == "/tmp/caller-kanban"

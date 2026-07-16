@@ -37,7 +37,8 @@ import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+# ``scripts/`` is directly under the active repository/worktree root.
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _repo_root() -> Path:
@@ -151,90 +152,118 @@ def _render_dashboard(root: Path) -> dict:
 
 
 def capture() -> dict:
-    """Run the capture against an owned temporary board. Returns the report dict."""
-    tmp = Path(tempfile.mkdtemp(prefix="p04-parity-"))
-    try:
-        os.environ["HERMES_HOME"] = str(tmp)
-        os.environ["HERMES_KANBAN_HOME"] = str(tmp)
-        from hermes_cli import kanban_db as kb
-
-        FULL_TIER_BODY = (
-            "Implement the feature.\n\n"
-            "## Acceptance Criteria\n- behaviour matches spec\n- tests green\n\n"
-            "## Test Plan\n- pytest the focused suite\n"
-        )
+    """Run a hermetic capture and return JSON without changing caller state."""
+    with tempfile.TemporaryDirectory(prefix="p04-parity-") as tmp_name:
+        tmp = Path(tmp_name)
         with owned_env(tmp):
+            # Import only after the fixture environment is active; this avoids
+            # module-level resolution of a caller's live Hermes root.
+            sys.path.insert(0, str(_repo_root()))
+            from hermes_cli import kanban_db as kb
+
+            full_tier_body = (
+                "Implement the feature.\n\n"
+                "## Acceptance Criteria\n- behaviour matches spec\n- tests green\n\n"
+                "## Test Plan\n- pytest the focused suite\n"
+            )
             kb.init_db(board="default")
             conn = kb.connect()
             try:
                 t1 = kb.create_task(conn, title="parity-cli-task", assignee="cli-owner",
-                                    tier="full", body=FULL_TIER_BODY, parents=())
-                kb.claim_task(conn, t1)  # -> running
+                                    tier="full", body=full_tier_body, parents=())
+                kb.claim_task(conn, t1)  # running
                 t2 = kb.create_task(conn, title="parity-dash-task", assignee="dash-owner",
-                                    tier="full", body=FULL_TIER_BODY, parents=())
+                                    tier="full", body=full_tier_body, parents=())
                 kb.claim_task(conn, t2)
                 kb.complete_task(conn, t2, summary="done", result="ok")
-                # full-tier review gate: running -> review (NOT done)
                 conn.commit()
             finally:
                 conn.close()
 
-        cli = _render_cli_list(tmp)
-        dash = _render_dashboard(tmp)
+            # The dashboard is a read view; the CLI handler deliberately runs
+            # recompute_ready(). Record the pre-normalisation view and compare
+            # parity only after that documented CLI normalisation boundary.
+            dash_before = _render_dashboard(tmp)
+            cli = _render_cli_list(tmp)
+            dash = _render_dashboard(tmp)
+            cli_sparse = {k: v for k, v in cli["status_counts"].items() if v}
+            dash_sparse = {k: v for k, v in dash["status_counts"].items() if v}
+            parity_ok = (sorted(cli["ids"]) == sorted(dash["ids"])
+                         and cli_sparse == dash_sparse)
 
-        cli_sparse = {k: v for k, v in cli["status_counts"].items() if v}
-        dash_sparse = {k: v for k, v in dash["status_counts"].items() if v}
-        parity_ok = (sorted(cli["ids"]) == sorted(dash["ids"])
-                     and cli_sparse == dash_sparse)
+            try:
+                import subprocess
+                git_sha = subprocess.run(
+                    ["git", "-C", str(_repo_root()), "rev-parse", "HEAD"],
+                    capture_output=True, text=True,
+                ).stdout.strip()
+            except Exception:
+                git_sha = "unknown"
+            report = {
+                "proof": "P04 dashboard snapshot parity — CLI list handler vs dashboard GET /board",
+                "verdict": "PARITY-PROVEN-BY-CAPTURE" if parity_ok else "PARITY-FAILED",
+                "seed_statuses": {
+                    "parity-cli-task": "running (claimed)",
+                    "parity-dash-task": "review (completed; full-tier review gate, not done)",
+                },
+                "captured_output": {
+                    "dashboard_before_cli_recompute": dash_before,
+                    "cli_side": cli,
+                    "dashboard_side_after_cli_recompute": dash,
+                    "id_set_match": sorted(cli["ids"]) == sorted(dash["ids"]),
+                    "status_counts_match": cli_sparse == dash_sparse,
+                },
+                "provenance": {
+                    "method": "one disposable board; dashboard before/after CLI recompute",
+                    "cli_render_command": cli["source"],
+                    "dashboard_render_command": dash["source"],
+                    "captured_by": "scripts/capture_dashboard_parity.py",
+                    "git_sha": git_sha,
+                },
+                "scope_limits": {
+                    "excludes": ["Android Auto", "voice"],
+                    "does_not_prove": [
+                        "A live dashboard server process reading a live board (TestClient only).",
+                        "Order-independent parity before the CLI's documented recompute_ready mutation.",
+                    ],
+                    "does_prove": [
+                        "After the CLI list handler's documented recompute_ready phase, the CLI and "
+                        "dashboard endpoint return the same task IDs and non-zero status counts for "
+                        "the same disposable board snapshot."
+                    ],
+                },
+            }
+        # TemporaryDirectory has exited only after owned_env restored the exact
+        # caller environment. Report cleanup truthfully after the directory is gone.
+    report["provenance"]["temp_root_cleaned"] = not tmp.exists()
+    return report
 
-        try:
-            import subprocess
-            git_sha = subprocess.run(
-                ["git", "-C", str(_repo_root()), "rev-parse", "HEAD"],
-                capture_output=True, text=True,
-            ).stdout.strip()
-        except Exception:
-            git_sha = "unknown"
 
-        # Honest status reporting: whatever status completion actually
-        # produced is reported (review here, not done).
-        return {
-            "proof": "P04 dashboard parity — CLI (_cmd_list) vs dashboard GET /board",
-            "verdict": "PARITY-PROVEN-BY-CAPTURE" if parity_ok else "PARITY-FAILED",
-            "seed_statuses": {
-                "parity-cli-task": "running (claimed)",
-                "parity-dash-task": "review (completed; full-tier review gate, not done)",
-            },
-            "captured_output": {
-                "cli_side": cli,
-                "dashboard_side": dash,
-                "id_set_match": sorted(cli["ids"]) == sorted(dash["ids"]),
-                "status_counts_match": cli_sparse == dash_sparse,
-            },
-            "provenance": {
-                "method": "single disposable board; rendered twice from same SQLite source",
-                "cli_render_command": cli["source"],
-                "dashboard_render_command": dash["source"],
-                "captured_by": "scripts/capture_dashboard_parity.py",
-                "git_sha": git_sha,
-                "temp_root_cleaned": True,
-            },
-            "scope_limits": {
-                "excludes": ["Android Auto", "voice"],
-                "does_not_prove": [
-                    "A live dashboard server process reading a live board "
-                    "(capture uses a TestClient against the plugin router).",
-                ],
-                "does_prove": [
-                    "The dashboard /board endpoint and the CLI _cmd_list path read "
-                    "the same tasks table and bucket by the same status set, so each "
-                    "task's column in the dashboard equals its status as reported by "
-                    "the CLI list path.",
-                ],
-            },
-        }
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+def _is_under(root: Path, path: Path) -> bool:
+    try:
+        path.resolve(strict=False).relative_to(root.resolve())
+    except ValueError:
+        return False
+    return True
+
+
+def _safe_output_path(raw: str) -> Path:
+    """Accept only a new, non-symlink report outside Hermes data roots."""
+    out = Path(raw).expanduser()
+    if out.exists() or out.is_symlink():
+        raise ValueError(f"refusing to overwrite existing or symlinked output: {out}")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    if out.parent.is_symlink():
+        raise ValueError(f"refusing symlinked output directory: {out.parent}")
+    resolved = out.resolve(strict=False)
+    protected = [Path.home() / ".hermes"]
+    for key in ("HERMES_HOME", "HERMES_KANBAN_HOME", "HERMES_KANBAN_DB", "HERMES_KANBAN_ATTACHMENTS_ROOT"):
+        value = os.environ.get(key)
+        if value:
+            protected.append(Path(value))
+    if any(_is_under(root, resolved) or _is_under(resolved, root) for root in protected):
+        raise ValueError(f"refusing output under Hermes data path: {resolved}")
+    return resolved
 
 
 def main():
@@ -246,8 +275,11 @@ def main():
     report = capture()
     text = json.dumps(report, indent=2)
     if args.output:
-        out = Path(args.output)
-        out.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            out = _safe_output_path(args.output)
+        except ValueError as exc:
+            print(f"refused output: {exc}", file=sys.stderr)
+            return 2
         out.write_text(text + "\n", encoding="utf-8")
         print(f"wrote report to {out} (verdict={report['verdict']})")
     else:

@@ -139,6 +139,10 @@ def test_proof_a_full_migration_preserves_all_states(owned_root):
                for l in links)
     assert res["fk_default"] == []
     assert res["fk_core"] == []
+    # Explicit row-class preservation, not merely FK integrity: comments,
+    # subscriptions, approvals and attachments all move as equal deltas.
+    assert all(v["preserved"] for v in ri["state_counts"].values()), ri["state_counts"]
+    assert ri["attachment_hashes_preserved"] is True
 
 
 def test_proof_a_remaps_colliding_integer_pks_and_run_id(owned_root):
@@ -212,23 +216,17 @@ def test_proof_a_disposes_disposable_fixtures(owned_root):
     assert not kb.kanban_db_path(board="default").exists(), "default DB leaked"
 
 
-def test_proof_a_refuses_unowned_root():
-    """guard_owned_root rejects a root without the ownership marker and a
-    root that is not under the system temp dir."""
+def test_proof_a_refuses_unowned_root(tmp_path):
+    """A marker file is not enough: only roots registered by make_owned_root
+    in this process are accepted, and this test stays entirely under tmp_path."""
     mod = _load_proof()
-    # A real path with no marker must be refused.
     with pytest.raises(RuntimeError):
         mod.guard_owned_root(REPO_ROOT)
-    # A path outside tempdir must be refused.
-    outside = REPO_ROOT / "not_a_temp_root"
-    outside.mkdir(exist_ok=True)
-    try:
-        (outside / ".p04_owned_root").write_text("x\n")
-        with pytest.raises(RuntimeError):
-            mod.guard_owned_root(outside)
-    finally:
-        import shutil
-        shutil.rmtree(outside, ignore_errors=True)
+    forged = tmp_path / "forged-root"
+    forged.mkdir()
+    (forged / ".p04_owned_root").write_text("forged\n")
+    with pytest.raises(RuntimeError):
+        mod.guard_owned_root(forged)
 
 
 def test_proof_a_hostile_env_sentinel_unchanged(owned_root, tmp_path):
@@ -293,11 +291,13 @@ def test_proof_a_failure_after_attachment_copy_rolls_back(owned_root, monkeypatc
     src_sig_before = mod._db_content_signature(src_path)
     tgt_sig_before = mod._db_content_signature(tgt_path)
 
-    # Force _validate_attachment to raise (simulating a bad source file) so
-    # the transfer aborts during attachment handling and must roll back.
-    def _bad_validate(stored_path, src_root):
-        raise RuntimeError("injected attachment validation failure")
-    monkeypatch.setattr(mod, "_validate_attachment", _bad_validate)
+    # Inject a failure AFTER the staged bytes are published. This proves the
+    # compensation path removes published files, not merely pre-copy stages.
+    original_publish = mod._publish_attachment
+    def _publish_then_fail(stage, target):
+        original_publish(stage, target)
+        raise RuntimeError("injected post-publication failure")
+    monkeypatch.setattr(mod, "_publish_attachment", _publish_then_fail)
 
     res = mod._do_migration_transfer(src_path, tgt_path, src_att, tgt_att)
     # Transfer must fail cleanly (no partial mutation).
@@ -309,6 +309,73 @@ def test_proof_a_failure_after_attachment_copy_rolls_back(owned_root, monkeypatc
     if tgt_att.exists():
         stray = list(tgt_att.rglob("*.stage"))
         assert not stray, f"stray staged attachment left on target: {stray}"
+
+
+def test_proof_a_rejects_pending_approval_without_mutation(owned_root):
+    """Pending/approved lifecycle state is explicitly unsupported, never lost."""
+    mod = _load_proof()
+    fixture = mod.seed_full_fixture(owned_root)
+    from hermes_cli import kanban_db as kb
+    src_path = kb.kanban_db_path(board="default")
+    tgt_path = kb.kanban_db_path(board="core")
+    with kb.connect_closing(board="default") as conn:
+        conn.execute(
+            "INSERT INTO profile_lifecycle_approvals "
+            "(id, task_id, op, profile, args_json, status, token, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            ("pending-proof", fixture["tasks"]["T1"], "create", "p", "{}", "pending", "tok", 1),
+        )
+        conn.commit()
+    src_before = mod._db_content_signature(src_path)
+    tgt_before = mod._db_content_signature(tgt_path)
+    result = mod._do_migration_transfer(src_path, tgt_path, kb.attachments_root(board="default"), kb.attachments_root(board="core"))
+    assert result["ok"] is False
+    assert "unsupported lifecycle approval" in result["error"]
+    assert mod._db_content_signature(src_path) == src_before
+    assert mod._db_content_signature(tgt_path) == tgt_before
+
+
+def test_proof_a_rejects_inflight_task_without_mutation(owned_root):
+    """In-flight task/run pointers are rejected instead of silently nulled."""
+    mod = _load_proof()
+    mod.seed_full_fixture(owned_root)
+    from hermes_cli import kanban_db as kb
+    src_path = kb.kanban_db_path(board="default")
+    tgt_path = kb.kanban_db_path(board="core")
+    with kb.connect_closing(board="default") as conn:
+        tid = kb.create_task(conn, title="inflight", assignee="worker")
+        kb.claim_task(conn, tid)
+        conn.commit()
+    src_before = mod._db_content_signature(src_path)
+    tgt_before = mod._db_content_signature(tgt_path)
+    result = mod._do_migration_transfer(src_path, tgt_path, kb.attachments_root(board="default"), kb.attachments_root(board="core"))
+    assert result["ok"] is False
+    assert "unsupported in-flight" in result["error"]
+    assert mod._db_content_signature(src_path) == src_before
+    assert mod._db_content_signature(tgt_path) == tgt_before
+
+
+def test_proof_a_rejects_target_epic_conflict_without_mutation(owned_root):
+    """Conflicting text IDs are preflight errors, never INSERT OR IGNORE loss."""
+    mod = _load_proof()
+    fixture = mod.seed_full_fixture(owned_root)
+    from hermes_cli import kanban_db as kb
+    src_path = kb.kanban_db_path(board="default")
+    tgt_path = kb.kanban_db_path(board="core")
+    with kb.connect_closing(board="core") as conn:
+        conn.execute(
+            "INSERT INTO epics (id,title,description,board_slug,status,created_at,updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (fixture["epic_id"], "conflict", "different", "core", "active", 1, 1),
+        )
+        conn.commit()
+    src_before = mod._db_content_signature(src_path)
+    tgt_before = mod._db_content_signature(tgt_path)
+    result = mod._do_migration_transfer(src_path, tgt_path, kb.attachments_root(board="default"), kb.attachments_root(board="core"))
+    assert result["ok"] is False
+    assert "target epic conflict" in result["error"]
+    assert mod._db_content_signature(src_path) == src_before
+    assert mod._db_content_signature(tgt_path) == tgt_before
 
 
 def test_proof_b_single_task_move(owned_root):
