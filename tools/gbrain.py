@@ -24,6 +24,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -307,6 +308,58 @@ GBRAIN_PUT_SCHEMA = {
 }
 
 
+def _ensure_owner_only_directory(root: Path, directory: Path) -> None:
+    """Create missing descendants of ``root`` without following symlinks."""
+    relative = directory.relative_to(root)
+    current = root
+    for part in relative.parts:
+        current = current / part
+        try:
+            current.lstat()
+        except FileNotFoundError:
+            current.mkdir(mode=0o700)
+            current.lstat()
+        if current.is_symlink() or not current.is_dir():
+            raise ValueError(f"unsafe GBrain directory component: {current}")
+        # Existing Brain directories intentionally remain at the accepted 750
+        # policy. Newly-created directories are owner-only 700.
+
+
+def _atomic_write_owner_only(target: Path, content: str) -> None:
+    """Durably replace ``target`` using a same-directory mode-600 temp file."""
+    fd = -1
+    temp_path: Path | None = None
+    try:
+        fd, temp_name = tempfile.mkstemp(
+            prefix=".gbrain-", suffix=".tmp", dir=str(target.parent)
+        )
+        temp_path = Path(temp_name)
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            fd = -1  # ownership transferred to ``handle``
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, target)
+        temp_path = None
+        directory_fd = os.open(
+            target.parent,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+        )
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        if temp_path is not None:
+            try:
+                temp_path.unlink()
+            except FileNotFoundError:
+                pass
+
+
 def gbrain_put(args: dict, **_: Any) -> str:
     slug = str(args.get("slug", "")).strip().removesuffix(".md")
     content = str(args.get("content", ""))
@@ -314,12 +367,21 @@ def gbrain_put(args: dict, **_: Any) -> str:
         return tool_error("slug is required")
     if not content.strip():
         return tool_error("content is required")
-    target = (GBRAIN_REPO / f"{slug}.md").resolve()
     repo_root = GBRAIN_REPO.resolve()
-    if repo_root not in target.parents:
+    slug_path = Path(slug)
+    if slug_path.is_absolute() or any(part in ("", ".", "..") for part in slug_path.parts):
         return tool_error("slug must resolve under the GBrain repo")
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(content, encoding="utf-8")
+    target = repo_root / f"{slug}.md"
+    try:
+        target.relative_to(repo_root)
+        _ensure_owner_only_directory(repo_root, target.parent)
+    except (OSError, ValueError):
+        return tool_error("slug must resolve under the GBrain repo without symlinks")
+    if target.is_symlink():
+        return tool_error("slug must not resolve through a symlink")
+    if target.exists() and not target.is_file():
+        return tool_error("target page must be a regular file")
+    _atomic_write_owner_only(target, content)
     return tool_result({"status": "ok", "slug": slug, "path": str(target)})
 
 
