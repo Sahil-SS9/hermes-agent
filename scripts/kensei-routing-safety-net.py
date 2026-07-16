@@ -22,13 +22,13 @@ HERMES_HOME = os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes"))
 STALE_READY_HOURS = 4
 STALE_BLOCKED_HOURS = 24
 
-BOARDS = {
-    "default": os.path.join(HERMES_HOME, "kanban.db"),
-    "ops": os.path.join(HERMES_HOME, "kanban", "boards", "ops", "kanban.db"),
-    "research": os.path.join(HERMES_HOME, "kanban", "boards", "research", "kanban.db"),
-    "apps": os.path.join(HERMES_HOME, "kanban", "boards", "apps", "kanban.db"),
-    "content-lead": os.path.join(HERMES_HOME, "kanban", "boards", "content-lead", "kanban.db"),
-}
+# W1-G (Batch 1): board DB identities resolved via _board_compat so retired
+# slugs (default->core, ops->security-ops, content-lead->content) map to the
+# current canonical DB path. Semantic board labels (keys) are preserved.
+import _board_compat
+BOARDS = {slug: str(path) for slug, path in _board_compat.build_board_db_map([
+    "default", "ops", "research", "apps", "content-lead",
+]).items()}
 
 # Assignees that are real automation profiles (expected to auto-pick work).
 KNOWN_BOT_PROFILES = {

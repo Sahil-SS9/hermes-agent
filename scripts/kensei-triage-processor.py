@@ -22,12 +22,14 @@ try:
 except ImportError:
     write_lock = None
 
-# Configuration
+# W1-G (Batch 1): board DB identities resolved via _board_compat so retired
+# slugs (default->core, ops->security-ops, content-lead->content) map to the
+# current canonical DB path. Semantic board labels preserved: BOARDS keeps
+# the legacy slugs for CLI routing; _get_board_db resolves to the live DB.
+import _board_compat
 BOARDS = ['ops', 'research', 'apps', 'content-lead', 'default']
 STATE_FILE = '/home/kensei/.hermes/data/triage-state.json'
 PENDING_FILE = '/home/kensei/.hermes/data/pending-investigation.json'
-DB_PATH_BASE = '/home/kensei/.hermes/kanban/boards/'
-DEFAULT_DB = '/home/kensei/.hermes/kanban.db'
 
 # WS-2 board routing: keyword → board + assignee mapping derived
 # from governance/routing/goal-subgoal-routing-map.md
@@ -73,10 +75,8 @@ def _route_task(title, body):
     return None, None
 
 def _get_board_db(board):
-    """Get the db_path for a board slug."""
-    if board == 'default':
-        return DEFAULT_DB
-    return os.path.join(DB_PATH_BASE, board, 'kanban.db')
+    """Get the db_path for a board slug via _board_compat (reversible legacy fallback)."""
+    return _board_compat.resolve_board_db_str(board)
 
 
 def _set_task_tier(board, task_id, tier):

@@ -27,13 +27,13 @@ HERMES_HOME = Path(os.environ.get("HERMES_HOME", "/home/kensei/.hermes"))
 OUT_DIR = HERMES_HOME / "governance" / "logboard"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-BOARDS = {
-    "default": HERMES_HOME / "kanban.db",
-    "apps": HERMES_HOME / "kanban" / "boards" / "apps" / "kanban.db",
-    "content-lead": HERMES_HOME / "kanban" / "boards" / "content-lead" / "kanban.db",
-    "ops": HERMES_HOME / "kanban" / "boards" / "ops" / "kanban.db",
-    "research": HERMES_HOME / "kanban" / "boards" / "research" / "kanban.db",
-}
+# W1-G (Batch 1): board DB identities resolved via _board_compat so retired
+# slugs (default->core, ops->security-ops, content-lead->content) map to the
+# current canonical DB path. Semantic board labels (keys) are preserved.
+import _board_compat
+BOARDS = _board_compat.build_board_db_map([
+    "default", "apps", "content-lead", "ops", "research",
+])
 
 TZ = dt.timezone(dt.timedelta(hours=1))
 now = dt.datetime.now(TZ)

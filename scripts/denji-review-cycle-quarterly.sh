@@ -1,4 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 # Wrapper: quarterly denji profile review cycle.
-exec /home/kensei/.hermes/scripts/denji-review-cycle.sh --cycle quarterly "$@"
+# Separated so the cron scheduler can call it without arguments.
+#
+# W1-R (Batch 1): exec canonical repository-relative scripts/denji-review-cycle.py
+# with --cycle quarterly, rather than absent ~/.hermes/scripts/denji-review-cycle.sh.
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+exec python3 "${SCRIPT_DIR}/denji-review-cycle.py" --cycle quarterly "$@"

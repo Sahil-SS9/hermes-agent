@@ -10,6 +10,7 @@ and emits:
 """
 from __future__ import annotations
 
+import os
 import datetime as dt
 import json
 import sqlite3
@@ -19,12 +20,17 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-HERMES_HOME = Path("/home/kensei/.hermes")
+HERMES_HOME = Path(os.environ.get("HERMES_HOME", "/home/kensei/.hermes"))
+# W1-G (Batch 1): board DB identities resolved via _board_compat so retired
+# slugs (default->core, ops->security-ops, content-lead->content) map to the
+# current canonical DB path. Semantic board labels preserved for reporting.
+import _board_compat
 # Canonical default board DB. Do not include ~/.hermes/kanban/kanban.db: on this
 # VPS that path exists as an empty placeholder and would create noisy false
 # warnings. Named boards are scanned from BOARDS_DIR below.
-DEFAULT_DBS = [HERMES_HOME / "kanban.db"]
+DEFAULT_DBS = [_board_compat.resolve_board_db("default")]
 BOARDS_DIR = HERMES_HOME / "kanban" / "boards"
+# Legacy slugs kept as labels; discover_dbs resolves them via _board_compat.
 REQUIRED_BOARDS = ("ops", "research", "apps", "content-lead")
 SMOKE_FIXTURE_TASK_IDS = ("t_9c935bab", "t_e4032b4b", "t_ea2483cd")
 OUT_DIR = HERMES_HOME / "governance" / "logboard"
@@ -70,7 +76,8 @@ def discover_dbs() -> list[dict[str, Any]]:
     for path in DEFAULT_DBS:
         candidates.append(("default", path))
     for board in REQUIRED_BOARDS:
-        candidates.append((board, BOARDS_DIR / board / "kanban.db"))
+        # W1-G: resolve each (possibly legacy) slug to its live DB path.
+        candidates.append((board, _board_compat.resolve_board_db(board)))
 
     # Scan profile-scoped boards (e.g. dezzy/ops, wesker/default) so that
     # task run/status drift across all profiles is caught, not just canonical boards.

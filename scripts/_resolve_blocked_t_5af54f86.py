@@ -4,7 +4,7 @@
 Uses the canonical kanban_db library (source of truth) directly on the
 physical DB paths, because the board metadata in list_boards() is stale
 (all boards point at research/kanban.db) and the CLI cannot resolve tasks
-that live in kanban.db (root) or boards/ops/kanban.db.
+that live in the legacy root DB or the retired ops board DB.
 
 Actions (per parent audit t_395fb37e / blocked-task-audit.md):
   1. t_5a4835af (root)   - reassign light-archivist -> octacon (role-forbidden
@@ -25,8 +25,11 @@ os.environ.setdefault("HERMES_HOME", "/home/kensei/.hermes")
 from hermes_cli import kanban_db as kb
 
 HERMES = "/home/kensei/.hermes"
-DEFAULT_DB = os.path.join(HERMES, "kanban.db")
-OPS_DB = os.path.join(HERMES, "kanban", "boards", "ops", "kanban.db")
+# W1-G (Batch 1): resolve retired board DB identities via _board_compat.
+# default->core, ops->security-ops (reversible: legacy path used if present).
+import _board_compat
+DEFAULT_DB = _board_compat.resolve_board_db_str("default")
+OPS_DB = _board_compat.resolve_board_db_str("ops")
 AUTHOR = "kensei-ops-resolver"
 NOW = int(time.time())
 
@@ -89,7 +92,7 @@ def main():
     finally:
         c.close()
 
-    # ---- OPS board (boards/ops/kanban.db) ----
+    # ---- OPS board (resolved via _board_compat; retired ops -> security-ops) ----
     c = _connect(OPS_DB)
     try:
         for tid in ("t_5f038f9f", "t_6c12d09c", "t_a17972a3", "t_eea200d7", "t_96031361"):

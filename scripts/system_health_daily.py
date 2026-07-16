@@ -384,11 +384,11 @@ def check_gateway() -> dict | None:
 
 
 def check_kanban() -> dict | None:
-    boards = {"ops": HERMES / "kanban" / "boards" / "ops" / "kanban.db",
-              "research": HERMES / "kanban" / "boards" / "research" / "kanban.db",
-              "apps": HERMES / "kanban" / "boards" / "apps" / "kanban.db",
-              "content-lead": HERMES / "kanban" / "boards" / "content-lead" / "kanban.db",
-              "default": HERMES / "kanban.db"}
+    # W1-G (Batch 1): board DB identities resolved via _board_compat.
+    import _board_compat
+    boards = {slug: str(p) for slug, p in _board_compat.build_board_db_map([
+        "ops", "research", "apps", "content-lead", "default",
+    ]).items()}
 
     triage_total = 0
     blocked_total = 0
@@ -440,10 +440,10 @@ def check_kanban() -> dict | None:
 
 def check_wfa_live() -> dict | None:
     """Worker Failure Analysis — live tasks only. Historical drift ignored."""
-    boards_dir = HERMES / "kanban" / "boards"
-    dbs = [("default", HERMES / "kanban.db")]
-    for b in ["ops", "research", "apps", "content-lead"]:
-        dbs.append((b, boards_dir / b / "kanban.db"))
+    # W1-G (Batch 1): board DB identities resolved via _board_compat.
+    import _board_compat
+    _wfa_slugs = ["default", "ops", "research", "apps", "content-lead"]
+    dbs = [(s, _board_compat.resolve_board_db(s)) for s in _wfa_slugs]
 
     live_findings = []
     for board, db_path in dbs:
