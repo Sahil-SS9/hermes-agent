@@ -1,30 +1,41 @@
 {
-  "proof": "P04 dashboard parity \u2014 CLI (_cmd_list) vs dashboard GET /board",
+  "proof": "P04 dashboard snapshot parity \u2014 CLI list handler vs dashboard GET /board",
   "verdict": "PARITY-PROVEN-BY-CAPTURE",
   "seed_statuses": {
     "parity-cli-task": "running (claimed)",
     "parity-dash-task": "review (completed; full-tier review gate, not done)"
   },
   "captured_output": {
+    "dashboard_before_cli_recompute": {
+      "status_counts": {
+        "running": 1,
+        "review": 1
+      },
+      "ids": [
+        "t_9dfe5427",
+        "t_aaf9701f"
+      ],
+      "source": "plugins/kanban/dashboard/plugin_api.py::get_board (TestClient)"
+    },
     "cli_side": {
       "status_counts": {
         "running": 1,
         "review": 1
       },
       "ids": [
-        "t_8f42a8b4",
-        "t_d1af1416"
+        "t_9dfe5427",
+        "t_aaf9701f"
       ],
       "source": "hermes_cli.kanban._cmd_list (incl. recompute_ready)"
     },
-    "dashboard_side": {
+    "dashboard_side_after_cli_recompute": {
       "status_counts": {
         "running": 1,
         "review": 1
       },
       "ids": [
-        "t_8f42a8b4",
-        "t_d1af1416"
+        "t_9dfe5427",
+        "t_aaf9701f"
       ],
       "source": "plugins/kanban/dashboard/plugin_api.py::get_board (TestClient)"
     },
@@ -32,11 +43,11 @@
     "status_counts_match": true
   },
   "provenance": {
-    "method": "single disposable board; rendered twice from same SQLite source",
+    "method": "one disposable board; dashboard before/after CLI recompute",
     "cli_render_command": "hermes_cli.kanban._cmd_list (incl. recompute_ready)",
     "dashboard_render_command": "plugins/kanban/dashboard/plugin_api.py::get_board (TestClient)",
     "captured_by": "scripts/capture_dashboard_parity.py",
-    "git_sha": "fe6df7aae4161617aaac8c694cc757e3397227ea",
+    "git_sha": "e1f679229f9baa1eef63f71c322a7e840612702c",
     "temp_root_cleaned": true
   },
   "scope_limits": {
@@ -45,10 +56,11 @@
       "voice"
     ],
     "does_not_prove": [
-      "A live dashboard server process reading a live board (capture uses a TestClient against the plugin router)."
+      "A live dashboard server process reading a live board (TestClient only).",
+      "Order-independent parity before the CLI's documented recompute_ready mutation."
     ],
     "does_prove": [
-      "The dashboard /board endpoint and the CLI _cmd_list path read the same tasks table and bucket by the same status set, so each task's column in the dashboard equals its status as reported by the CLI list path."
+      "After the CLI list handler's documented recompute_ready phase, the CLI and dashboard endpoint return the same task IDs and non-zero status counts for the same disposable board snapshot."
     ]
   }
 }
