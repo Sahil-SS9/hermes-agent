@@ -30,6 +30,7 @@ import argparse
 import importlib.util
 import json
 import os
+import secrets
 import shutil
 import sqlite3
 import sys
@@ -60,10 +61,36 @@ _OVERRIDE_ENV_KEYS = (
     "HERMES_KANBAN_ATTACHMENTS_ROOT", "HERMES_KANBAN_WORKSPACES_ROOT",
     "HERMES_KANBAN_BOARD",
 )
+_OWNERSHIP_MARKER = ".p04_capture_owned_root"
+_registry = getattr(sys, "_p04_capture_root_tokens", None)
+if _registry is None:
+    _registry = {}
+    setattr(sys, "_p04_capture_root_tokens", _registry)
+_OWNED_ROOT_TOKENS = _registry
+
+
+def _register_owned_root(root: Path) -> Path:
+    root = root.resolve()
+    token = secrets.token_urlsafe(32)
+    (root / _OWNERSHIP_MARKER).write_text(token + "\n", encoding="utf-8")
+    _OWNED_ROOT_TOKENS[root] = token
+    return root
+
+
+def _guard_owned_root(root: Path) -> Path:
+    root = root.resolve()
+    marker = root / _OWNERSHIP_MARKER
+    token = _OWNED_ROOT_TOKENS.get(root)
+    if token is None or marker.is_symlink() or not marker.is_file():
+        raise RuntimeError(f"refusing unowned capture root: {root}")
+    if marker.read_text(encoding="utf-8").strip() != token:
+        raise RuntimeError(f"refusing invalid capture root: {root}")
+    return root
 
 
 @contextmanager
 def owned_env(root: Path):
+    root = _guard_owned_root(root)
     saved = {k: os.environ.get(k) for k in _OVERRIDE_ENV_KEYS}
     for k in _OVERRIDE_ENV_KEYS:
         os.environ.pop(k, None)
@@ -154,7 +181,7 @@ def _render_dashboard(root: Path) -> dict:
 def capture() -> dict:
     """Run a hermetic capture and return JSON without changing caller state."""
     with tempfile.TemporaryDirectory(prefix="p04-parity-") as tmp_name:
-        tmp = Path(tmp_name)
+        tmp = _register_owned_root(Path(tmp_name))
         with owned_env(tmp):
             # Import only after the fixture environment is active; this avoids
             # module-level resolution of a caller's live Hermes root.
@@ -248,22 +275,51 @@ def _is_under(root: Path, path: Path) -> bool:
 
 
 def _safe_output_path(raw: str) -> Path:
-    """Accept only a new, non-symlink report outside Hermes data roots."""
+    """Accept a new report path outside Hermes data roots without side effects."""
     out = Path(raw).expanduser()
-    if out.exists() or out.is_symlink():
-        raise ValueError(f"refusing to overwrite existing or symlinked output: {out}")
-    out.parent.mkdir(parents=True, exist_ok=True)
-    if out.parent.is_symlink():
-        raise ValueError(f"refusing symlinked output directory: {out.parent}")
-    resolved = out.resolve(strict=False)
     protected = [Path.home() / ".hermes"]
-    for key in ("HERMES_HOME", "HERMES_KANBAN_HOME", "HERMES_KANBAN_DB", "HERMES_KANBAN_ATTACHMENTS_ROOT"):
+    for key in (
+        "HERMES_HOME", "HERMES_KANBAN_HOME", "HERMES_KANBAN_DB",
+        "HERMES_KANBAN_ATTACHMENTS_ROOT", "HERMES_KANBAN_WORKSPACES_ROOT",
+    ):
         value = os.environ.get(key)
         if value:
             protected.append(Path(value))
+    prospective = out.resolve(strict=False)
+    if any(_is_under(root, prospective) or _is_under(prospective, root) for root in protected):
+        raise ValueError(f"refusing output under Hermes data path: {prospective}")
+    if out.exists() or out.is_symlink():
+        raise ValueError(f"refusing to overwrite existing or symlinked output: {out}")
+    # Do not create a parent until its prospective location is checked above.
+    out.parent.mkdir(parents=True, exist_ok=True)
+    for parent in (out.parent, *out.parent.parents):
+        if parent.is_symlink():
+            raise ValueError(f"refusing symlinked output directory: {parent}")
+    resolved = out.resolve(strict=False)
     if any(_is_under(root, resolved) or _is_under(resolved, root) for root in protected):
         raise ValueError(f"refusing output under Hermes data path: {resolved}")
     return resolved
+
+
+def _write_new_output(out: Path, text: str) -> None:
+    """Atomically create a new report; never truncate an existing file."""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(out, flags, 0o600)
+    except FileExistsError as exc:
+        raise ValueError(f"refusing to overwrite existing output: {out}") from exc
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+    except Exception:
+        try:
+            out.unlink(missing_ok=True)
+        finally:
+            raise
 
 
 def main():
@@ -280,7 +336,11 @@ def main():
         except ValueError as exc:
             print(f"refused output: {exc}", file=sys.stderr)
             return 2
-        out.write_text(text + "\n", encoding="utf-8")
+        try:
+            _write_new_output(out, text)
+        except ValueError as exc:
+            print(f"refused output: {exc}", file=sys.stderr)
+            return 2
         print(f"wrote report to {out} (verdict={report['verdict']})")
     else:
         print(text)

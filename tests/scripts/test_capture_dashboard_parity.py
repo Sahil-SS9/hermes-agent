@@ -109,6 +109,20 @@ def test_no_default_repository_write_and_safe_explicit_output(tmp_path, monkeypa
     monkeypatch.setattr(sys, "argv", ["capture_dashboard_parity.py", "--output", str(dangerous)])
     assert mod.main() == 2
     assert not dangerous.exists()
+    workspace = tmp_path / "live-workspaces"
+    workspace.mkdir()
+    monkeypatch.setenv("HERMES_KANBAN_WORKSPACES_ROOT", str(workspace))
+    nested_danger = workspace / "must-not-exist" / "report.json"
+    monkeypatch.setattr(sys, "argv", ["capture_dashboard_parity.py", "--output", str(nested_danger)])
+    assert mod.main() == 2
+    assert not nested_danger.parent.exists()
+
+
+def test_capture_helpers_reject_unowned_root(tmp_path):
+    mod = _load_capture()
+    with pytest.raises(RuntimeError, match="refusing unowned capture root"):
+        with mod.owned_env(tmp_path):
+            pass
 
 
 def test_capture_restores_caller_environment(monkeypatch):

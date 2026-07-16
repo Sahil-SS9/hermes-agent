@@ -132,12 +132,27 @@ def guard_owned_root(root: Path) -> None:
 
 
 def guard_owned_path(root: Path, path: Path, *, must_exist: bool = True) -> Path:
-    """Ensure path resolves under the owned root; reject symlink escape."""
-    if must_exist and not path.exists():
+    """Ensure an existing-or-new path is lexically and physically owned.
+
+    Symlinks are rejected at every component, even if they resolve back inside
+    the fixture root; the proof contract forbids symlinked destructive paths.
+    """
+    root = root.resolve()
+    raw = path.absolute()
+    try:
+        relative = raw.relative_to(root)
+    except ValueError as exc:
+        raise RuntimeError(f"refusing path outside owned root: {path} (root {root})") from exc
+    cursor = root
+    for part in relative.parts:
+        cursor = cursor / part
+        if cursor.is_symlink():
+            raise RuntimeError(f"refusing symlinked owned path: {cursor}")
+    if must_exist and not raw.exists():
         raise RuntimeError(f"refusing missing path: {path}")
-    if not _is_under(root, path):
+    if not _is_under(root, raw):
         raise RuntimeError(f"refusing path outside owned root: {path} (root {root})")
-    return path
+    return raw
 
 
 @contextmanager
@@ -411,6 +426,8 @@ def _max_int_pk(conn, schema: str, table: str) -> int:
 def _validate_attachment(stored_path: Path, src_root: Path) -> Dict[str, Any]:
     """Attachment safety: must be a regular file, under the source root,
     with a real size and SHA-256. Rejects symlinks / escapes."""
+    if stored_path.is_symlink():
+        raise RuntimeError(f"attachment symlink rejected: {stored_path}")
     if not stored_path.exists():
         raise RuntimeError(f"attachment missing: {stored_path}")
     if not stored_path.is_file():
@@ -446,7 +463,8 @@ def _preflight_transfer(conn: sqlite3.Connection, src_epic_ids: List[str],
     if inflight:
         raise RuntimeError(f"unsupported in-flight task: {inflight['id']}")
     active_run = conn.execute(
-        "SELECT id FROM task_runs WHERE status IN (?, ?) LIMIT 1", ("running", "claimed"),
+        "SELECT id FROM task_runs WHERE status IN (?, ?) OR ended_at IS NULL LIMIT 1",
+        ("running", "claimed"),
     ).fetchone()
     if active_run:
         raise RuntimeError(f"unsupported in-flight run: {active_run['id']}")
@@ -484,8 +502,8 @@ def _preflight_transfer(conn: sqlite3.Connection, src_epic_ids: List[str],
             raise RuntimeError("target task-link conflict")
 
 
-def _do_migration_transfer(src_path: Path, tgt_path: Path,
-                            src_att_root: Path, tgt_att_root: Path) -> Dict[str, Any]:
+def _do_migration_transfer(root: Path, src_path: Path, tgt_path: Path,
+                           src_att_root: Path, tgt_att_root: Path) -> Dict[str, Any]:
     """The true default->core migration: transfer ALL source tasks + rows.
 
     Preserves epic_id (transfers the epic row, re-boarded to target) and
@@ -498,6 +516,9 @@ def _do_migration_transfer(src_path: Path, tgt_path: Path,
     SHA-256) and staged to a sibling temp file; on copy failure the staged
     target is removed and the source/target manifests are left unchanged.
     """
+    guard_owned_root(root)
+    for path in (src_path, tgt_path, src_att_root, tgt_att_root):
+        guard_owned_path(root, path, must_exist=path in (src_path, tgt_path))
     res: Dict[str, Any] = {"ok": False}
     now = int(time.time())
     conn = None
@@ -905,7 +926,7 @@ def board_transfer_preserving(root: Path) -> Dict[str, Any]:
         result["tgt_content_unchanged_after_fail"] = tgt_sig_before == _db_content_signature(tgt_path)
         result["pointer_unchanged_after_fail"] = failure_res["pointer_untouched"]
 
-        transfer_res = _do_migration_transfer(src_path, tgt_path, src_att_root, tgt_att_root)
+        transfer_res = _do_migration_transfer(root, src_path, tgt_path, src_att_root, tgt_att_root)
         result["transfer"] = transfer_res
 
         after_default = manifest("default", src_path)
@@ -1036,7 +1057,9 @@ def _exercise_pointer(kb, root: Path, original: Optional[str]) -> Dict[str, Any]
     a real transition, performs the transition, then restores the EXACT
     prior state (including the original absent-file condition).
     """
-    p = root / "kanban" / "current"
+    p = guard_owned_path(root, root / "kanban" / "current", must_exist=False)
+    if p.is_symlink():
+        raise RuntimeError(f"refusing symlinked pointer: {p}")
     before = {
         "present": p.exists(),
         "bytes": p.read_bytes() if p.exists() else b"",

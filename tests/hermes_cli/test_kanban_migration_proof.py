@@ -299,7 +299,7 @@ def test_proof_a_failure_after_attachment_copy_rolls_back(owned_root, monkeypatc
         raise RuntimeError("injected post-publication failure")
     monkeypatch.setattr(mod, "_publish_attachment", _publish_then_fail)
 
-    res = mod._do_migration_transfer(src_path, tgt_path, src_att, tgt_att)
+    res = mod._do_migration_transfer(owned_root, src_path, tgt_path, src_att, tgt_att)
     # Transfer must fail cleanly (no partial mutation).
     assert res["ok"] is False
     # Source + target content must be unchanged (rollback).
@@ -309,6 +309,16 @@ def test_proof_a_failure_after_attachment_copy_rolls_back(owned_root, monkeypatc
     if tgt_att.exists():
         stray = list(tgt_att.rglob("*.stage"))
         assert not stray, f"stray staged attachment left on target: {stray}"
+
+
+def test_proof_a_guard_rejects_symlinked_owned_path(owned_root):
+    mod = _load_proof()
+    target = owned_root / "real"
+    target.mkdir()
+    link = owned_root / "link"
+    link.symlink_to(target, target_is_directory=True)
+    with pytest.raises(RuntimeError, match="symlinked owned path"):
+        mod.guard_owned_path(owned_root, link / "child", must_exist=False)
 
 
 def test_proof_a_rejects_pending_approval_without_mutation(owned_root):
@@ -328,7 +338,7 @@ def test_proof_a_rejects_pending_approval_without_mutation(owned_root):
         conn.commit()
     src_before = mod._db_content_signature(src_path)
     tgt_before = mod._db_content_signature(tgt_path)
-    result = mod._do_migration_transfer(src_path, tgt_path, kb.attachments_root(board="default"), kb.attachments_root(board="core"))
+    result = mod._do_migration_transfer(owned_root, src_path, tgt_path, kb.attachments_root(board="default"), kb.attachments_root(board="core"))
     assert result["ok"] is False
     assert "unsupported lifecycle approval" in result["error"]
     assert mod._db_content_signature(src_path) == src_before
@@ -348,11 +358,37 @@ def test_proof_a_rejects_inflight_task_without_mutation(owned_root):
         conn.commit()
     src_before = mod._db_content_signature(src_path)
     tgt_before = mod._db_content_signature(tgt_path)
-    result = mod._do_migration_transfer(src_path, tgt_path, kb.attachments_root(board="default"), kb.attachments_root(board="core"))
+    result = mod._do_migration_transfer(owned_root, src_path, tgt_path, kb.attachments_root(board="default"), kb.attachments_root(board="core"))
     assert result["ok"] is False
     assert "unsupported in-flight" in result["error"]
     assert mod._db_content_signature(src_path) == src_before
     assert mod._db_content_signature(tgt_path) == tgt_before
+
+
+def test_proof_a_rejects_open_terminal_run_without_mutation(owned_root):
+    """A terminal label is not enough: a run with no ended_at is still live."""
+    mod = _load_proof()
+    mod.seed_full_fixture(owned_root)
+    from hermes_cli import kanban_db as kb
+    src_path = kb.kanban_db_path(board="default")
+    tgt_path = kb.kanban_db_path(board="core")
+    with kb.connect_closing(board="default") as conn:
+        conn.execute("UPDATE task_runs SET status = 'done', ended_at = NULL")
+        conn.commit()
+    src_before = mod._db_content_signature(src_path)
+    tgt_before = mod._db_content_signature(tgt_path)
+    result = mod._do_migration_transfer(owned_root, src_path, tgt_path, kb.attachments_root(board="default"), kb.attachments_root(board="core"))
+    assert result["ok"] is False
+    assert "unsupported in-flight run" in result["error"]
+    assert mod._db_content_signature(src_path) == src_before
+    assert mod._db_content_signature(tgt_path) == tgt_before
+
+
+def test_proof_a_raw_helper_rejects_unowned_root(tmp_path):
+    """Direct helper calls cannot bypass the owned-root boundary."""
+    mod = _load_proof()
+    with pytest.raises(RuntimeError, match="refusing unowned root"):
+        mod._do_migration_transfer(tmp_path, tmp_path / "src.db", tmp_path / "tgt.db", tmp_path / "src", tmp_path / "tgt")
 
 
 def test_proof_a_rejects_target_epic_conflict_without_mutation(owned_root):
@@ -371,7 +407,7 @@ def test_proof_a_rejects_target_epic_conflict_without_mutation(owned_root):
         conn.commit()
     src_before = mod._db_content_signature(src_path)
     tgt_before = mod._db_content_signature(tgt_path)
-    result = mod._do_migration_transfer(src_path, tgt_path, kb.attachments_root(board="default"), kb.attachments_root(board="core"))
+    result = mod._do_migration_transfer(owned_root, src_path, tgt_path, kb.attachments_root(board="default"), kb.attachments_root(board="core"))
     assert result["ok"] is False
     assert "target epic conflict" in result["error"]
     assert mod._db_content_signature(src_path) == src_before
