@@ -8,13 +8,12 @@ hard-coded the 9 real Tier-3 profiles as Tier-2 and falsely reported
 Tier-3=0).
 
 These tests use temporary fixture roots (profiles dir + registry fixture)
-injected via the script's CLI/API seams. No test reads or mutates the real
-~/.hermes.
+injected via the script's function parameters. No test reads or mutates
+the real ~/.hermes.
 """
 from __future__ import annotations
 
 import importlib.util
-import textwrap
 from pathlib import Path
 
 import pytest
@@ -27,15 +26,12 @@ SCRIPT = REPO / "scripts" / "tier-enforcement-proof.py"
 # ── helpers ─────────────────────────────────────────────────────────────────
 
 
-def _load_script(monkeypatch, profiles_dir: Path, registry: Path):
-    """Import the proof script with injected paths via env vars.
+def _load_script():
+    """Import the proof script module.
 
-    The script must support HERMES_PROOF_PROFILES_DIR and
-    HERMES_PROOF_REGISTRY override env vars (test seam). These override
-    the default ~/.hermes/... paths only when set.
+    Paths are injected via function parameters (profiles_dir /
+    registry_path) on each call — no environment-variable seam.
     """
-    monkeypatch.setenv("HERMES_PROOF_PROFILES_DIR", str(profiles_dir))
-    monkeypatch.setenv("HERMES_PROOF_REGISTRY", str(registry))
     spec = importlib.util.spec_from_file_location(
         "tier_enforcement_proof_under_test", str(SCRIPT)
     )
@@ -125,7 +121,7 @@ T2_NAMES = [
 
 
 @pytest.fixture
-def full_fixture(tmp_path, monkeypatch):
+def full_fixture(tmp_path):
     """Build a full 13/39/9-like fixture mirroring real config."""
     profiles_root = tmp_path / "profiles"
     profiles_root.mkdir()
@@ -145,7 +141,7 @@ def full_fixture(tmp_path, monkeypatch):
         _make_profile(profiles_root, n, 3)
 
     reg = _make_registry(tmp_path, T1_NAMES, T2_NAMES, T3_NAMES)
-    mod = _load_script(monkeypatch, profiles_root, reg)
+    mod = _load_script()
     return mod, profiles_root, reg
 
 
@@ -157,15 +153,15 @@ class TestDerivesTiersFromConfig:
 
     def test_tier3_detected_from_config(self, full_fixture):
         """9 Tier-3 profiles with tier:3 in config.yaml must be detected."""
-        mod, _, _ = full_fixture
-        tiers = mod.derive_profile_tiers()
+        mod, profiles_root, _ = full_fixture
+        tiers = mod.derive_profile_tiers(profiles_root)
         t3 = {n for n, t in tiers.items() if t == 3}
         assert t3 == set(T3_NAMES), f"Expected 9 Tier-3, got {t3}"
 
     def test_tier3_count_is_nine(self, full_fixture):
         """Tier-3 count must be 9, not 0."""
-        mod, _, _ = full_fixture
-        tiers = mod.derive_profile_tiers()
+        mod, profiles_root, _ = full_fixture
+        tiers = mod.derive_profile_tiers(profiles_root)
         t3_count = sum(1 for t in tiers.values() if t == 3)
         assert t3_count == 9
 
@@ -176,8 +172,8 @@ class TestDerivesTiersFromConfig:
         return non-zero Tier-3 count. If the script still used a stale
         CANONICAL dict with no Tier-3 entries, this would fail.
         """
-        mod, _, _ = full_fixture
-        tiers = mod.derive_profile_tiers()
+        mod, profiles_root, _ = full_fixture
+        tiers = mod.derive_profile_tiers(profiles_root)
         assert any(t == 3 for t in tiers.values()), (
             "Tier-3=0 is the G3 defect — tiers must be derived from config"
         )
@@ -185,8 +181,8 @@ class TestDerivesTiersFromConfig:
     def test_tier1_count(self, full_fixture):
         """13 Tier-1 configs on disk (kensei has no config, so 13 with tier
         field, but derive counts only those with config.yaml)."""
-        mod, _, _ = full_fixture
-        tiers = mod.derive_profile_tiers()
+        mod, profiles_root, _ = full_fixture
+        tiers = mod.derive_profile_tiers(profiles_root)
         t1 = {n for n, t in tiers.items() if t == 1}
         # kensei has no config.yaml so won't appear; the other 13 do
         assert len(t1) == 13
@@ -194,8 +190,8 @@ class TestDerivesTiersFromConfig:
 
     def test_tier2_count(self, full_fixture):
         """All fixture Tier-2 profiles detected."""
-        mod, _, _ = full_fixture
-        tiers = mod.derive_profile_tiers()
+        mod, profiles_root, _ = full_fixture
+        tiers = mod.derive_profile_tiers(profiles_root)
         t2 = {n for n, t in tiers.items() if t == 2}
         assert t2 == set(T2_NAMES)
 
@@ -205,12 +201,12 @@ class TestRegistryValidation:
 
     def test_matching_registry_passes(self, full_fixture):
         """When config tiers match registry tiers exactly, proof passes."""
-        mod, _, _ = full_fixture
-        result = mod.run_proof()
+        mod, profiles_root, reg = full_fixture
+        result = mod.run_proof(profiles_root, reg)
         assert result.exit_code == 0
         assert "Tier 3: 9" in result.stdout
 
-    def test_registry_mismatch_fails(self, tmp_path, monkeypatch):
+    def test_registry_mismatch_fails(self, tmp_path):
         """Registry lists a Tier-3 profile not in config → clear failure."""
         profiles_root = tmp_path / "profiles"
         profiles_root.mkdir()
@@ -227,13 +223,13 @@ class TestRegistryValidation:
         # Registry claims an extra Tier-3 not in config
         bad_t3 = T3_NAMES + ["nonexistent-profile"]
         reg = _make_registry(tmp_path, T1_NAMES, T2_NAMES, bad_t3)
-        mod = _load_script(monkeypatch, profiles_root, reg)
+        mod = _load_script()
 
-        result = mod.run_proof()
+        result = mod.run_proof(profiles_root, reg)
         assert result.exit_code != 0
         assert "mismatch" in result.stdout.lower() or "error" in result.stdout.lower()
 
-    def test_config_tier3_not_in_registry_fails(self, tmp_path, monkeypatch):
+    def test_config_tier3_not_in_registry_fails(self, tmp_path):
         """Config has a Tier-3 profile not in registry → clear failure."""
         profiles_root = tmp_path / "profiles"
         profiles_root.mkdir()
@@ -250,18 +246,18 @@ class TestRegistryValidation:
         _make_profile(profiles_root, "rogue-tier3", 3)
 
         reg = _make_registry(tmp_path, T1_NAMES, T2_NAMES, T3_NAMES)
-        mod = _load_script(monkeypatch, profiles_root, reg)
+        mod = _load_script()
 
-        result = mod.run_proof()
+        result = mod.run_proof(profiles_root, reg)
         assert result.exit_code != 0
 
     def test_tier3_identity_matches_registry(self, full_fixture):
         """The set of Tier-3 profiles from config must exactly equal the
         Tier-3 set in the registry."""
-        mod, _, _ = full_fixture
-        config_tiers = mod.derive_profile_tiers()
+        mod, profiles_root, reg = full_fixture
+        config_tiers = mod.derive_profile_tiers(profiles_root)
         config_t3 = {n for n, t in config_tiers.items() if t == 3}
-        registry_t3 = mod.parse_registry_t3()
+        registry_t3 = mod.parse_registry_t3(reg)
         assert config_t3 == registry_t3
 
 
@@ -270,8 +266,8 @@ class TestSafetyPolicyPreserved:
 
     def test_tier3_marked_blocked(self, full_fixture):
         """Tier-3 profiles must be reported as BLOCKED in output."""
-        mod, _, _ = full_fixture
-        result = mod.run_proof()
+        mod, profiles_root, reg = full_fixture
+        result = mod.run_proof(profiles_root, reg)
         assert result.exit_code == 0
         # Each Tier-3 profile should be listed as BLOCKED
         for name in T3_NAMES:
@@ -280,29 +276,75 @@ class TestSafetyPolicyPreserved:
 
     def test_script_does_not_modify_profiles(self, full_fixture):
         """Script must not create/activate/modify any profile config."""
-        mod, profiles_root, _ = full_fixture
+        mod, profiles_root, reg = full_fixture
         # Snapshot all config.yaml contents
         snapshots = {}
         for cfg in profiles_root.rglob("config.yaml"):
             snapshots[cfg] = cfg.read_text()
 
-        mod.run_proof()
+        mod.run_proof(profiles_root, reg)
 
         for cfg, original in snapshots.items():
             assert cfg.read_text() == original, f"{cfg} was modified"
 
 
-class TestDeployedDefaults:
-    """Script must work with default real paths when no env vars set."""
+class TestFunctionParameterInjection:
+    """Script must accept temporary roots via function parameters.
 
-    def test_env_override_seam_exists(self, tmp_path, monkeypatch):
-        """The script must support HERMES_PROOF_PROFILES_DIR and
-        HERMES_PROOF_REGISTRY env vars for test injection."""
+    Direct parameter fixture coverage for temporary profile-root and
+    registry inputs — no environment-variable seam used.
+    """
+
+    def test_profiles_dir_param_injection(self, tmp_path):
+        """derive_profile_tiers accepts profiles_dir parameter."""
+        profiles_root = tmp_path / "profiles"
+        profiles_root.mkdir()
+        _make_profile(profiles_root, "test-t1", 1)
+        mod = _load_script()
+        tiers = mod.derive_profile_tiers(profiles_root)
+        assert "test-t1" in tiers
+        assert tiers["test-t1"] == 1
+
+    def test_registry_path_param_injection(self, tmp_path):
+        """parse_registry accepts registry_path parameter."""
+        reg = _make_registry(tmp_path, ["test-t1"], ["test-t2"], ["test-t3"])
+        mod = _load_script()
+        reg_tiers = mod.parse_registry(reg)
+        assert "test-t1" in reg_tiers["1"]
+        assert "test-t2" in reg_tiers["2"]
+        assert "test-t3" in reg_tiers["3"]
+
+    def test_run_proof_param_injection(self, tmp_path):
+        """run_proof accepts profiles_dir and registry_path parameters."""
         profiles_root = tmp_path / "profiles"
         profiles_root.mkdir()
         _make_profile(profiles_root, "test-t1", 1)
         reg = _make_registry(tmp_path, ["test-t1"], [], [])
-        mod = _load_script(monkeypatch, profiles_root, reg)
-        tiers = mod.derive_profile_tiers()
-        assert "test-t1" in tiers
-        assert tiers["test-t1"] == 1
+        mod = _load_script()
+        result = mod.run_proof(profiles_root, reg)
+        assert result.exit_code == 0
+
+    def test_default_paths_are_real_deployed_paths(self):
+        """Module-level PROFILES_DIR and REGISTRY point at real ~/.hermes."""
+        import os
+        mod = _load_script()
+        assert str(mod.PROFILES_DIR) == os.path.expanduser("~/.hermes/profiles")
+        assert str(mod.REGISTRY) == os.path.expanduser("~/.hermes/governance/profile-tier-registry.md")
+
+    def test_empty_profiles_dir_param(self, tmp_path):
+        """derive_profile_tiers with empty dir returns empty dict."""
+        empty = tmp_path / "empty"
+        empty.mkdir()
+        mod = _load_script()
+        assert mod.derive_profile_tiers(empty) == {}
+
+    def test_nonexistent_profiles_dir_param(self, tmp_path):
+        """derive_profile_tiers with missing dir returns empty dict."""
+        mod = _load_script()
+        assert mod.derive_profile_tiers(tmp_path / "nonexistent") == {}
+
+    def test_nonexistent_registry_param(self, tmp_path):
+        """parse_registry with missing file returns empty tiers."""
+        mod = _load_script()
+        result = mod.parse_registry(tmp_path / "nonexistent.md")
+        assert result == {"1": set(), "2": set(), "3": set()}

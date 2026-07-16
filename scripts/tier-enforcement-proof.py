@@ -27,22 +27,15 @@ from pathlib import Path
 
 import yaml
 
-# ── Path resolution (with test-injection seam) ──────────────────────────────
+# ── Path resolution ─────────────────────────────────────────────────────────
 #
-# HERMES_PROOF_PROFILES_DIR and HERMES_PROOF_REGISTRY override the default
-# real paths. These exist so tests can inject fixture roots without touching
-# ~/.hermes. In deployed layout (no env vars set), the real paths are used.
+# Default deployed real paths. Tests inject temporary roots via the
+# function parameters (profiles_dir / registry_path) on derive_profile_tiers,
+# parse_registry, and run_proof — no environment-variable seam.
 
-_DEFAULT_PROFILES = Path(os.path.expanduser("~/.hermes/profiles"))
-_DEFAULT_REGISTRY = Path(
-    os.path.expanduser("~/.hermes/governance/profile-tier-registry.md")
-)
-
-PROFILES_DIR = Path(
-    os.environ.get("HERMES_PROOF_PROFILES_DIR", str(_DEFAULT_PROFILES))
-)
+PROFILES_DIR = Path(os.path.expanduser("~/.hermes/profiles"))
 REGISTRY = Path(
-    os.environ.get("HERMES_PROOF_REGISTRY", str(_DEFAULT_REGISTRY))
+    os.path.expanduser("~/.hermes/governance/profile-tier-registry.md")
 )
 
 # kensei is the default profile — no config.yaml by convention.
