@@ -3739,13 +3739,84 @@ def _has_sticky_block(conn: sqlite3.Connection, task_id: str) -> bool:
     return bool(row) and row["kind"] == "blocked"
 
 
+def _recompute_ready_locked(
+    conn: sqlite3.Connection,
+    failure_limit: int = None,
+    *,
+    task_filter: Optional[str] = None,
+) -> int:
+    """Transaction-aware core of :func:`recompute_ready`.
+
+    Does **not** open ``write_txn`` — the caller must already hold a
+    write transaction (or an attached multi-database transaction).  When
+    ``task_filter`` is set, only that task id is recomputed; otherwise
+    all ``todo``/``blocked`` rows on the main database are scanned.
+
+    ``task_filter`` is used by the cross-board move helper to recompute
+    only the moved task (on the target attached DB) and affected children
+    (on the source main DB) without opening a nested ``write_txn``.
+    """
+    if failure_limit is None:
+        failure_limit = DEFAULT_FAILURE_LIMIT
+    promoted = 0
+    if task_filter:
+        todo_rows = conn.execute(
+            "SELECT id, status, consecutive_failures, max_retries "
+            "FROM tasks WHERE id = ? AND status IN ('todo', 'blocked')",
+            (task_filter,),
+        ).fetchall()
+    else:
+        todo_rows = conn.execute(
+            "SELECT id, status, consecutive_failures, max_retries "
+            "FROM tasks WHERE status IN ('todo', 'blocked')"
+        ).fetchall()
+    for row in todo_rows:
+        task_id = row["id"]
+        cur_status = row["status"]
+        if cur_status == "blocked" and _has_sticky_block(conn, task_id):
+            continue
+        parents = conn.execute(
+            "SELECT t.status FROM tasks t "
+            "JOIN task_links l ON l.parent_id = t.id "
+            "WHERE l.child_id = ?",
+            (task_id,),
+        ).fetchall()
+        if all(p["status"] in ("done", "archived") for p in parents):
+            if cur_status == "blocked":
+                failures = int(row["consecutive_failures"] or 0)
+                task_limit = row["max_retries"]
+                effective_limit = (
+                    int(task_limit) if task_limit is not None
+                    else int(failure_limit)
+                )
+                if failures >= effective_limit:
+                    continue
+                conn.execute(
+                    "UPDATE tasks SET status = 'ready' "
+                    "WHERE id = ? AND status = 'blocked'",
+                    (task_id,),
+                )
+            else:
+                conn.execute(
+                    "UPDATE tasks SET status = 'ready' WHERE id = ? AND status = 'todo'",
+                    (task_id,),
+                )
+            _append_event(conn, task_id, "promoted", None)
+            promoted += 1
+    return promoted
+
+
 def recompute_ready(
     conn: sqlite3.Connection, failure_limit: int = None,
 ) -> int:
     """Promote ``todo`` tasks to ``ready`` when all parents are ``done`` or ``archived``.
 
-    Returns the number of tasks promoted.  Safe to call inside or outside
-    an existing transaction; it opens its own IMMEDIATE txn.
+    Returns the number of tasks promoted.
+
+    This is the public wrapper that opens its own ``write_txn``.  The
+    transaction-aware core lives in :func:`_recompute_ready_locked` so
+    callers that already hold a transaction (e.g. the cross-board move
+    helper) can recompute without a nested transaction.
 
     ``blocked`` tasks are also considered for promotion (so a task
     blocked purely by a parent dependency unblocks itself when the
@@ -3770,59 +3841,9 @@ def recompute_ready(
          ``kanban.failure_limit`` config value through ``dispatch_once``)
       3. ``DEFAULT_FAILURE_LIMIT``
     """
-    if failure_limit is None:
-        failure_limit = DEFAULT_FAILURE_LIMIT
     promoted = 0
     with write_txn(conn):
-        todo_rows = conn.execute(
-            "SELECT id, status, consecutive_failures, max_retries "
-            "FROM tasks WHERE status IN ('todo', 'blocked')"
-        ).fetchall()
-        for row in todo_rows:
-            task_id = row["id"]
-            cur_status = row["status"]
-            if cur_status == "blocked" and _has_sticky_block(conn, task_id):
-                # Worker / operator asked for human review — do not
-                # silently auto-recover.  ``unblock_task`` is the only
-                # legitimate exit (it emits ``"unblocked"`` which flips
-                # this predicate back).
-                continue
-            parents = conn.execute(
-                "SELECT t.status FROM tasks t "
-                "JOIN task_links l ON l.parent_id = t.id "
-                "WHERE l.child_id = ?",
-                (task_id,),
-            ).fetchall()
-            if all(p["status"] in ("done", "archived") for p in parents):
-                if cur_status == "blocked":
-                    # Don't auto-recover tasks that have hit the
-                    # circuit-breaker failure limit.  Without this
-                    # guard, a task that repeatedly exhausts its
-                    # iteration budget would cycle forever:
-                    # block → auto-recover → respawn → budget
-                    # exhausted → block → …  The counter must also
-                    # be preserved so the breaker can accumulate
-                    # across recovery cycles.
-                    failures = int(row["consecutive_failures"] or 0)
-                    task_limit = row["max_retries"]
-                    effective_limit = (
-                        int(task_limit) if task_limit is not None
-                        else int(failure_limit)
-                    )
-                    if failures >= effective_limit:
-                        continue
-                    conn.execute(
-                        "UPDATE tasks SET status = 'ready' "
-                        "WHERE id = ? AND status = 'blocked'",
-                        (task_id,),
-                    )
-                else:
-                    conn.execute(
-                        "UPDATE tasks SET status = 'ready' WHERE id = ? AND status = 'todo'",
-                        (task_id,),
-                    )
-                _append_event(conn, task_id, "promoted", None)
-                promoted += 1
+        promoted = _recompute_ready_locked(conn, failure_limit)
     return promoted
 
 
@@ -7343,6 +7364,887 @@ def delete_task(conn: sqlite3.Connection, task_id: str) -> bool:
     recompute_ready(conn)
     return True
 
+# ---------------------------------------------------------------------------
+# Cross-board atomic move (W1 Batch 2 V2)
+# ---------------------------------------------------------------------------
+
+import fcntl as _fcntl
+import hashlib as _hashlib
+import os as _os
+import tempfile as _tempfile
+
+
+class MoveError(Exception):
+    """Raised when a cross-board move cannot proceed safely."""
+
+
+# Tables owned by a task and transferred during a cross-board move.
+# Integer-PK tables need ID remapping; text-PK tables are copied as-is.
+_MOVE_INT_PK_TABLES = ["task_runs", "task_events", "task_comments", "task_attachments"]
+_MOVE_TEXT_PK_TABLES = ["kanban_notify_subs", "profile_lifecycle_approvals"]
+_MOVE_ALL_TASK_TABLES = ["tasks"] + _MOVE_INT_PK_TABLES + _MOVE_TEXT_PK_TABLES
+
+# Terminal task_run statuses — a run in one of these is "finished" and
+# transfers with the task (provided it has a terminal ended_at timestamp).
+_TERMINAL_RUN_STATUSES = frozenset({
+    "done", "blocked", "crashed", "timed_out", "failed", "released",
+})
+
+
+def _fsync_file(fh):
+    """fsync a file handle, ignoring OS-level errors on platforms without it."""
+    try:
+        _os.fsync(fh.fileno())
+    except (OSError, AttributeError):
+        pass
+
+
+def _fsync_dir(path):
+    """fsync a directory to flush rename operations."""
+    try:
+        fd = _os.open(str(path), _os.O_RDONLY)
+        try:
+            _os.fsync(fd)
+        finally:
+            _os.close(fd)
+    except OSError:
+        pass
+
+
+def _sha256_file(path):
+    """Return the SHA-256 hex digest of a file."""
+    h = _hashlib.sha256()
+    with open(str(path), "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _table_columns(conn, schema, table):
+    """Return list of (name, notnull, dflt_value) for a table."""
+    rows = conn.execute(
+        "PRAGMA " + schema + ".table_info(" + table + ")"
+    ).fetchall()
+    return [(r["name"], r["notnull"], r["dflt_value"]) for r in rows]
+
+
+def _check_schema_compat(conn, src_schema, tgt_schema, table):
+    """Check both directions for schema compatibility.
+
+    Fail if either side has a required (NOT NULL, no default) column
+    that the other lacks.  Fixed schema identifiers only.
+    """
+    src_cols = {name: (notnull, dflt) for name, notnull, dflt in
+                _table_columns(conn, src_schema, table)}
+    tgt_cols = {name: (notnull, dflt) for name, notnull, dflt in
+                _table_columns(conn, tgt_schema, table)}
+
+    # Source has a column target lacks — reject if source value could be non-null
+    for col, (notnull, dflt) in src_cols.items():
+        if col not in tgt_cols:
+            if notnull and dflt is None:
+                raise MoveError(
+                    "schema incompatible: source table " + table +
+                    " has required column " + col +
+                    " not present in target"
+                )
+
+    # Target has a column source lacks — reject if target requires it
+    for col, (notnull, dflt) in tgt_cols.items():
+        if col not in src_cols:
+            if notnull and dflt is None:
+                raise MoveError(
+                    "schema incompatible: target table " + table +
+                    " has required column " + col +
+                    " not present in source"
+                )
+
+
+def _resolve_board_slug(path):
+    """Best-effort board slug from a DB path for the moved-event payload.
+
+    For the default board the DB sits at ``<root>/kanban.db`` (parent is
+    the root, NOT 'boards').  For a named board the DB sits at
+    ``<root>/kanban/boards/<slug>/kanban.db`` (parent is <slug>,
+    grandparent is 'boards').
+    """
+    try:
+        p = Path(path)
+        if p.parent.parent.name == "boards":
+            return p.parent.name
+        return "default"
+    except Exception:
+        return "unknown"
+
+
+def _is_safe_filename(name):
+    """Reject filenames with path separators, traversal, or empty."""
+    if not name or not name.strip():
+        return False
+    if "/" in name or "\\" in name:
+        return False
+    if name == "." or name == "..":
+        return False
+    if name.startswith("."):
+        return False
+    return True
+
+
+def _copy_attachment_blob(src_path, tgt_dir, expected_size, expected_hash=None):
+    """Copy a file to tgt_dir with atomic rename, fsync, and verification.
+
+    Returns the final path.  Raises MoveError on any safety violation.
+    """
+    src_path = Path(src_path)
+    if not src_path.exists():
+        raise MoveError("attachment source missing: " + str(src_path))
+    if src_path.is_symlink():
+        raise MoveError("attachment source is symlink: " + str(src_path))
+    if not src_path.is_file():
+        raise MoveError("attachment source not a regular file: " + str(src_path))
+
+    actual_size = src_path.stat().st_size
+    if actual_size != expected_size:
+        raise MoveError(
+            "attachment size mismatch: expected " + str(expected_size) +
+            " got " + str(actual_size)
+        )
+
+    tgt_dir.mkdir(parents=True, exist_ok=True)
+    final_name = src_path.name
+    final_path = tgt_dir / final_name
+
+    # If final already exists (retry), verify hash matches
+    if final_path.exists():
+        if final_path.is_symlink() or not final_path.is_file():
+            raise MoveError("attachment final exists but is not a regular file: " + str(final_path))
+        if expected_hash is not None:
+            existing_hash = _sha256_file(final_path)
+            if existing_hash != expected_hash:
+                raise MoveError("attachment final exists with different hash")
+        # Already correct — return it
+        return final_path
+
+    # Copy to unique temp file, fsync, atomic rename
+    fd, tmp_name = _tempfile.mkstemp(dir=str(tgt_dir), prefix=".move_tmp_")
+    try:
+        with _os.fdopen(fd, "wb") as tmp_f:
+            with open(str(src_path), "rb") as src_f:
+                while True:
+                    chunk = src_f.read(65536)
+                    if not chunk:
+                        break
+                    tmp_f.write(chunk)
+            _fsync_file(tmp_f)
+        _os.rename(tmp_name, str(final_path))
+        _fsync_dir(tgt_dir)
+    except Exception:
+        # Clean up temp on failure
+        try:
+            _os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+
+    return final_path
+
+
+def _cleanup_attachment_artifacts(tgt_dir):
+    """Clean up .move_tmp_ temp files and orphaned finals from a failed attempt.
+
+    Only removes temp files (``.move_tmp_*``); orphaned final files are
+    left in place for retry/hash verification — a retry must recognise,
+    verify and reuse matching finals, and fail closed on mismatched ones.
+    """
+    if not tgt_dir.exists():
+        return
+    for child in tgt_dir.iterdir():
+        if child.name.startswith(".move_tmp_"):
+            try:
+                child.unlink()
+            except OSError:
+                pass
+
+
+def _acquire_dual_locks(src_path, tgt_path):
+    """Acquire both .write_lock sidecars in sorted resolved-path order.
+
+    Returns (lock_handles, lock_paths) or raises MoveError on same-path.
+    """
+    src_resolved = str(Path(src_path).resolve())
+    tgt_resolved = str(Path(tgt_path).resolve())
+
+    if src_resolved == tgt_resolved:
+        raise MoveError("source and target are the same database path")
+
+    # Sorted order for deadlock avoidance
+    paths = sorted([src_resolved, tgt_resolved])
+    handles = []
+    lock_paths = []
+    try:
+        for p in paths:
+            lock_path = Path(p).with_name(Path(p).name + ".write_lock")
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+            fh = lock_path.open("a+b")
+            _fcntl.flock(fh.fileno(), _fcntl.LOCK_EX)
+            handles.append(fh)
+            lock_paths.append(lock_path)
+    except Exception:
+        for fh in handles:
+            try:
+                _fcntl.flock(fh.fileno(), _fcntl.LOCK_UN)
+                fh.close()
+            except Exception:
+                pass
+        raise
+
+    return handles, lock_paths
+
+
+def _release_locks(handles):
+    """Release all acquired sidecar locks."""
+    for fh in handles:
+        try:
+            _fcntl.flock(fh.fileno(), _fcntl.LOCK_UN)
+        except Exception:
+            pass
+        try:
+            fh.close()
+        except Exception:
+            pass
+
+
+def _raw_connect(path):
+    """Open a raw sqlite3 connection (isolation_level=None, autocommit).
+
+    Does NOT set WAL mode or any PRAGMAs beyond busy_timeout.  Used for
+    the checkpoint/switch and WAL-restore connections that must not
+    interfere with the main move transaction.
+    """
+    conn = sqlite3.connect(str(path), isolation_level=None, timeout=120)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=120000")
+    return conn
+
+
+def _checkpoint_and_switch_to_delete(path, label):
+    """Checkpoint a WAL database and switch it to DELETE journal mode.
+
+    Opens its own raw connection, checkpoints, switches to DELETE, and
+    closes the connection.  Returns the original journal mode.  Raises
+    MoveError on any failure — never swallow.
+    """
+    conn = _raw_connect(path)
+    try:
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        orig_mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+        if orig_mode and orig_mode.lower() == "wal":
+            conn.execute("PRAGMA journal_mode=DELETE")
+            mode_after = conn.execute("PRAGMA journal_mode").fetchone()[0]
+            if mode_after.lower() != "delete":
+                raise MoveError(
+                    "failed to switch " + label + " from WAL to DELETE mode"
+                )
+        return orig_mode
+    finally:
+        conn.close()
+
+
+def _restore_wal_mode(path, label):
+    """Restore WAL journal mode on a database using a fresh connection.
+
+    Raises on failure — the caller must surface the inability to prove
+    restoration.  Never swallow.
+    """
+    conn = _raw_connect(path)
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        mode_after = conn.execute("PRAGMA journal_mode").fetchone()[0]
+        if mode_after.lower() != "wal":
+            raise MoveError(
+                "failed to restore WAL mode on " + label +
+                " (database is safe in DELETE mode but WAL is not restored)"
+            )
+    finally:
+        conn.close()
+
+
+def move_task_atomic(
+    source_path,
+    target_path,
+    task_id,
+    *,
+    _test_hooks=None,
+):
+    """Atomically move a task and all its owned rows from source to target board.
+
+    Architecture (binding contract):
+
+    1. Reject same resolved source/target path.
+    2. Acquire both .write_lock sidecars in sorted resolved-path order.
+    3. Under those locks, use **two separate raw connections** to
+       checkpoint each WAL database and switch each to journal_mode=DELETE.
+    4. **Close both switching connections** before opening the move connection.
+    5. Open one source connection, ATTACH target, begin one BEGIN IMMEDIATE
+       transaction spanning both rollback-journal databases.
+    6. Do NOT switch the attached target journal mode.
+    7. Perform all guards and mutations inside that attached transaction.
+    8. Commit once, close/detach.
+    9. Restore WAL on both databases using **separate connections**.
+       Fail closed / surface inability to prove restoration.
+
+    Returns a dict: {"status": "moved"|"already_moved"|"rejected"|"error", ...}
+    """
+    source_path = Path(source_path)
+    target_path = Path(target_path)
+    hooks = _test_hooks or {}
+
+    # --- Same-path rejection (before any lock) ---
+    try:
+        if source_path.resolve() == target_path.resolve():
+            return {"status": "rejected", "reason": "source and target are the same database path"}
+    except Exception as exc:
+        return {"status": "rejected", "reason": "path resolution error: " + str(exc)}
+
+    src_board = _resolve_board_slug(source_path)
+    tgt_board = _resolve_board_slug(target_path)
+
+    # --- Acquire dual locks in sorted resolved-path order ---
+    try:
+        lock_handles, lock_paths = _acquire_dual_locks(source_path, target_path)
+    except MoveError as exc:
+        return {"status": "rejected", "reason": str(exc)}
+    except Exception as exc:
+        return {"status": "error", "reason": "lock acquisition failed: " + str(exc)}
+
+    conn = None
+    src_orig_mode = None
+    tgt_orig_mode = None
+    cleanup_dirs = []  # attachment dirs that may have temp files on failure
+    wal_restored = {"src": False, "tgt": False}
+
+    try:
+        # --- Journal switch: checkpoint + switch to DELETE (separate conns) ---
+        # Use two separate raw connections, one per DB. Close both before
+        # opening the move connection. This avoids the "database is locked"
+        # that occurs when switching journal_mode through an ATTACHed WAL
+        # connection.
+        try:
+            src_orig_mode = _checkpoint_and_switch_to_delete(source_path, "source")
+        except MoveError:
+            raise
+        except Exception as exc:
+            raise MoveError("source journal switch failed: " + str(exc)) from exc
+
+        try:
+            tgt_orig_mode = _checkpoint_and_switch_to_delete(target_path, "target")
+        except MoveError:
+            raise
+        except Exception as exc:
+            raise MoveError("target journal switch failed: " + str(exc)) from exc
+
+        # --- Open source connection and ATTACH target ---
+        # Both DBs are now in DELETE mode. Do NOT switch the attached
+        # target's journal mode.
+        conn = _raw_connect(source_path)
+        conn.execute(
+            "ATTACH DATABASE '" + str(target_path.resolve()) + "' AS tgt"
+        )
+
+        # --- Schema compatibility check (both directions) ---
+        for table in _MOVE_ALL_TASK_TABLES:
+            _check_schema_compat(conn, "main", "tgt", table)
+
+        # --- Idempotency check (under locks, pre-transaction) ---
+        src_exists = conn.execute(
+            "SELECT 1 FROM main.tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+        tgt_exists = conn.execute(
+            "SELECT 1 FROM tgt.tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+
+        if src_exists is None and tgt_exists is not None:
+            moved_count = conn.execute(
+                "SELECT COUNT(*) FROM tgt.task_events WHERE task_id = ? AND kind = 'moved'",
+                (task_id,),
+            ).fetchone()[0]
+            if moved_count == 1:
+                # A SIGKILL after COMMIT but before the normal post-commit
+                # restoration leaves both DBs safely committed in DELETE mode.
+                # Idempotent retry is the recovery path: close the ATTACHed
+                # connection first, then heal both journals through separate
+                # raw connections while the canonical sidecar locks are held.
+                try:
+                    conn.execute("DETACH DATABASE tgt")
+                    conn.close()
+                    conn = None
+                    _restore_wal_mode(source_path, "source idempotent recovery")
+                    wal_restored["src"] = True
+                    _restore_wal_mode(target_path, "target idempotent recovery")
+                    wal_restored["tgt"] = True
+                except Exception as exc:
+                    return {
+                        "status": "error",
+                        "reason": "idempotent recovery could not restore WAL: " + str(exc),
+                    }
+                return {"status": "already_moved", "reason": "task already moved to target"}
+            return {"status": "rejected", "reason": "ambiguous state: task on target with " + str(moved_count) + " moved events"}
+
+        if src_exists is not None and tgt_exists is not None:
+            return {"status": "rejected", "reason": "ambiguous state: task exists on both source and target"}
+
+        if src_exists is None:
+            return {"status": "rejected", "reason": "task " + task_id + " not found on source"}
+
+        # --- Begin attached transaction ---
+        conn.execute("BEGIN IMMEDIATE")
+
+        try:
+            # --- Rejection guards (under locked transaction) ---
+            task_row = conn.execute(
+                "SELECT * FROM main.tasks WHERE id = ?", (task_id,)
+            ).fetchone()
+            if task_row is None:
+                conn.execute("ROLLBACK")
+                return {"status": "rejected", "reason": "task vanished from source under lock"}
+
+            if task_row["status"] == "running":
+                conn.execute("ROLLBACK")
+                return {"status": "rejected", "reason": "task status is 'running'"}
+
+            if task_row["current_run_id"] is not None:
+                conn.execute("ROLLBACK")
+                return {"status": "rejected", "reason": "task has non-null current_run_id"}
+
+            # Check for active/open runs
+            active_run = conn.execute(
+                "SELECT 1 FROM main.task_runs WHERE task_id = ? AND status = 'running'",
+                (task_id,),
+            ).fetchone()
+            if active_run is not None:
+                conn.execute("ROLLBACK")
+                return {"status": "rejected", "reason": "task has a running task_run"}
+
+            # Check for runs without terminal end state — a nominally
+            # terminal run (e.g. status='done') with ended_at IS NULL is
+            # still "open" and must be rejected.
+            unended_run = conn.execute(
+                "SELECT 1 FROM main.task_runs WHERE task_id = ? AND ended_at IS NULL",
+                (task_id,),
+            ).fetchone()
+            if unended_run is not None:
+                conn.execute("ROLLBACK")
+                return {"status": "rejected", "reason": "task has a task_run without terminal end state (ended_at is null)"}
+
+            # Check for pending/approved lifecycle approvals
+            pending_approval = conn.execute(
+                "SELECT 1 FROM main.profile_lifecycle_approvals "
+                "WHERE task_id = ? AND status IN ('pending', 'approved')",
+                (task_id,),
+            ).fetchone()
+            if pending_approval is not None:
+                conn.execute("ROLLBACK")
+                return {"status": "rejected", "reason": "task has pending or approved lifecycle approval"}
+
+            # --- Pre-copy attachment files (before DB commit) ---
+            attachments = conn.execute(
+                "SELECT * FROM main.task_attachments WHERE task_id = ?", (task_id,)
+            ).fetchall()
+            src_att_root = attachments_root(board=src_board)
+            tgt_att_root = attachments_root(board=tgt_board)
+            tgt_att_dir = tgt_att_root / task_id
+            attachment_new_paths = {}  # old_id -> new_stored_path
+
+            for att in attachments:
+                att_id = att["id"]
+                stored_path = Path(att["stored_path"])
+                filename = att["filename"]
+
+                # Containment: source stored_path must be under source att root
+                try:
+                    expected_src_dir = src_att_root / task_id
+                    stored_resolved = stored_path.resolve()
+                    expected_resolved = expected_src_dir.resolve()
+                    stored_resolved.relative_to(expected_resolved)
+                except (ValueError, RuntimeError):
+                    conn.execute("ROLLBACK")
+                    return {"status": "rejected", "reason": "attachment stored_path not contained under source attachment root: " + str(stored_path)}
+
+                # Reject symlinks
+                if stored_path.is_symlink():
+                    conn.execute("ROLLBACK")
+                    return {"status": "rejected", "reason": "attachment source is a symlink: " + str(stored_path)}
+
+                # Reject unsafe filename (traversal)
+                if not _is_safe_filename(filename):
+                    conn.execute("ROLLBACK")
+                    return {"status": "rejected", "reason": "unsafe attachment filename: " + repr(filename)}
+
+                # Copy the blob (hash-verified, atomic rename, fsync)
+                try:
+                    src_hash = _sha256_file(stored_path)
+                    new_path = _copy_attachment_blob(
+                        stored_path, tgt_att_dir, att["size"], src_hash
+                    )
+                    attachment_new_paths[att_id] = str(new_path)
+                    if tgt_att_dir not in cleanup_dirs:
+                        cleanup_dirs.append(tgt_att_dir)
+                except MoveError as exc:
+                    conn.execute("ROLLBACK")
+                    for d in cleanup_dirs:
+                        _cleanup_attachment_artifacts(d)
+                    return {"status": "rejected", "reason": str(exc)}
+
+            # --- 7-table copy with ID remap ---
+
+            # 1. task_runs (integer PK, needs remap)
+            run_id_map = {}  # old_id -> new_id
+            runs = conn.execute(
+                "SELECT * FROM main.task_runs WHERE task_id = ? ORDER BY id", (task_id,)
+            ).fetchall()
+            run_cols = [r["name"] for r in conn.execute(
+                "PRAGMA main.table_info(task_runs)"
+            ).fetchall() if r["name"] != "id"]
+
+            for run in runs:
+                old_id = run["id"]
+                values = [run[c] for c in run_cols]
+                placeholders = ", ".join("?" for _ in run_cols)
+                col_list = ", ".join(run_cols)
+                cur = conn.execute(
+                    "INSERT INTO tgt.task_runs (" + col_list + ") VALUES (" + placeholders + ")",
+                    values,
+                )
+                run_id_map[old_id] = cur.lastrowid
+
+            # 2. task_events (integer PK, run_id remap)
+            events = conn.execute(
+                "SELECT * FROM main.task_events WHERE task_id = ? ORDER BY id", (task_id,)
+            ).fetchall()
+            ev_cols = [r["name"] for r in conn.execute(
+                "PRAGMA main.table_info(task_events)"
+            ).fetchall() if r["name"] != "id"]
+
+            for ev in events:
+                ev_values = []
+                for c in ev_cols:
+                    if c == "run_id" and ev["run_id"] is not None:
+                        ev_values.append(run_id_map.get(ev["run_id"]))
+                    else:
+                        ev_values.append(ev[c])
+                placeholders = ", ".join("?" for _ in ev_cols)
+                col_list = ", ".join(ev_cols)
+                conn.execute(
+                    "INSERT INTO tgt.task_events (" + col_list + ") VALUES (" + placeholders + ")",
+                    ev_values,
+                )
+
+            # 3. task_comments (integer PK, no remap needed)
+            comments = conn.execute(
+                "SELECT * FROM main.task_comments WHERE task_id = ? ORDER BY id", (task_id,)
+            ).fetchall()
+            cm_cols = [r["name"] for r in conn.execute(
+                "PRAGMA main.table_info(task_comments)"
+            ).fetchall() if r["name"] != "id"]
+
+            for cm in comments:
+                values = [cm[c] for c in cm_cols]
+                placeholders = ", ".join("?" for _ in cm_cols)
+                col_list = ", ".join(cm_cols)
+                conn.execute(
+                    "INSERT INTO tgt.task_comments (" + col_list + ") VALUES (" + placeholders + ")",
+                    values,
+                )
+
+            # 4. task_attachments (integer PK, stored_path update)
+            att_cols = [r["name"] for r in conn.execute(
+                "PRAGMA main.table_info(task_attachments)"
+            ).fetchall() if r["name"] != "id"]
+
+            for att in attachments:
+                att_values = []
+                for c in att_cols:
+                    if c == "stored_path":
+                        att_values.append(attachment_new_paths.get(att["id"], att["stored_path"]))
+                    else:
+                        att_values.append(att[c])
+                placeholders = ", ".join("?" for _ in att_cols)
+                col_list = ", ".join(att_cols)
+                conn.execute(
+                    "INSERT INTO tgt.task_attachments (" + col_list + ") VALUES (" + placeholders + ")",
+                    att_values,
+                )
+
+            # 5. kanban_notify_subs (composite text PK, no remap)
+            subs = conn.execute(
+                "SELECT * FROM main.kanban_notify_subs WHERE task_id = ?", (task_id,)
+            ).fetchall()
+            sub_cols = [r["name"] for r in conn.execute(
+                "PRAGMA main.table_info(kanban_notify_subs)"
+            ).fetchall()]
+
+            for sub in subs:
+                values = [sub[c] for c in sub_cols]
+                placeholders = ", ".join("?" for _ in sub_cols)
+                col_list = ", ".join(sub_cols)
+                conn.execute(
+                    "INSERT INTO tgt.kanban_notify_subs (" + col_list + ") VALUES (" + placeholders + ")",
+                    values,
+                )
+
+            # 6. profile_lifecycle_approvals (text PK, no remap)
+            # Only terminal approvals (rejected/executed/failed) reach here —
+            # pending/approved were rejected above.
+            approvals = conn.execute(
+                "SELECT * FROM main.profile_lifecycle_approvals WHERE task_id = ?", (task_id,)
+            ).fetchall()
+            appr_cols = [r["name"] for r in conn.execute(
+                "PRAGMA main.table_info(profile_lifecycle_approvals)"
+            ).fetchall()]
+
+            for appr in approvals:
+                values = [appr[c] for c in appr_cols]
+                placeholders = ", ".join("?" for _ in appr_cols)
+                col_list = ", ".join(appr_cols)
+                conn.execute(
+                    "INSERT INTO tgt.profile_lifecycle_approvals (" + col_list + ") VALUES (" + placeholders + ")",
+                    values,
+                )
+
+            # 7. tasks (text PK, clear runtime state + null cross-board epic_id)
+            task_cols = [r["name"] for r in conn.execute(
+                "PRAGMA main.table_info(tasks)"
+            ).fetchall()]
+            task_values = []
+            for c in task_cols:
+                if c == "epic_id":
+                    task_values.append(None)  # sever cross-board epic FK
+                elif c == "current_run_id":
+                    task_values.append(None)  # movable task has no active run
+                elif c == "claim_lock":
+                    task_values.append(None)
+                elif c == "claim_expires":
+                    task_values.append(None)
+                elif c == "worker_pid":
+                    task_values.append(None)
+                elif c == "last_heartbeat_at":
+                    task_values.append(None)
+                else:
+                    task_values.append(task_row[c])
+            placeholders = ", ".join("?" for _ in task_cols)
+            col_list = ", ".join(task_cols)
+            conn.execute(
+                "INSERT INTO tgt.tasks (" + col_list + ") VALUES (" + placeholders + ")",
+                task_values,
+            )
+
+            # --- Sever all source-board links involving the moved task ---
+            conn.execute(
+                "DELETE FROM main.task_links WHERE parent_id = ? OR child_id = ?",
+                (task_id, task_id),
+            )
+
+            # --- Emit exactly one moved event in target ---
+            now = int(time.time())
+            moved_payload = json.dumps({"from_board": src_board, "to_board": tgt_board})
+            conn.execute(
+                "INSERT INTO tgt.task_events (task_id, kind, payload, created_at) "
+                "VALUES (?, 'moved', ?, ?)",
+                (task_id, moved_payload, now),
+            )
+
+            # --- In-transaction source dependency recompute ---
+            # Links are already severed; recompute all todo/blocked on
+            # source (the moved task's children may now be promotable).
+            _recompute_ready_locked(conn, task_filter=None)
+
+            # --- In-transaction target dependency recompute ---
+            # Recompute the moved task on target. We can't use
+            # _recompute_ready_locked directly (it queries main.*); use
+            # transaction-aware manual logic against tgt.* that preserves
+            # manual/sticky and circuit-breaker blocks exactly.
+            _recompute_target_task_locked(conn, task_id, now)
+
+            # --- Failpoint: after_target_copy ---
+            if "after_target_copy" in hooks:
+                hooks["after_target_copy"]()
+
+            # --- Delete source rows in dependency-safe order ---
+            conn.execute("DELETE FROM main.task_events WHERE task_id = ?", (task_id,))
+            conn.execute("DELETE FROM main.task_comments WHERE task_id = ?", (task_id,))
+            conn.execute("DELETE FROM main.task_runs WHERE task_id = ?", (task_id,))
+            conn.execute("DELETE FROM main.task_attachments WHERE task_id = ?", (task_id,))
+            conn.execute("DELETE FROM main.kanban_notify_subs WHERE task_id = ?", (task_id,))
+            conn.execute("DELETE FROM main.profile_lifecycle_approvals WHERE task_id = ?", (task_id,))
+            conn.execute("DELETE FROM main.tasks WHERE id = ?", (task_id,))
+
+            # --- Failpoint: before_commit ---
+            if "before_commit" in hooks:
+                hooks["before_commit"]()
+
+            # --- COMMIT ---
+            conn.execute("COMMIT")
+
+            # --- Failpoint: after_commit ---
+            if "after_commit" in hooks:
+                hooks["after_commit"]()
+
+        except Exception as exc:
+            try:
+                conn.execute("ROLLBACK")
+            except sqlite3.OperationalError:
+                pass
+            # Clean up attachment temp files from failed attempt
+            for d in cleanup_dirs:
+                _cleanup_attachment_artifacts(d)
+            raise
+
+        # --- Post-commit: detach and close move connection ---
+        # Must close before WAL restoration (separate connections).
+        try:
+            conn.execute("DETACH DATABASE tgt")
+        except Exception:
+            pass
+        conn.close()
+        conn = None
+
+        # --- Post-commit: WAL restoration (separate connections) ---
+        # Never swallow restoration errors — surface inability to prove
+        # restoration. A crash after commit but before restoration leaves
+        # safe DELETE-mode databases; normal connect() restores WAL.
+        wal_errors = []
+        if src_orig_mode and src_orig_mode.lower() == "wal":
+            try:
+                _restore_wal_mode(source_path, "source")
+                wal_restored["src"] = True
+            except Exception as exc:
+                wal_errors.append("source WAL restore failed: " + str(exc))
+        else:
+            wal_restored["src"] = True
+
+        if tgt_orig_mode and tgt_orig_mode.lower() == "wal":
+            try:
+                _restore_wal_mode(target_path, "target")
+                wal_restored["tgt"] = True
+            except Exception as exc:
+                wal_errors.append("target WAL restore failed: " + str(exc))
+        else:
+            wal_restored["tgt"] = True
+
+        if wal_errors:
+            # Databases are durable in DELETE mode but WAL is not restored.
+            # Surface the error — do not report ordinary success.
+            return {
+                "status": "error",
+                "reason": "; ".join(wal_errors),
+                "task_id": task_id,
+                "wal_restored": wal_restored,
+            }
+
+        # --- Post-commit: source blob deletion (best-effort, retryable) ---
+        for att in attachments:
+            try:
+                old_path = Path(att["stored_path"])
+                if old_path.exists() and not old_path.is_symlink():
+                    old_path.unlink()
+            except OSError:
+                pass  # best-effort, retryable
+
+        return {"status": "moved", "task_id": task_id}
+
+    except MoveError as exc:
+        return {"status": "rejected", "reason": str(exc)}
+    except Exception as exc:
+        return {"status": "error", "reason": str(exc)}
+    finally:
+        if conn is not None:
+            try:
+                conn.execute("DETACH DATABASE tgt")
+            except Exception:
+                pass
+            try:
+                conn.close()
+            except Exception:
+                pass
+        # If we switched to DELETE but didn't restore WAL yet, attempt
+        # restoration in the finally block as a safety net. This handles
+        # the case where an exception prevented the post-commit restore.
+        if not wal_restored["src"] and src_orig_mode and src_orig_mode.lower() == "wal":
+            try:
+                _restore_wal_mode(source_path, "source")
+            except Exception as exc:
+                _log.warning("finally: source WAL restore failed: %s", exc)
+        if not wal_restored["tgt"] and tgt_orig_mode and tgt_orig_mode.lower() == "wal":
+            try:
+                _restore_wal_mode(target_path, "target")
+            except Exception as exc:
+                _log.warning("finally: target WAL restore failed: %s", exc)
+        _release_locks(lock_handles)
+
+
+def _recompute_target_task_locked(conn, task_id, now):
+    """Transaction-aware recompute for the moved task on the target (tgt.*) schema.
+
+    Called inside the attached move transaction.  Mirrors
+    :func:`_recompute_ready_locked` but queries ``tgt.tasks`` and
+    ``tgt.task_links`` instead of ``main.*``.  Preserves manual/sticky
+    blocks and circuit-breaker blocks exactly — no generic
+    blocked→ready promotion.
+    """
+    tgt_task = conn.execute(
+        "SELECT status, block_kind, consecutive_failures, max_retries "
+        "FROM tgt.tasks WHERE id = ?",
+        (task_id,),
+    ).fetchone()
+    if tgt_task is None:
+        return
+    if tgt_task["status"] not in ("todo", "blocked"):
+        return
+
+    # Preserve sticky/manual blocks: check last blocked/unblocked event
+    tgt_sticky = conn.execute(
+        "SELECT kind FROM tgt.task_events "
+        "WHERE task_id = ? AND kind IN ('blocked', 'unblocked') "
+        "ORDER BY id DESC LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    is_sticky = tgt_sticky and tgt_sticky["kind"] == "blocked"
+    if is_sticky:
+        return
+
+    # Check if all parents are done/archived
+    parents = conn.execute(
+        "SELECT t.status FROM tgt.tasks t "
+        "JOIN tgt.task_links l ON l.parent_id = t.id "
+        "WHERE l.child_id = ?",
+        (task_id,),
+    ).fetchall()
+    if not parents or all(p["status"] in ("done", "archived") for p in parents):
+        if tgt_task["status"] == "blocked":
+            # Check circuit breaker
+            failures = int(tgt_task["consecutive_failures"] or 0)
+            task_limit = tgt_task["max_retries"]
+            effective_limit = (
+                int(task_limit) if task_limit is not None
+                else int(DEFAULT_FAILURE_LIMIT)
+            )
+            if failures >= effective_limit:
+                return
+            conn.execute(
+                "UPDATE tgt.tasks SET status = 'ready' "
+                "WHERE id = ? AND status = 'blocked'",
+                (task_id,),
+            )
+        else:
+            conn.execute(
+                "UPDATE tgt.tasks SET status = 'ready' WHERE id = ? AND status = 'todo'",
+                (task_id,),
+            )
+        conn.execute(
+            "INSERT INTO tgt.task_events (task_id, kind, payload, created_at) "
+            "VALUES (?, 'promoted', NULL, ?)",
+            (task_id, now),
+        )
 
 # ---------------------------------------------------------------------------
 # Workspace resolution

@@ -2375,196 +2375,75 @@ def _cmd_archive(args: argparse.Namespace) -> int:
 
 
 def _cmd_move(args: argparse.Namespace) -> int:
-    """Move a task from one board DB to another, preserving all related rows."""
-    import sqlite3 as _sqlite3
-    import json as _json
-    import time as _time
+    """Move a task from one board DB to another atomically.
 
+    Delegates to :func:`kanban_db.move_task_atomic` which uses a single
+    attached multi-database transaction with dual sidecar locks for
+    cross-process safety.
+    """
     task_id = args.task_id
     to_board = args.to_board
-    from_board = getattr(args, "board", None)  # --board flag if provided
 
-    # Collect all board DB paths
-    all_dbs: list[tuple[str, Path]] = []
-    default_path = kb.kanban_db_path(board="default")
-    all_dbs.append(("default", default_path))
-    boards_dir = kb.board_dir(None).parent if hasattr(kb, "board_dir") else Path(
-        os.path.expanduser("~/.hermes/kanban/boards")
-    )
-    if boards_dir.exists():
-        for child in sorted(boards_dir.iterdir()):
-            if child.is_dir() and (child / "kanban.db").exists():
-                slug = child.name
-                if slug != "default":
-                    all_dbs.append((slug, child / "kanban.db"))
+    # Resolve source board: check --board flag, then scan all boards.
+    from_board = getattr(args, "board", None)
+    if from_board:
+        source_path = kb.kanban_db_path(board=from_board)
+    else:
+        # Scan all boards to find which has the task
+        source_path = None
+        all_dbs = []
+        default_path = kb.kanban_db_path(board="default")
+        all_dbs.append(("default", default_path))
+        boards_dir = kb.board_dir(None).parent if hasattr(kb, "board_dir") else Path(
+            os.path.expanduser("~/.hermes/kanban/boards")
+        )
+        if boards_dir.exists():
+            for child in sorted(boards_dir.iterdir()):
+                if child.is_dir() and (child / "kanban.db").exists():
+                    slug = child.name
+                    if slug != "default":
+                        all_dbs.append((slug, child / "kanban.db"))
+        import sqlite3 as _sqlite3
+        for slug, path in all_dbs:
+            try:
+                c = _sqlite3.connect(str(path))
+                row = c.execute("SELECT id FROM tasks WHERE id = ?", (task_id,)).fetchone()
+                c.close()
+                if row:
+                    source_path = path
+                    from_board = slug
+                    break
+            except Exception:
+                try:
+                    c.close()
+                except Exception:
+                    pass
 
-    # Find which board currently has the task
-    source_board: Optional[str] = None
-    source_path: Optional[Path] = None
-    source_conn: Optional[_sqlite3.Connection] = None
-    for slug, path in all_dbs:
-        try:
-            c = _sqlite3.connect(str(path))
-            c.row_factory = _sqlite3.Row
-            row = c.execute("SELECT id FROM tasks WHERE id = ?", (task_id,)).fetchone()
-            if row:
-                source_board = slug
-                source_path = path
-                source_conn = c
-                break
-            c.close()
-        except Exception:
-            c.close()
-
-    if source_conn is None:
-        print(f"task {task_id} not found on any board", file=sys.stderr)
-        return 1
-
-    if source_board == to_board:
-        source_conn.close()
-        print(f"task {task_id} is already on board '{to_board}'", file=sys.stderr)
-        return 1
+        if source_path is None:
+            print("task " + task_id + " not found on any board", file=sys.stderr)
+            return 1
 
     # Resolve target board path
-    if to_board == "default":
-        target_path = kb.kanban_db_path(board="default")
-    else:
-        target_path = kb.kanban_db_path(board=to_board)
-
+    target_path = kb.kanban_db_path(board=to_board)
     if not target_path.exists():
-        source_conn.close()
-        print(f"target board '{to_board}' does not exist at {target_path}", file=sys.stderr)
+        print("target board '" + to_board + "' does not exist at " + str(target_path), file=sys.stderr)
         return 1
 
-    # Ensure target DB schema is migrated
-    kb.init_db(target_path)
+    result = kb.move_task_atomic(source_path, target_path, task_id)
+    status = result.get("status", "error")
 
-    now = int(_time.time())
-
-    # Read the task row
-    task_row = source_conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
-    if task_row is None:
-        source_conn.close()
-        print(f"task {task_id} vanished from source before move", file=sys.stderr)
+    if status == "moved":
+        print("Moved " + task_id + " from '" + str(from_board or "default") + "' to '" + to_board + "'")
+        return 0
+    elif status == "already_moved":
+        print("Task " + task_id + " already moved to '" + to_board + "'")
+        return 0
+    elif status == "rejected":
+        print("Move rejected: " + result.get("reason", "unknown"), file=sys.stderr)
         return 1
-
-    # Get column names from source
-    task_cols = [desc[0] for desc in source_conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).description]
-    task_values = [task_row[col] for col in task_cols]
-
-    # Read related rows
-    events = source_conn.execute(
-        "SELECT * FROM task_events WHERE task_id = ? ORDER BY id", (task_id,)
-    ).fetchall()
-    event_cols = [desc[0] for desc in source_conn.execute(
-        "SELECT * FROM task_events WHERE task_id = ? ORDER BY id LIMIT 1", (task_id,)
-    ).description] if events else []
-
-    comments = source_conn.execute(
-        "SELECT * FROM task_comments WHERE task_id = ? ORDER BY id", (task_id,)
-    ).fetchall()
-    comment_cols = [desc[0] for desc in source_conn.execute(
-        "SELECT * FROM task_comments WHERE task_id = ? ORDER BY id LIMIT 1", (task_id,)
-    ).description] if comments else []
-
-    links_as_parent = source_conn.execute(
-        "SELECT * FROM task_links WHERE parent_id = ?", (task_id,)
-    ).fetchall()
-    links_as_child = source_conn.execute(
-        "SELECT * FROM task_links WHERE child_id = ?", (task_id,)
-    ).fetchall()
-
-    # Open target DB and perform the move
-    target_conn = _sqlite3.connect(str(target_path))
-    target_conn.row_factory = _sqlite3.Row
-    try:
-        # Get target task columns (may differ slightly from source)
-        target_cols = {row["name"] for row in target_conn.execute("PRAGMA table_info(tasks)")}
-        # Build INSERT with only columns that exist in target
-        insert_cols = [c for c in task_cols if c in target_cols]
-        placeholders = ", ".join("?" for _ in insert_cols)
-        col_list = ", ".join(insert_cols)
-        insert_values = [task_row[c] for c in insert_cols]
-
-        target_conn.execute(
-            f"INSERT INTO tasks ({col_list}) VALUES ({placeholders})",
-            insert_values,
-        )
-
-        # Copy task_events (skip id to let target autoincrement)
-        for ev in events:
-            ev_cols = [desc[0] for desc in source_conn.execute(
-                "SELECT * FROM task_events WHERE task_id = ? LIMIT 1", (task_id,)
-            ).description]
-            # Get target task_events columns
-            target_ev_cols = {row["name"] for row in target_conn.execute("PRAGMA table_info(task_events)")}
-            insert_ev_cols = [c for c in ev_cols if c in target_ev_cols and c != "id"]
-            ev_placeholders = ", ".join("?" for _ in insert_ev_cols)
-            ev_col_list = ", ".join(insert_ev_cols)
-            ev_values = [ev[c] for c in insert_ev_cols]
-            target_conn.execute(
-                f"INSERT INTO task_events ({ev_col_list}) VALUES ({ev_placeholders})",
-                ev_values,
-            )
-
-        # Copy task_comments (skip id)
-        for cm in comments:
-            cm_cols = [desc[0] for desc in source_conn.execute(
-                "SELECT * FROM task_comments WHERE task_id = ? LIMIT 1", (task_id,)
-            ).description]
-            target_cm_cols = {row["name"] for row in target_conn.execute("PRAGMA table_info(task_comments)")}
-            insert_cm_cols = [c for c in cm_cols if c in target_cm_cols and c != "id"]
-            cm_placeholders = ", ".join("?" for _ in insert_cm_cols)
-            cm_col_list = ", ".join(insert_cm_cols)
-            cm_values = [cm[c] for c in insert_cm_cols]
-            target_conn.execute(
-                f"INSERT INTO task_comments ({cm_col_list}) VALUES ({cm_placeholders})",
-                cm_values,
-            )
-
-        # Copy task_links
-        for lk in links_as_parent:
-            target_conn.execute(
-                "INSERT OR IGNORE INTO task_links (parent_id, child_id) VALUES (?, ?)",
-                (lk["parent_id"], lk["child_id"]),
-            )
-        for lk in links_as_child:
-            target_conn.execute(
-                "INSERT OR IGNORE INTO task_links (parent_id, child_id) VALUES (?, ?)",
-                (lk["parent_id"], lk["child_id"]),
-            )
-
-        # Log a 'moved' event in target DB
-        target_conn.execute(
-            "INSERT INTO task_events (task_id, kind, payload, created_at) "
-            "VALUES (?, 'moved', ?, ?)",
-            (task_id, _json.dumps({"from_board": source_board, "to_board": to_board}), now),
-        )
-
-        # Delete from source
-        source_conn.execute("DELETE FROM task_events WHERE task_id = ?", (task_id,))
-        source_conn.execute("DELETE FROM task_comments WHERE task_id = ?", (task_id,))
-        source_conn.execute("DELETE FROM task_links WHERE parent_id = ?", (task_id,))
-        source_conn.execute("DELETE FROM task_links WHERE child_id = ?", (task_id,))
-        source_conn.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
-        source_conn.commit()
-        target_conn.commit()
-    except Exception as e:
-        target_conn.rollback()
-        source_conn.rollback()
-        source_conn.close()
-        target_conn.close()
-        print(f"move failed: {e}", file=sys.stderr)
-        import traceback
-        traceback.print_exc()
+    else:
+        print("Move error: " + result.get("reason", "unknown"), file=sys.stderr)
         return 1
-    finally:
-        if source_conn:
-            source_conn.close()
-        target_conn.close()
-
-    print(f"Moved {task_id} from '{source_board}' to '{to_board}'")
-    return 0
 
 
 def _cmd_epics(args: argparse.Namespace) -> int:
