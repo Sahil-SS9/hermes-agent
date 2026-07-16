@@ -12,8 +12,8 @@
         "review": 1
       },
       "ids": [
-        "t_9dfe5427",
-        "t_aaf9701f"
+        "t_2d94cc58",
+        "t_28e49054"
       ],
       "source": "plugins/kanban/dashboard/plugin_api.py::get_board (TestClient)"
     },
@@ -23,8 +23,8 @@
         "review": 1
       },
       "ids": [
-        "t_9dfe5427",
-        "t_aaf9701f"
+        "t_2d94cc58",
+        "t_28e49054"
       ],
       "source": "hermes_cli.kanban._cmd_list (incl. recompute_ready)"
     },
@@ -34,8 +34,8 @@
         "review": 1
       },
       "ids": [
-        "t_9dfe5427",
-        "t_aaf9701f"
+        "t_2d94cc58",
+        "t_28e49054"
       ],
       "source": "plugins/kanban/dashboard/plugin_api.py::get_board (TestClient)"
     },
@@ -47,7 +47,7 @@
     "cli_render_command": "hermes_cli.kanban._cmd_list (incl. recompute_ready)",
     "dashboard_render_command": "plugins/kanban/dashboard/plugin_api.py::get_board (TestClient)",
     "captured_by": "scripts/capture_dashboard_parity.py",
-    "git_sha": "e1f679229f9baa1eef63f71c322a7e840612702c",
+    "git_sha": "a2b2fcf0950d7de771616e1df27f07b618cf0dcd",
     "temp_root_cleaned": true
   },
   "scope_limits": {
