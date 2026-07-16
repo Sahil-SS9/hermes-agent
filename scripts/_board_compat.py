@@ -28,9 +28,7 @@ Constraints honoured (from the controller-verified scope):
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
-from typing import Optional
 
 # Legacy slug → canonical successor.  Boards not listed here (apps, research,
 # kensei-rebuild …) are unchanged and pass through verbatim.
@@ -57,7 +55,7 @@ def canonical_board_slug(slug: str) -> str:
     return LEGACY_BOARD_MAP.get(slug, slug)
 
 
-def resolve_board_db(slug: str, *, hermes_home: Optional[Path | str] = None) -> Path:
+def resolve_board_db(slug: str) -> Path:
     """Resolve a board slug to its ``kanban.db`` path with reversible fallback.
 
     Resolution order:
@@ -83,10 +81,10 @@ def resolve_board_db(slug: str, *, hermes_home: Optional[Path | str] = None) -> 
     return kb.kanban_db_path(canonical)
 
 
-def resolve_board_db_str(slug: str, *, hermes_home: Optional[Path | str] = None) -> str:
+def resolve_board_db_str(slug: str) -> str:
     """Same as :func:`resolve_board_db` but returns ``str`` for scripts that
     build paths with ``os.path.join``."""
-    return str(resolve_board_db(slug, hermes_home=hermes_home))
+    return str(resolve_board_db(slug))
 
 
 def canonical_board_list(legacy_boards: list[str]) -> list[str]:
