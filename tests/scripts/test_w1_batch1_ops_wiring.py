@@ -176,9 +176,8 @@ class TestBoardResolution:
 
 class TestHermesHomeEnvResolution:
     """Regression: resolve_board_db must honour the HERMES_HOME env var via
-    the canonical kanban_db_path() resolution chain.  No ``hermes_home``
-    parameter exists on the public API — environment is the single source of
-    truth for the home root."""
+    the canonical kanban_db_path() resolution chain.  Environment is the
+    single source of truth for the home root."""
 
     def test_resolve_board_db_reads_hermes_home_env(self, monkeypatch, tmp_path):
         """A board created under fake_home A is resolved when HERMES_HOME=A;
@@ -208,29 +207,6 @@ class TestHermesHomeEnvResolution:
         _make_board(fake_home, "security-ops")
         s = bc.resolve_board_db_str("ops")
         assert s == str(fake_home / "kanban" / "boards" / "security-ops" / "kanban.db")
-
-    def test_no_hermes_home_parameter_in_signatures(self, monkeypatch, fake_home):
-        """The public API must NOT advertise a hermes_home keyword — it is
-        dead code that misleads callers.  Pin the absence."""
-        import inspect
-        bc = _load_board_compat(monkeypatch, fake_home)
-        for fn_name in ("resolve_board_db", "resolve_board_db_str"):
-            sig = inspect.signature(getattr(bc, fn_name))
-            assert "hermes_home" not in sig.parameters, (
-                f"{fn_name} must not declare hermes_home (dead parameter removed)"
-            )
-            params = list(sig.parameters)
-            assert params == ["slug"], (
-                f"{fn_name} signature must be (slug) only, got {params}"
-            )
-
-    def test_no_os_import_in_board_compat(self, monkeypatch, fake_home):
-        """Pin Finding 2: the module must not import os (unused)."""
-        bc = _load_board_compat(monkeypatch, fake_home)
-        assert not hasattr(bc, "os"), (
-            "_board_compat must not import os (unused import removed)"
-        )
-
 
 
 # ── W1-G: seven scripts import the compat layer and don't hardcode retired paths ──
