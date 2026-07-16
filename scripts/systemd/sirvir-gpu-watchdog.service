@@ -1,18 +1,16 @@
 [Unit]
-Description=Sirvir GPU Watchdog — auto-scaling VRAM watcher
-After=turbohaul-main.service turbohaul-aux.service
-Wants=turbohaul-main.service turbohaul-aux.service
+Description=Sirvir Turbohaul Policy Observer (observe-only)
+After=docker.service
+Wants=docker.service
 
 [Service]
 Type=simple
 User=kensei
-ExecStart=/home/kensei/repos/KenseiAgent/.venv/bin/python /home/kensei/.hermes/skills/turbofit/scripts/scaling-watcher.py --interval 30
+ExecStart=/home/kensei/repos/KenseiAgent/.venv/bin/python /home/kensei/repos/KenseiAgent/scripts/sirvir_turbohaul_observer.py --interval 30
 Restart=always
 RestartSec=10
 Environment="HOME=/home/kensei"
-Environment="TURBOFIT_CATALOG=/home/kensei/.config/turbofit/models.yaml"
-Environment="TURBOFIT_PREFERENCES=/home/kensei/.config/turbofit/preferences.yaml"
 LimitNOFILE=65536
 
 [Install]
-WantedBy=default.target
+WantedBy=multi-user.target
