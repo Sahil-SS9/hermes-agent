@@ -28,10 +28,33 @@ import _board_compat
 # Canonical default board DB. Do not include ~/.hermes/kanban/kanban.db: on this
 # VPS that path exists as an empty placeholder and would create noisy false
 # warnings. Named boards are scanned from BOARDS_DIR below.
-DEFAULT_DBS = [_board_compat.resolve_board_db("default")]
 BOARDS_DIR = HERMES_HOME / "kanban" / "boards"
-# Legacy slugs kept as labels; discover_dbs resolves them via _board_compat.
-REQUIRED_BOARDS = ("ops", "research", "apps", "content-lead")
+
+# P05 Batch 1: canonical 7-DB topology.  These are the board slugs that
+# *must* exist in a fully-migrated KENSEI deployment.  ``default`` is the
+# legacy alias for ``core`` (resolved via _board_compat).  The remaining
+# six are canonical and never renamed.  ``kensei-rebuild`` was absent from
+# the legacy REQUIRED_BOARDS list — it is now included so WFA discovery
+# covers the full topology instead of silently skipping it.
+#
+# Legacy labels (ops, content-lead, default) are kept as semantic keys and
+# resolved to their canonical DB paths via _board_compat.resolve_board_db.
+CANONICAL_BOARDS = (
+    "default",        # legacy alias → core
+    "apps",
+    "content-lead",   # legacy alias → content
+    "ops",            # legacy alias → security-ops
+    "kensei-rebuild",
+    "research",
+)
+# Canonical slug set (post-compat) for completeness checks.
+CANONICAL_BOARD_SLUGS = (
+    "core", "apps", "content", "kensei-rebuild", "research", "security-ops",
+)
+# Legacy slugs kept as labels for back-compat reporting; discover_dbs
+# resolves them via _board_compat.  Superset of CANONICAL_BOARDS for
+# any downstream consumer still reading this name.
+REQUIRED_BOARDS = CANONICAL_BOARDS
 SMOKE_FIXTURE_TASK_IDS = ("t_9c935bab", "t_e4032b4b", "t_ea2483cd")
 OUT_DIR = HERMES_HOME / "governance" / "logboard"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -72,21 +95,34 @@ def display_now(ts: dt.datetime) -> str:
 
 
 def discover_dbs() -> list[dict[str, Any]]:
+    """Enumerate all board DBs: canonical topology + profile-scoped boards.
+
+    P05 Batch 1: discovers the full canonical 7-DB topology (default→core,
+    apps, content-lead→content, ops→security-ops, kensei-rebuild, research)
+    by resolving each canonical slug through ``_board_compat.resolve_board_db``
+    (which honours legacy→canonical fallback), then scans profile-scoped
+    boards from ``HERMES_HOME/profiles/*/kanban/boards/*/kanban.db``.
+
+    No reliance on the static REQUIRED_BOARDS legacy-label list alone —
+    the canonical slugs are enumerated directly from ``CANONICAL_BOARDS``
+    and resolved via ``_board_compat`` so retired slugs map to their
+    canonical successors.
+    """
     candidates: list[tuple[str, Path]] = []
-    for path in DEFAULT_DBS:
-        candidates.append(("default", path))
-    for board in REQUIRED_BOARDS:
-        # W1-G: resolve each (possibly legacy) slug to its live DB path.
+    for board in CANONICAL_BOARDS:
+        # Resolve each (possibly legacy) slug to its live DB path.
         candidates.append((board, _board_compat.resolve_board_db(board)))
 
     # Scan profile-scoped boards (e.g. dezzy/ops, wesker/default) so that
     # task run/status drift across all profiles is caught, not just canonical boards.
-    for profile_dir in sorted((HERMES_HOME / "profiles").iterdir()):
-        profile = profile_dir.name
-        if not profile_dir.is_dir():
-            continue
-        for board_dir in sorted(profile_dir.glob("kanban/boards/*/kanban.db")):
-            candidates.append((f"{profile}/{board_dir.parent.name}", board_dir))
+    profiles_root = HERMES_HOME / "profiles"
+    if profiles_root.is_dir():
+        for profile_dir in sorted(profiles_root.iterdir()):
+            profile = profile_dir.name
+            if not profile_dir.is_dir():
+                continue
+            for board_dir in sorted(profile_dir.glob("kanban/boards/*/kanban.db")):
+                candidates.append((f"{profile}/{board_dir.parent.name}", board_dir))
 
     seen: set[Path] = set()
     dbs: list[dict[str, Any]] = []

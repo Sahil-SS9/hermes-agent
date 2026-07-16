@@ -1,5 +1,6 @@
 import json
 import sqlite3
+import time
 
 import pytest
 
@@ -122,3 +123,192 @@ def test_record_event_if_enabled_is_noop_when_disabled(tmp_path, monkeypatch):
     monkeypatch.setattr(pal, "is_enabled", lambda cfg=None: False)
     assert pal.record_event_if_enabled(source="test", event_type="noop") is None
     assert not pal.ledger_db_path().exists()
+
+
+# ── P05 Batch 1: synthetic profile event round-trip tests ────────────────────
+#
+# The tests below extend the original ledger tests (above) with synthetic
+# profile events that exercise the full schema shape: event_type,
+# actor_profile, target_profile, payload, ts.  These prove the schema
+# supports governance events beyond skill/kanban activity.
+# ───────────────────────────────────────────────────────────────────────────
+
+
+class TestSyntheticSchemaFields:
+    """The ledger schema must support the full synthetic event shape."""
+
+    def test_event_id_is_returned(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        from hermes_cli.profile_activity_ledger import append_event
+
+        eid = append_event(
+            source="test",
+            event_type="profile.test",
+            actor_profile="octacon",
+            target_profile="denji",
+            payload={"key": "value"},
+        )
+        assert eid.startswith("pal_")
+
+    def test_occurred_at_preserved(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        from hermes_cli.profile_activity_ledger import append_event, query_events
+
+        ts = int(time.time()) - 3600
+        append_event(
+            source="test",
+            event_type="profile.test",
+            occurred_at=ts,
+        )
+        events = query_events(event_types=["profile.test"])
+        assert len(events) == 1
+        assert events[0]["occurred_at"] == ts
+
+    def test_actor_and_target_profile_preserved(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        from hermes_cli.profile_activity_ledger import append_event, query_events
+
+        append_event(
+            source="test",
+            event_type="profile.grant",
+            actor_profile="kensei",
+            target_profile="octacon",
+        )
+        events = query_events(event_types=["profile.grant"])
+        assert len(events) == 1
+        assert events[0]["actor_profile"] == "kensei"
+        assert events[0]["target_profile"] == "octacon"
+
+    def test_payload_round_trips_as_dict(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        from hermes_cli.profile_activity_ledger import append_event, query_events
+
+        payload = {"action": "promote", "skill": "code-review", "tier": 2}
+        append_event(
+            source="test",
+            event_type="profile.test",
+            payload=payload,
+        )
+        events = query_events(event_types=["profile.test"])
+        assert len(events) == 1
+        assert events[0]["payload"] == payload
+
+    def test_payload_with_nested_structures(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        from hermes_cli.profile_activity_ledger import append_event, query_events
+
+        payload = {
+            "answers": {"q1": 4, "q2": "good"},
+            "meta": {"tags": ["a", "b"]},
+        }
+        append_event(
+            source="test",
+            event_type="profile.self_eval.submit",
+            payload=payload,
+        )
+        events = query_events(event_types=["profile.self_eval.submit"])
+        assert events[0]["payload"] == payload
+
+    def test_empty_payload_defaults_to_empty_dict(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        from hermes_cli.profile_activity_ledger import append_event, query_events
+
+        append_event(source="test", event_type="profile.test")
+        events = query_events(event_types=["profile.test"])
+        assert events[0]["payload"] == {}
+
+
+class TestSyntheticRoundTrip:
+    """Full append → query round-trip through the ledger schema."""
+
+    def test_multiple_events_query_all(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        from hermes_cli.profile_activity_ledger import append_event, query_events
+
+        base = int(time.time())
+        for i in range(3):
+            append_event(
+                source="test",
+                event_type="profile.test",
+                actor_profile=f"profile_{i}",
+                occurred_at=base + i,
+            )
+        events = query_events(event_types=["profile.test"])
+        assert len(events) == 3
+        # newest-first ordering
+        assert events[0]["occurred_at"] >= events[1]["occurred_at"]
+
+    def test_filter_by_target_profile(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        from hermes_cli.profile_activity_ledger import append_event, query_events
+
+        append_event(source="test", event_type="profile.test", target_profile="alpha")
+        append_event(source="test", event_type="profile.test", target_profile="beta")
+        alpha = query_events(target_profile="alpha")
+        assert len(alpha) == 1
+        assert alpha[0]["target_profile"] == "alpha"
+
+    def test_filter_by_actor_profile(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        from hermes_cli.profile_activity_ledger import append_event, query_events
+
+        append_event(source="test", event_type="profile.test", actor_profile="kensei")
+        append_event(source="test", event_type="profile.test", actor_profile="denji")
+        kensei = query_events(actor_profile="kensei")
+        assert len(kensei) == 1
+        assert kensei[0]["actor_profile"] == "kensei"
+
+    def test_filter_by_since_until(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        from hermes_cli.profile_activity_ledger import append_event, query_events
+
+        base = int(time.time()) - 10000
+        append_event(source="test", event_type="profile.test", occurred_at=base)
+        append_event(source="test", event_type="profile.test", occurred_at=base + 5000)
+        recent = query_events(since=base + 1000)
+        assert len(recent) == 1
+        assert recent[0]["occurred_at"] == base + 5000
+
+    def test_limit(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        from hermes_cli.profile_activity_ledger import append_event, query_events
+
+        base = int(time.time())
+        for i in range(5):
+            append_event(source="test", event_type="profile.test", occurred_at=base + i)
+        events = query_events(event_types=["profile.test"], limit=2)
+        assert len(events) == 2
+
+    def test_empty_ledger_returns_empty_list(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        from hermes_cli.profile_activity_ledger import query_events
+
+        assert query_events(event_types=["profile.test"]) == []
+
+
+class TestSyntheticIdempotency:
+    """The event_id is the idempotency key."""
+
+    def test_duplicate_event_id_ignored(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        from hermes_cli.profile_activity_ledger import append_event, query_events
+
+        eid = append_event(
+            source="test", event_type="profile.test", event_id="custom-001"
+        )
+        assert eid == "custom-001"
+        eid2 = append_event(
+            source="test", event_type="profile.test", event_id="custom-001"
+        )
+        assert eid2 == "custom-001"
+        events = query_events(event_types=["profile.test"])
+        assert len(events) == 1
+
+    def test_auto_generated_event_id(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        from hermes_cli.profile_activity_ledger import append_event, query_events
+
+        eid1 = append_event(source="test", event_type="profile.test")
+        eid2 = append_event(source="test", event_type="profile.test")
+        assert eid1 != eid2
+        assert len(query_events(event_types=["profile.test"])) == 2
