@@ -940,6 +940,39 @@ def _serve_plugin_skill(
             ensure_ascii=False,
         )
 
+    # Allowlist enforcement — qualified plugin skills obey the same
+    # allow/shadow/block decision as local skills.
+    _resolved_name = f"{namespace}:{bare}"
+    _access = _skill_access_decision(_resolved_name)
+    if _access != "allow":
+        _profile = _current_profile()
+        record_event_if_enabled(
+            source="skill.loader",
+            actor_profile=_profile,
+            target_profile=_profile,
+            event_type="skill.access.would_block"
+            if _access == "shadow_block"
+            else "skill.access.blocked",
+            object_type="skill",
+            object_id=_resolved_name,
+            summary=f"{_access} load of {_resolved_name} (not in enabled_skills, no grant)",
+            payload={"requested_name": _resolved_name},
+        )
+        if _access == "block":
+            return json.dumps(
+                {
+                    "success": False,
+                    "error": (
+                        f"Skill '{_resolved_name}' is not enabled for this profile. "
+                        "Request temporary access for your task with "
+                        "skill_request(skill, task_id, reason), or ask the relevant "
+                        "lead/Denji to enable or create it."
+                    ),
+                    "readiness_status": "not_enabled",
+                },
+                ensure_ascii=False,
+            )
+
     try:
         content = skill_md.read_text(encoding="utf-8")
     except Exception as e:
