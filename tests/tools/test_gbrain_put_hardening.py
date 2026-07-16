@@ -114,6 +114,17 @@ def test_gbrain_put_rejects_path_traversal(monkeypatch, tmp_path):
     assert "error" in data
 
 
+def test_gbrain_put_rejects_dot_slug(monkeypatch, tmp_path):
+    """A dot slug cannot create the surprising root-level ``..md`` page."""
+    repo = _make_brain(tmp_path, {})
+    monkeypatch.setattr(gbrain, "GBRAIN_REPO", repo)
+
+    data = json.loads(gbrain.gbrain_put({"slug": ".", "content": "NO\n"}))
+
+    assert "error" in data
+    assert not (repo / "..md").exists()
+
+
 def test_gbrain_put_rejects_symlink(monkeypatch, tmp_path):
     """A symlink slug (aliasing an in-repo file) is rejected; the target is
     not written through."""

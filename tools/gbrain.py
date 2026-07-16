@@ -369,7 +369,11 @@ def gbrain_put(args: dict, **_: Any) -> str:
         return tool_error("content is required")
     repo_root = GBRAIN_REPO.resolve()
     slug_path = Path(slug)
-    if slug_path.is_absolute() or any(part in ("", ".", "..") for part in slug_path.parts):
+    if (
+        not slug_path.parts
+        or slug_path.is_absolute()
+        or any(part in ("", ".", "..") for part in slug_path.parts)
+    ):
         return tool_error("slug must resolve under the GBrain repo")
     target = repo_root / f"{slug}.md"
     try:
