@@ -118,11 +118,18 @@ def test_no_default_repository_write_and_safe_explicit_output(tmp_path, monkeypa
     assert not nested_danger.parent.exists()
 
 
-def test_capture_helpers_reject_unowned_root(tmp_path):
+def test_capture_helpers_reject_unowned_root(tmp_path, monkeypatch):
     mod = _load_capture()
     with pytest.raises(RuntimeError, match="refusing unowned capture root"):
         with mod.owned_env(tmp_path):
             pass
+    with pytest.raises(RuntimeError, match="refusing non-temporary capture root"):
+        mod._register_owned_root(REPO_ROOT)
+    protected = tmp_path / "protected"
+    protected.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(protected))
+    with pytest.raises(ValueError, match="Hermes data path"):
+        mod._write_new_output(protected / "report.json", "{}")
 
 
 def test_capture_restores_caller_environment(monkeypatch):

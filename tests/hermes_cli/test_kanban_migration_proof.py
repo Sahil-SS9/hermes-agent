@@ -294,8 +294,8 @@ def test_proof_a_failure_after_attachment_copy_rolls_back(owned_root, monkeypatc
     # Inject a failure AFTER the staged bytes are published. This proves the
     # compensation path removes published files, not merely pre-copy stages.
     original_publish = mod._publish_attachment
-    def _publish_then_fail(stage, target):
-        original_publish(stage, target)
+    def _publish_then_fail(root, stage, target):
+        original_publish(root, stage, target)
         raise RuntimeError("injected post-publication failure")
     monkeypatch.setattr(mod, "_publish_attachment", _publish_then_fail)
 
@@ -389,6 +389,13 @@ def test_proof_a_raw_helper_rejects_unowned_root(tmp_path):
     mod = _load_proof()
     with pytest.raises(RuntimeError, match="refusing unowned root"):
         mod._do_migration_transfer(tmp_path, tmp_path / "src.db", tmp_path / "tgt.db", tmp_path / "src", tmp_path / "tgt")
+    with pytest.raises(RuntimeError, match="refusing unowned root"):
+        mod._inject_failure_before_swap(tmp_path / "src.db", tmp_path / "tgt.db", tmp_path)
+    victim = tmp_path / "victim.db"
+    victim.write_bytes(b"must survive")
+    with pytest.raises(RuntimeError, match="refusing unowned root"):
+        mod._dispose_fixtures(victim, tmp_path / "other.db", tmp_path / "a", tmp_path / "b", tmp_path)
+    assert victim.read_bytes() == b"must survive"
 
 
 def test_proof_a_rejects_target_epic_conflict_without_mutation(owned_root):

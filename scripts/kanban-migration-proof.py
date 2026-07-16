@@ -438,9 +438,12 @@ def _validate_attachment(stored_path: Path, src_root: Path) -> Dict[str, Any]:
     return {"size": len(data), "sha256": hashlib.sha256(data).hexdigest()}
 
 
-def _publish_attachment(stage: Path, target: Path) -> None:
-    """Publish an already-validated stage; isolated for post-copy failure tests."""
-    if target.exists() or target.is_symlink():
+def _publish_attachment(root: Path, stage: Path, target: Path) -> None:
+    """Publish an owned, validated stage; isolated for failure tests."""
+    guard_owned_root(root)
+    guard_owned_path(root, stage)
+    guard_owned_path(root, target, must_exist=False)
+    if stage.is_symlink() or target.is_symlink() or target.exists():
         raise RuntimeError(f"refusing attachment target conflict: {target}")
     stage.replace(target)
 
@@ -653,13 +656,17 @@ def _do_migration_transfer(root: Path, src_path: Path, tgt_path: Path,
             stored_path = Path(att["stored_path"])
             # Safety: validate containment + regular-file + size + SHA-256.
             info = _validate_attachment(stored_path, src_att_root)
-            tgt_att_dir = tgt_att_root / att["task_id"]
+            tgt_att_dir = guard_owned_path(root, tgt_att_root / att["task_id"], must_exist=False)
             tgt_att_dir.mkdir(parents=True, exist_ok=True)
-            new_stored = tgt_att_dir / stored_path.name
+            guard_owned_path(root, tgt_att_dir)
+            new_stored = guard_owned_path(root, tgt_att_dir / stored_path.name, must_exist=False)
             # Stage to a sibling temp, then atomically move into place so a
             # failure after copy leaves no half-written target file.
-            stage = new_stored.with_suffix(new_stored.suffix + ".stage")
+            stage = guard_owned_path(root, new_stored.with_suffix(new_stored.suffix + ".stage"), must_exist=False)
+            if stage.exists() or stage.is_symlink():
+                raise RuntimeError(f"refusing attachment stage conflict: {stage}")
             stage.write_bytes(stored_path.read_bytes())
+            guard_owned_path(root, stage)
             staged.append(stage)
             # Verify the staged copy matches the source SHA-256 before commit.
             if hashlib.sha256(stage.read_bytes()).hexdigest() != info["sha256"]:
@@ -667,7 +674,7 @@ def _do_migration_transfer(root: Path, src_path: Path, tgt_path: Path,
             # Record the intended target before publication so an injected or
             # real post-publication exception is compensated as well.
             published.append(new_stored)
-            _publish_attachment(stage, new_stored)
+            _publish_attachment(root, stage, new_stored)
             cols = [r["name"] for r in conn.execute(
                 "PRAGMA table_info(task_attachments)").fetchall() if r["name"] != "id"]
             values = []
@@ -793,6 +800,9 @@ def _inject_failure_before_swap(src_path: Path, tgt_path: Path, root: Path) -> D
     ROLLBACKs. After ROLLBACK, source and target must be byte/content
     unchanged and the pointer untouched.
     """
+    guard_owned_root(root)
+    guard_owned_path(root, src_path)
+    guard_owned_path(root, tgt_path)
     kb = _load_kb()
     pointer_before = _current_pointer(kb, root)
     mutated = False
@@ -847,6 +857,7 @@ def _inject_failure_before_swap(src_path: Path, tgt_path: Path, root: Path) -> D
 
 def _dispose_fixtures(src_path: Path, tgt_path: Path,
                       src_att_root: Path, tgt_att_root: Path, root: Path) -> Dict[str, bool]:
+    guard_owned_root(root)
     disposed = {"src_db": False, "tgt_db": False, "src_att": False, "tgt_att": False}
     for p, key in ((src_path, "src_db"), (tgt_path, "tgt_db")):
         try:
@@ -1057,6 +1068,7 @@ def _exercise_pointer(kb, root: Path, original: Optional[str]) -> Dict[str, Any]
     a real transition, performs the transition, then restores the EXACT
     prior state (including the original absent-file condition).
     """
+    guard_owned_root(root)
     p = guard_owned_path(root, root / "kanban" / "current", must_exist=False)
     if p.is_symlink():
         raise RuntimeError(f"refusing symlinked pointer: {p}")
