@@ -282,9 +282,12 @@ def _get_existing_triples(bank: str = _DEFAULT_BANK) -> List[Dict[str, Any]]:
     if store is None:
         return []
     try:
-        return store.get_facts_valid_at(
-            __import__("datetime").datetime.now().isoformat()[:10]
-        )
+        today = __import__("datetime").datetime.now().isoformat()[:10]
+        # Use the provider-supported query(as_of=) which returns all
+        # current (non-expired) facts — semantically identical to the
+        # previously-called get_facts_valid_at(today) that was never
+        # shipped in the installed mnemosyne package.
+        return store.query(as_of=today)
     except Exception as exc:
         logger.debug("Failed to query existing triples: %s", exc)
         return []

@@ -24,6 +24,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import numpy as np
 import pytest
 
+# kensei_voice is an intentionally separate, optional package.  When it
+# is not installed the entire integration seam has nothing to test, so
+# skip the whole module cleanly instead of raising a collection error.
+# Do NOT add kensei-voice as a core dependency — the adapter runtime
+# already guards the import with KENSEI_VOICE_BRIDGE_AVAILABLE.
+pytest.importorskip("kensei_voice")
+
 from kensei_voice.discord_transport import _StreamingPCMSource
 from kensei_voice.misa_misa_seam import LiveLatencyLog
 
