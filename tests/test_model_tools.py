@@ -32,10 +32,11 @@ class TestHandleFunctionCall:
         assert "totally_fake_tool_xyz" in result["error"]
 
     def test_exception_returns_json_error(self):
-        # Even if something goes wrong, should return valid JSON inside the
-        # UNTRUSTED_DOCUMENT fence that web_search applies to its output.
+        # handle_function_call returns a plain JSON error string (no fence)
+        # when web_search cannot run - the error path bypasses the
+        # UNTRUSTED_DOCUMENT wrapping that only successful web output uses.
         result = handle_function_call("web_search", None)  # None args may cause issues
-        parsed = loads_fenced_json(result)
+        parsed = json.loads(result)
         assert isinstance(parsed, dict)
         assert "error" in parsed
         assert len(parsed["error"]) > 0

@@ -134,7 +134,7 @@ class TestWebExtractSecretExfil:
             "https://example.com/blog?session=summer",
         ):
             result = await web_extract_tool(urls=[url])
-            parsed = json.loads(result)
+            parsed = loads_fenced_json(result)
             # Not blocked by the credential-query guard (may fail for other
             # reasons like a missing backend, but never with this specific
             # error string).
@@ -146,7 +146,7 @@ class TestWebExtractSecretExfil:
         from tools.web_tools import web_extract_tool
         # This will fail due to no API key, but should NOT be blocked by secret check
         result = await web_extract_tool(urls=["https://example.com"])
-        parsed = json.loads(result)
+        parsed = loads_fenced_json(result)
         # Should fail for API/config reason, not secret blocking
         assert "API key" not in parsed.get("error", "") or "Blocked" not in parsed.get("error", "")
 
