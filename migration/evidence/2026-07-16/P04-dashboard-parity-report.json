@@ -1,0 +1,54 @@
+{
+  "proof": "P04 dashboard parity \u2014 CLI (_cmd_list) vs dashboard GET /board",
+  "verdict": "PARITY-PROVEN-BY-CAPTURE",
+  "seed_statuses": {
+    "parity-cli-task": "running (claimed)",
+    "parity-dash-task": "review (completed; full-tier review gate, not done)"
+  },
+  "captured_output": {
+    "cli_side": {
+      "status_counts": {
+        "running": 1,
+        "review": 1
+      },
+      "ids": [
+        "t_8f42a8b4",
+        "t_d1af1416"
+      ],
+      "source": "hermes_cli.kanban._cmd_list (incl. recompute_ready)"
+    },
+    "dashboard_side": {
+      "status_counts": {
+        "running": 1,
+        "review": 1
+      },
+      "ids": [
+        "t_8f42a8b4",
+        "t_d1af1416"
+      ],
+      "source": "plugins/kanban/dashboard/plugin_api.py::get_board (TestClient)"
+    },
+    "id_set_match": true,
+    "status_counts_match": true
+  },
+  "provenance": {
+    "method": "single disposable board; rendered twice from same SQLite source",
+    "cli_render_command": "hermes_cli.kanban._cmd_list (incl. recompute_ready)",
+    "dashboard_render_command": "plugins/kanban/dashboard/plugin_api.py::get_board (TestClient)",
+    "captured_by": "scripts/capture_dashboard_parity.py",
+    "git_sha": "fe6df7aae4161617aaac8c694cc757e3397227ea",
+    "temp_root_cleaned": true
+  },
+  "scope_limits": {
+    "excludes": [
+      "Android Auto",
+      "voice"
+    ],
+    "does_not_prove": [
+      "A live dashboard server process reading a live board (capture uses a TestClient against the plugin router)."
+    ],
+    "does_prove": [
+      "The dashboard /board endpoint and the CLI _cmd_list path read the same tasks table and bucket by the same status set, so each task's column in the dashboard equals its status as reported by the CLI list path."
+    ]
+  }
+}
