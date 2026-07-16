@@ -348,3 +348,112 @@ class TestFunctionParameterInjection:
         mod = _load_script()
         result = mod.parse_registry(tmp_path / "nonexistent.md")
         assert result == {"1": set(), "2": set(), "3": set()}
+
+
+# ── Live-evidence separation ────────────────────────────────────────────────
+#
+# The REAL deployed fleet proof (T1=14, T2=39, T3=9) is a read-only EVIDENCE
+# command, NOT a unit-test assertion:
+#
+#     python scripts/tier-enforcement-proof.py
+#
+# It must never be asserted inside pytest — the fleet count drifts and the
+# counts are environment-specific. A prior P08 agent added
+# `TestLiveRegistryCountDrift` that hard-coded 39/9 and read live paths; it was
+# rejected as an invalid change-detector. The behavioural coverage below is the
+# permanent replacement: it uses ARBITRARY SMALL fixture tiers (e.g. 2/2/1) and
+# proves the parser + report detect registry-vs-disk mismatch and pass when the
+# sets match. No live ~/, no fixed production fleet count, no T1=14/T2=39/T3=9.
+
+
+# Arbitrary small fixture tiers — deliberately NOT the real fleet sizes.
+_SMALL_T1 = ["alpha", "beta"]
+_SMALL_T2 = ["gamma", "delta"]
+_SMALL_T3 = ["epsilon"]
+
+
+@pytest.fixture
+def small_fixture(tmp_path):
+    """Minimal 2/2/1 fixture with disk + registry in agreement."""
+    profiles_root = tmp_path / "profiles"
+    profiles_root.mkdir()
+    for n in _SMALL_T1:
+        _make_profile(profiles_root, n, 1)
+    for n in _SMALL_T2:
+        _make_profile(profiles_root, n, 2)
+    for n in _SMALL_T3:
+        _make_profile(profiles_root, n, 3)
+    reg = _make_registry(tmp_path, _SMALL_T1, _SMALL_T2, _SMALL_T3)
+    mod = _load_script()
+    return mod, profiles_root, reg
+
+
+class TestTierConsistencyFixtureMismatch:
+    """Fixture-driven replacement for the rejected live-count drift test.
+
+    Proves the parser + report detect registry-vs-disk mismatch under
+    arbitrary small fixtures, and pass when the sets match. Never asserts the
+    real fleet sizes (14/39/9).
+    """
+
+    def test_small_fixture_matching_sets_pass(self, small_fixture):
+        """Disk tiers equal registry tiers → proof passes (exit 0)."""
+        mod, profiles_root, reg = small_fixture
+        result = mod.run_proof(profiles_root, reg)
+        assert result.exit_code == 0
+        # Reports the ARBITRARY small fixture counts, not live 14/39/9.
+        assert "Tier 1: 2" in result.stdout
+        assert "Tier 2: 2" in result.stdout
+        assert "Tier 3: 1" in result.stdout
+        assert "TIER ENFORCEMENT PROVEN" in result.stdout
+
+    def test_parser_returns_exact_small_counts(self, tmp_path):
+        """Parser returns ONLY what the fixture file contains — no live leak."""
+        reg = _make_registry(tmp_path, _SMALL_T1, _SMALL_T2, _SMALL_T3)
+        mod = _load_script()
+        parsed = mod.parse_registry(reg)
+        assert parsed["1"] == set(_SMALL_T1)
+        assert parsed["2"] == set(_SMALL_T2)
+        assert parsed["3"] == set(_SMALL_T3)
+
+    def test_registry_extra_profile_detected(self, tmp_path):
+        """Registry lists a Tier-2 profile absent on disk → mismatch error."""
+        profiles_root = tmp_path / "profiles"
+        profiles_root.mkdir()
+        for n in _SMALL_T1:
+            _make_profile(profiles_root, n, 1)
+        for n in _SMALL_T2:
+            _make_profile(profiles_root, n, 2)
+        for n in _SMALL_T3:
+            _make_profile(profiles_root, n, 3)
+
+        # Registry claims an extra Tier-2 not present on disk.
+        bad_t2 = _SMALL_T2 + ["zeta-unregistered"]
+        reg = _make_registry(tmp_path, _SMALL_T1, bad_t2, _SMALL_T3)
+        mod = _load_script()
+
+        result = mod.run_proof(profiles_root, reg)
+        assert result.exit_code != 0
+        assert "mismatch" in result.stdout.lower()
+        assert "zeta-unregistered" in result.stdout
+
+    def test_disk_extra_profile_detected(self, tmp_path):
+        """Disk has a Tier-2 profile absent from registry → mismatch error."""
+        profiles_root = tmp_path / "profiles"
+        profiles_root.mkdir()
+        for n in _SMALL_T1:
+            _make_profile(profiles_root, n, 1)
+        for n in _SMALL_T2:
+            _make_profile(profiles_root, n, 2)
+        for n in _SMALL_T3:
+            _make_profile(profiles_root, n, 3)
+        # Extra profile on disk with tier:2 but not in registry.
+        _make_profile(profiles_root, "omega-orphan", 2)
+
+        reg = _make_registry(tmp_path, _SMALL_T1, _SMALL_T2, _SMALL_T3)
+        mod = _load_script()
+
+        result = mod.run_proof(profiles_root, reg)
+        assert result.exit_code != 0
+        assert "mismatch" in result.stdout.lower()
+        assert "omega-orphan" in result.stdout
