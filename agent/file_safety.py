@@ -95,10 +95,34 @@ def get_safe_write_roots() -> set[str]:
     return roots
 
 
+def get_write_denied_roots() -> set[str]:
+    """Return resolved agent write-deny roots from ``HERMES_WRITE_DENY_ROOT``.
+
+    This is a defence-in-depth guard for file-mutating Hermes tools. It is
+    intentionally separate from ``HERMES_WRITE_SAFE_ROOT``: deny roots block
+    a sensitive subtree while leaving normal project writes available.
+    """
+    env = os.getenv("HERMES_WRITE_DENY_ROOT", "")
+    if not env:
+        return set()
+    roots: set[str] = set()
+    for path in env.split(os.pathsep):
+        if path:
+            try:
+                roots.add(os.path.realpath(os.path.expanduser(path)))
+            except (OSError, ValueError):
+                continue
+    return roots
+
+
 def is_write_denied(path: str) -> bool:
     """Return True if path is blocked by the write denylist or safe root."""
     home = os.path.realpath(os.path.expanduser("~"))
     resolved = os.path.realpath(os.path.expanduser(str(path)))
+
+    for denied_root in get_write_denied_roots():
+        if resolved == denied_root or resolved.startswith(denied_root + os.sep):
+            return True
 
     if resolved in build_write_denied_paths(home):
         return True
