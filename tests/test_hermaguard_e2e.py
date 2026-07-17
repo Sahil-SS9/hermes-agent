@@ -45,10 +45,22 @@ sys.path.insert(0, str(REPO_ROOT / "scripts"))
 sys.path.insert(0, str(GRADER_DIR))
 
 import hermaguard_release_gate as gate  # noqa: E402
-import hermaguard_grader as grader  # noqa: E402
+
+# The deployed grader is an OPTIONAL skill-side artifact at
+# $HERMES_HOME/skills/software-development/hermaguard/scripts. It is NOT a
+# package dependency of KenseiAgent. Importing it unconditionally at module
+# level would break broad-suite collection whenever the grader is absent
+# (ModuleNotFoundError raised during collection, before any skip can run).
+# importorskip() evaluates the skip AFTER GRADER_DIR is on sys.path, so the
+# module is skipped cleanly (not errored) when the grader is missing, and the
+# rest of the broad collection proceeds.
+grader = pytest.importorskip(
+    "hermaguard_grader",
+    reason=f"optional deployed grader not found at {GRADER_DIR}",
+)
 
 # Hard skip (not a failure) if the deployed grader script is absent in this env,
-# but here it exists so the suite runs.
+# echoed via GRADER_SCRIPT for a clearer message when importorskip is bypassed.
 pytestmark = pytest.mark.skipif(
     not GRADER_SCRIPT.exists(),
     reason=f"grader script not found at {GRADER_SCRIPT}",
