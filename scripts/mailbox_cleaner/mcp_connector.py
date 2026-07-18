@@ -38,7 +38,7 @@ _READ_CALLS: dict[str, dict[str, tuple[str, dict[str, object]]]] = {
     },
     "outlook": {
         "list_metadata": (
-            "list_mail_messages",
+            "list-mail-messages",
             {
                 "select": _OUTLOOK_SELECT,
                 "filter": "isRead eq false",

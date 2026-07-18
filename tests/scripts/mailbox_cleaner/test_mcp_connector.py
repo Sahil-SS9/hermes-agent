@@ -67,7 +67,7 @@ def test_outlook_adapter_uses_documented_metadata_only_contract_and_normalises_v
             "id": 1,
             "method": "tools/call",
             "params": {
-                "name": "list_mail_messages",
+                "name": "list-mail-messages",
                 "arguments": {
                     "account": "jobs@example.test",
                     "select": "id,from,subject,receivedDateTime,bodyPreview",
