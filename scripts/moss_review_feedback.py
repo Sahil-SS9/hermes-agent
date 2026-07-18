@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import tempfile
 from collections import Counter
 from pathlib import Path
@@ -174,3 +175,168 @@ def run_read_only(command: Sequence[str], *, runner: Callable[..., Any] | None =
     if runner is None:
         raise RuntimeError("A runner must be injected; review feedback stays read-only")
     return {"status": "executed", "command": command, "result": runner(command)}
+
+
+ACTION_REQUIREMENTS = {
+    "routine_patch": ["root_cause", "changed_paths", "test_evidence", "prevention"],
+    "reply_only": ["reply"],
+    "clarification": ["question"],
+    "sahil_escalation": ["sahil_decision"],
+}
+ACTIONABLE = {"routine_patch", "reply_only", "clarification"}
+EXECUTOR_REJECTED_RISKS = {"security", "data", "dependency", "ci", "scope", "architecture"}
+
+
+def build_action_plan(classified: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Produce stable, reviewable next steps without taking any action."""
+    plan = []
+    for record in classified:
+        action = str(record["classification"])
+        if action not in ACTION_REQUIREMENTS:
+            raise ValueError(f"unknown feedback action: {action}")
+        author = str(record.get("author", ""))
+        priority = "maintainer" if author.lower() in MAINTAINER_AUTHORS else "normal"
+        plan.append({
+            "key": record.get("key", ""),
+            "thread": record.get("thread") or record.get("key", ""),
+            "action": action,
+            "priority": priority,
+            "requires": list(ACTION_REQUIREMENTS[action]),
+        })
+    return plan
+
+
+def record_resolution(record: dict[str, Any], resolution: dict[str, Any]) -> dict[str, Any]:
+    """Create the complete audit record required when actionable work resolves."""
+    if record.get("classification") not in ACTIONABLE:
+        raise ValueError("only actionable feedback can be recorded as resolved")
+    required = ("root_cause", "changed_paths", "test_evidence", "prevention")
+    for field in required:
+        value = resolution.get(field)
+        if not value:
+            raise ValueError(f"resolution requires {field}")
+    if not isinstance(resolution["changed_paths"], list) or not isinstance(resolution["test_evidence"], list):
+        raise ValueError("changed_paths and test_evidence must be lists")
+    return {
+        "source": str(record.get("surface", "")),
+        "thread": str(record.get("thread") or record.get("key", "")),
+        "reviewer": str(record.get("author", "")),
+        "root_cause": str(resolution["root_cause"]),
+        "changed_paths": [str(path) for path in resolution["changed_paths"]],
+        "test_evidence": [str(test) for test in resolution["test_evidence"]],
+        "prevention": str(resolution["prevention"]),
+    }
+
+
+def _feedback_theme(body: str) -> str:
+    """Small deterministic theme key; it intentionally avoids LLM inference."""
+    words = [word.strip(".,:;!?()[]") for word in body.lower().split()]
+    stop = {"please", "this", "that", "the", "a", "an", "is", "use", "here", "for", "and"}
+    return " ".join(word for word in words if word and word not in stop)
+
+
+def learn_prevention_rule(record: dict[str, Any], prior_events: list[dict[str, Any]]) -> dict[str, Any]:
+    """Turn only objective, scoped, or repeated feedback into a prevention rule."""
+    body = str(record.get("body", ""))
+    lowered = body.lower()
+    theme = _feedback_theme(body)
+    base = {"theme": theme, "evidence": str(record.get("key", ""))}
+    if any(term in lowered for term in ("security", "vulnerability", "credential", "privacy")):
+        return {**base, "kind": "regression_test", "rule": "security regression test"}
+    if any(term in lowered for term in ("bug", "regress", "invalid", "crash", "error")):
+        return {**base, "kind": "regression_test", "rule": "regression test"}
+    if any(term in lowered for term in ("ci", "lint", "build fail", "test fail")):
+        return {**base, "kind": "pre_check", "rule": "named pre-push check"}
+    if "convention" in lowered or "project" in lowered:
+        return {**base, "kind": "project_convention", "scope": str(record.get("repo", "")), "rule": "project-scoped convention"}
+    prior_themes = {str(event.get("theme", "")) for event in prior_events}
+    if theme and theme in prior_themes:
+        return {**base, "kind": "repeated_theme", "rule": "repeated-review pre-check"}
+    return {**base, "kind": "ledger_only", "rule": "one-off preference"}
+
+
+def persist_resolution(record: dict[str, Any], resolution: dict[str, Any]) -> dict[str, Any]:
+    """Atomically append a resolved actionable event and its allowed prevention rule."""
+    event = record_resolution(record, resolution)
+    paths = feedback_paths()
+    ledger = load_json(paths["ledger"], {"events": []})
+    rules = load_json(paths["rules"], {"rules": []})
+    events = list(ledger.get("events", []))
+    events.append(event)
+    promoted_rules = list(rules.get("rules", []))
+    rule = learn_prevention_rule(record, promoted_rules)
+    # Ledger-only entries are retained as non-executable history so a genuine
+    # repeated theme can later be promoted deterministically.
+    promoted_rules.append(rule)
+    persisted_ledger = {"events": events}
+    persisted_rules = {"rules": promoted_rules}
+    atomic_write_json(paths["ledger"], persisted_ledger)
+    atomic_write_json(paths["rules"], persisted_rules)
+    return {"record": event, "rule": rule, "ledger": persisted_ledger, "rules": persisted_rules}
+
+
+def _forbidden_command(command: Sequence[str]) -> bool:
+    lowered = [str(part).lower() for part in command]
+    if not lowered:
+        return True
+    joined = " ".join(lowered)
+    return (
+        any(token in lowered for token in ("--force", "-f", "delete", "merge"))
+        or "force-with-lease" in joined
+        or (lowered[0] == "git" and any(token in lowered for token in ("reset", "rebase")))
+    )
+
+
+def _named_test_commands(evidence: list[Any]) -> list[list[str]]:
+    commands: list[list[str]] = []
+    for item in evidence:
+        command = shlex.split(str(item))
+        if not command or "pytest" not in command:
+            raise ValueError("test_evidence must name a pytest command")
+        commands.append(command)
+    if not commands:
+        raise ValueError("routine patch requires named test_evidence")
+    return commands
+
+
+def _reply_command(action: dict[str, Any]) -> list[str]:
+    key = str(action.get("key", ""))
+    # Normalised keys retain repository before '#': inline:owner/repo#42:comment.
+    repo = key.split(":", 2)[1].split("#", 1)[0] if ":" in key else ""
+    thread = str(action.get("thread") or key)
+    reply = str(action["reply"])
+    return ["gh", "api", f"repos/{repo}/issues/comments/{thread}/replies", "-f", f"body={reply}"]
+
+
+def execute_action(action: dict[str, Any], *, runner: Callable[..., Any] | None = None, allow_mutation: bool = False) -> dict[str, Any]:
+    """Guarded, injected execution path; it has no default subprocess runner.
+
+    The caller must explicitly provide both a runner and ``allow_mutation``.
+    Unsafe classes and destructive commands are rejected before the injected
+    runner observes anything. This makes fixture tests incapable of live side
+    effects while retaining an auditable eventual execution seam.
+    """
+    if not allow_mutation or runner is None:
+        return {"status": "denied", "reason": "explicit runner and allow_mutation are required"}
+    if action.get("action") != "routine_patch":
+        return {"status": "rejected", "reason": "only routine_patch is executor-eligible"}
+    risk_text = " ".join(
+        str(action.get(field, "")) for field in ("risk", "body", "scope")
+    ).lower()
+    if any(risk in risk_text for risk in EXECUTOR_REJECTED_RISKS):
+        return {"status": "rejected", "reason": "unsafe feedback requires Sahil review"}
+    try:
+        tests = _named_test_commands(list(action.get("test_evidence", [])))
+    except ValueError as exc:
+        return {"status": "rejected", "reason": str(exc)}
+    commands = [[str(part) for part in command] for command in action.get("commands", [])]
+    if not commands or any(_forbidden_command(command) for command in commands):
+        return {"status": "rejected", "reason": "missing or forbidden mutation command"}
+    if any(command[0] != "git" or "push" not in command for command in commands):
+        return {"status": "rejected", "reason": "only ordinary git push is allowed"}
+    if not action.get("thread") or not action.get("reply"):
+        return {"status": "rejected", "reason": "original thread and reply are required"}
+    results = []
+    for command in tests + commands + [_reply_command(action)]:
+        results.append(runner(command))
+    return {"status": "executed", "results": results}

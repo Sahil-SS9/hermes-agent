@@ -134,3 +134,113 @@ def test_watch_and_context_scripts_use_fixture_only_paths(fake_home, feedback):
     assert result["new_count"] == 4
     assert "Mossy review feedback" in report
     assert "Teknium" in report
+
+
+def test_action_plan_is_deterministic_and_teknium_priority_does_not_change_safety():
+    mod = load_module(MODULE_PATH, "moss_review_feedback_action_plan")
+    records = [
+        {"key": "a", "author": "alice", "body": "Please fix the bug and add a test."},
+        {"key": "b", "author": "alice", "body": "Thanks, this looks good."},
+        {"key": "c", "author": "alice", "body": "Can you clarify why this is safe?"},
+        {"key": "d", "author": "Teknium", "body": "This is a security issue."},
+    ]
+
+    plan = mod.build_action_plan(mod.classify_records(records))
+
+    assert [(item["key"], item["action"], item["priority"]) for item in plan] == [
+        ("a", "routine_patch", "normal"),
+        ("b", "reply_only", "normal"),
+        ("c", "clarification", "normal"),
+        ("d", "sahil_escalation", "maintainer"),
+    ]
+    assert plan[0]["requires"] == ["root_cause", "changed_paths", "test_evidence", "prevention"]
+    assert plan[3]["requires"] == ["sahil_decision"]
+
+
+def test_resolved_actionable_feedback_creates_complete_ledger_record(fake_home):
+    mod = load_module(MODULE_PATH, "moss_review_feedback_ledger")
+    record = {
+        "key": "inline:repo#1:7", "surface": "inline", "author": "alice",
+        "body": "This bug regresses parsing.", "path": "scripts/parser.py",
+        "classification": "routine_patch",
+    }
+
+    ledger = mod.record_resolution(record, {
+        "root_cause": "empty token was accepted", "changed_paths": ["scripts/parser.py", "tests/test_parser.py"],
+        "test_evidence": ["pytest tests/test_parser.py -q"], "prevention": "regression test",
+    })
+
+    assert ledger == {
+        "source": "inline", "thread": "inline:repo#1:7", "reviewer": "alice",
+        "root_cause": "empty token was accepted", "changed_paths": ["scripts/parser.py", "tests/test_parser.py"],
+        "test_evidence": ["pytest tests/test_parser.py -q"], "prevention": "regression test",
+    }
+    with pytest.raises(ValueError, match="test_evidence"):
+        mod.record_resolution(record, {"root_cause": "x", "changed_paths": ["x"], "prevention": "test"})
+
+    persisted = mod.persist_resolution(record, {
+        "root_cause": "empty token was accepted", "changed_paths": ["scripts/parser.py"],
+        "test_evidence": ["pytest tests/test_parser.py -q"], "prevention": "regression test",
+    })
+    assert persisted["ledger"]["events"] == [persisted["record"]]
+    assert persisted["rules"]["rules"][0]["kind"] == "regression_test"
+
+
+@pytest.mark.parametrize(
+    ("body", "prior_events", "expected"),
+    [
+        ("This bug permits an invalid token.", [], "regression_test"),
+        ("CI fails because lint is not run.", [], "pre_check"),
+        ("Please use British spelling here.", [], "ledger_only"),
+        ("Use the project event naming convention.", [], "project_convention"),
+        ("Please simplify this helper.", [{"theme": "simplify helper"}], "repeated_theme"),
+    ],
+)
+def test_learning_policy_promotes_only_objective_or_scoped_or_repeated_feedback(body, prior_events, expected):
+    mod = load_module(MODULE_PATH, "moss_review_feedback_learning")
+
+    rule = mod.learn_prevention_rule({"body": body, "repo": "owner/project"}, prior_events)
+
+    assert rule["kind"] == expected
+    if expected == "project_convention":
+        assert rule["scope"] == "owner/project"
+
+
+def test_guarded_executor_needs_explicit_runner_and_allow_mutation_and_never_runs_forbidden_work():
+    mod = load_module(MODULE_PATH, "moss_review_feedback_executor")
+    routine = {"action": "routine_patch", "key": "inline:r#1:1", "test_evidence": ["pytest tests/test_x.py -q"]}
+
+    assert mod.execute_action(routine, allow_mutation=False)["status"] == "denied"
+    assert mod.execute_action(routine, allow_mutation=True)["status"] == "denied"
+
+    invoked = []
+    def runner(command, **kwargs):
+        invoked.append(command)
+        return "ok"
+
+    unsafe = {"action": "routine_patch", "key": "x", "risk": "security", "test_evidence": ["pytest x"]}
+    assert mod.execute_action(unsafe, runner=runner, allow_mutation=True)["status"] == "rejected"
+    assert invoked == []
+
+
+def test_guarded_executor_runs_named_tests_before_safe_push_and_replies_on_original_thread():
+    mod = load_module(MODULE_PATH, "moss_review_feedback_executor_order")
+    invoked = []
+    def runner(command, **kwargs):
+        invoked.append(command)
+        return "ok"
+
+    result = mod.execute_action({
+        "action": "routine_patch", "key": "inline:r#1:1", "thread": "99",
+        "test_evidence": ["pytest tests/test_x.py -q"],
+        "commands": [["git", "push", "origin", "HEAD"]],
+        "reply": "Fixed with a regression test.",
+    }, runner=runner, allow_mutation=True)
+
+    assert result["status"] == "executed"
+    assert invoked == [
+        ["pytest", "tests/test_x.py", "-q"], ["git", "push", "origin", "HEAD"],
+        ["gh", "api", "repos/r/issues/comments/99/replies", "-f", "body=Fixed with a regression test."],
+    ]
+    forbidden = {"action": "routine_patch", "key": "x", "test_evidence": ["pytest x"], "commands": [["git", "push", "--force"]]}
+    assert mod.execute_action(forbidden, runner=runner, allow_mutation=True)["status"] == "rejected"
