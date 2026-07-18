@@ -51,6 +51,12 @@ def test_normalise_all_review_surfaces_rejects_self_and_bot_authors(feedback):
         ("conversation", "conversation:NousResearch/hermes-agent#42:C-2", "Teknium"),
     ]
     assert records[1]["path"] == "scripts/watcher.py"
+    assert [(r["repo"], r["pr_number"], r["source_item_id"], r["surface"]) for r in records] == [
+        ("NousResearch/hermes-agent", 42, "R-1", "review"),
+        ("NousResearch/hermes-agent", 42, "I-1", "inline"),
+        ("NousResearch/hermes-agent", 42, "C-1", "conversation"),
+        ("NousResearch/hermes-agent", 42, "C-2", "conversation"),
+    ]
 
 
 @pytest.mark.parametrize(
@@ -139,10 +145,10 @@ def test_watch_and_context_scripts_use_fixture_only_paths(fake_home, feedback):
 def test_action_plan_is_deterministic_and_teknium_priority_does_not_change_safety():
     mod = load_module(MODULE_PATH, "moss_review_feedback_action_plan")
     records = [
-        {"key": "a", "author": "alice", "body": "Please fix the bug and add a test."},
-        {"key": "b", "author": "alice", "body": "Thanks, this looks good."},
-        {"key": "c", "author": "alice", "body": "Can you clarify why this is safe?"},
-        {"key": "d", "author": "Teknium", "body": "This is a security issue."},
+        {"key": "a", "repo": "owner/repo", "pr_number": 9, "source_item_id": "a", "surface": "inline", "author": "alice", "body": "Please fix the bug and add a test."},
+        {"key": "b", "repo": "owner/repo", "pr_number": 9, "source_item_id": "b", "surface": "conversation", "author": "alice", "body": "Thanks, this looks good."},
+        {"key": "c", "repo": "owner/repo", "pr_number": 9, "source_item_id": "c", "surface": "conversation", "author": "alice", "body": "Can you clarify why this is safe?"},
+        {"key": "d", "repo": "owner/repo", "pr_number": 9, "source_item_id": "d", "surface": "review", "author": "Teknium", "body": "This is a security issue."},
     ]
 
     plan = mod.build_action_plan(mod.classify_records(records))
@@ -155,6 +161,9 @@ def test_action_plan_is_deterministic_and_teknium_priority_does_not_change_safet
     ]
     assert plan[0]["requires"] == ["root_cause", "changed_paths", "test_evidence", "prevention"]
     assert plan[3]["requires"] == ["sahil_decision"]
+    assert {field: plan[0][field] for field in ("repo", "pr_number", "source_item_id", "surface")} == {
+        "repo": "owner/repo", "pr_number": 9, "source_item_id": "a", "surface": "inline",
+    }
 
 
 def test_resolved_actionable_feedback_creates_complete_ledger_record(fake_home):
@@ -223,7 +232,7 @@ def test_guarded_executor_needs_explicit_runner_and_allow_mutation_and_never_run
     assert invoked == []
 
 
-def test_guarded_executor_runs_named_tests_before_safe_push_and_replies_on_original_thread():
+def test_guarded_executor_runs_named_tests_before_safe_push_and_replies_to_inline_thread():
     mod = load_module(MODULE_PATH, "moss_review_feedback_executor_order")
     invoked = []
     def runner(command, **kwargs):
@@ -231,7 +240,8 @@ def test_guarded_executor_runs_named_tests_before_safe_push_and_replies_on_origi
         return "ok"
 
     result = mod.execute_action({
-        "action": "routine_patch", "key": "inline:r#1:1", "thread": "99",
+        "action": "routine_patch", "repo": "owner/repo", "pr_number": 1,
+        "source_item_id": "99", "surface": "inline", "author": "alice",
         "test_evidence": ["pytest tests/test_x.py -q"],
         "commands": [["git", "push", "origin", "HEAD"]],
         "reply": "Fixed with a regression test.",
@@ -240,7 +250,76 @@ def test_guarded_executor_runs_named_tests_before_safe_push_and_replies_on_origi
     assert result["status"] == "executed"
     assert invoked == [
         ["pytest", "tests/test_x.py", "-q"], ["git", "push", "origin", "HEAD"],
-        ["gh", "api", "repos/r/issues/comments/99/replies", "-f", "body=Fixed with a regression test."],
+        ["gh", "api", "/repos/owner/repo/pulls/1/comments/99/replies", "-f", "body=Fixed with a regression test."],
     ]
-    forbidden = {"action": "routine_patch", "key": "x", "test_evidence": ["pytest x"], "commands": [["git", "push", "--force"]]}
+    forbidden = {
+        "action": "routine_patch", "repo": "owner/repo", "pr_number": 1,
+        "source_item_id": "100", "surface": "inline", "author": "alice", "reply": "No force push.",
+        "test_evidence": ["pytest tests/test_x.py -q"], "commands": [["git", "push", "--force"]],
+    }
     assert mod.execute_action(forbidden, runner=runner, allow_mutation=True)["status"] == "rejected"
+    assert len(invoked) == 3
+
+
+@pytest.mark.parametrize(
+    ("action_name", "content_field", "content"),
+    [
+        ("reply_only", "reply", "Thanks."),
+        ("clarification", "question", "Which caller owns this invariant?"),
+    ],
+)
+def test_reply_actions_require_an_explicit_runner_and_mutation_permission(action_name, content_field, content):
+    mod = load_module(MODULE_PATH, f"moss_review_feedback_{action_name}_guard")
+    action = {
+        "action": action_name, "repo": "owner/repo", "pr_number": 1,
+        "source_item_id": "5", "surface": "conversation", "author": "alice", content_field: content,
+    }
+
+    assert mod.execute_action(action)["status"] == "denied"
+    assert mod.execute_action(action, runner=lambda command: None)["status"] == "denied"
+
+
+def test_reply_only_and_clarification_reply_to_original_surface_without_git_actions():
+    mod = load_module(MODULE_PATH, "moss_review_feedback_safe_replies")
+    invoked = []
+    runner = lambda command: invoked.append(command) or "ok"
+
+    reply = mod.execute_action({
+        "action": "reply_only", "repo": "owner/repo", "pr_number": 1,
+        "source_item_id": "5", "surface": "conversation", "author": "alice", "reply": "Thanks for the review.",
+    }, runner=runner, allow_mutation=True)
+    question = mod.execute_action({
+        "action": "clarification", "repo": "owner/repo", "pr_number": 1,
+        "source_item_id": "6", "surface": "review", "author": "bob", "question": "Which caller owns this invariant?",
+    }, runner=runner, allow_mutation=True)
+
+    assert reply["status"] == question["status"] == "executed"
+    assert invoked == [
+        ["gh", "api", "/repos/owner/repo/issues/1/comments", "-f", "body=@alice Thanks for the review."],
+        ["gh", "api", "/repos/owner/repo/issues/1/comments", "-f", "body=@bob Which caller owns this invariant?"],
+    ]
+    assert all(command[0] != "git" for command in invoked)
+
+
+def test_clarification_uses_the_exact_supplied_question_for_inline_reply():
+    mod = load_module(MODULE_PATH, "moss_review_feedback_inline_question")
+    invoked = []
+    question = "Which caller owns this invariant?"
+
+    result = mod.execute_action({
+        "action": "clarification", "repo": "owner/repo", "pr_number": 1,
+        "source_item_id": "7", "surface": "inline", "author": "alice", "question": question,
+    }, runner=lambda command: invoked.append(command) or "ok", allow_mutation=True)
+
+    assert result["status"] == "executed"
+    assert invoked == [["gh", "api", "/repos/owner/repo/pulls/1/comments/7/replies", "-f", f"body={question}"]]
+
+
+def test_sahil_escalation_never_executes():
+    mod = load_module(MODULE_PATH, "moss_review_feedback_escalation")
+    invoked = []
+
+    result = mod.execute_action({"action": "sahil_escalation"}, runner=lambda command: invoked.append(command), allow_mutation=True)
+
+    assert result["status"] == "rejected"
+    assert invoked == []

@@ -95,6 +95,7 @@ def normalise_feedback(payload: dict[str, Any]) -> list[dict[str, Any]]:
                 "surface": surface,
                 "repo": repo,
                 "pr_number": number,
+                "source_item_id": item_id,
                 "pr_title": str(pr.get("title", "")),
                 "pr_url": str(pr.get("url", "")),
                 "author": author,
@@ -200,6 +201,11 @@ def build_action_plan(classified: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "key": record.get("key", ""),
             "thread": record.get("thread") or record.get("key", ""),
             "action": action,
+            "repo": record.get("repo", ""),
+            "pr_number": record.get("pr_number"),
+            "source_item_id": record.get("source_item_id", ""),
+            "surface": record.get("surface", ""),
+            "author": author,
             "priority": priority,
             "requires": list(ACTION_REQUIREMENTS[action]),
         })
@@ -299,13 +305,35 @@ def _named_test_commands(evidence: list[Any]) -> list[list[str]]:
     return commands
 
 
-def _reply_command(action: dict[str, Any]) -> list[str]:
-    key = str(action.get("key", ""))
-    # Normalised keys retain repository before '#': inline:owner/repo#42:comment.
-    repo = key.split(":", 2)[1].split("#", 1)[0] if ":" in key else ""
-    thread = str(action.get("thread") or key)
-    reply = str(action["reply"])
-    return ["gh", "api", f"repos/{repo}/issues/comments/{thread}/replies", "-f", f"body={reply}"]
+def _reply_command(action: dict[str, Any], content: str) -> list[str]:
+    """Build the GitHub endpoint matching the source feedback surface."""
+    repo = str(action["repo"])
+    pr_number = int(action["pr_number"])
+    source_item_id = str(action["source_item_id"])
+    surface = str(action["surface"])
+    if surface == "inline":
+        return [
+            "gh", "api", f"/repos/{repo}/pulls/{pr_number}/comments/{source_item_id}/replies",
+            "-f", f"body={content}",
+        ]
+    # Formal reviews do not provide a reply endpoint. Conversation comments
+    # likewise fall back to the PR's issue thread, where the reviewer mention
+    # preserves the original conversational target.
+    return [
+        "gh", "api", f"/repos/{repo}/issues/{pr_number}/comments",
+        "-f", f"body=@{action['author']} {content}",
+    ]
+
+
+def _valid_reply_target(action: dict[str, Any]) -> bool:
+    return (
+        bool(str(action.get("repo", "")))
+        and isinstance(action.get("pr_number"), int)
+        and action["pr_number"] > 0
+        and bool(str(action.get("source_item_id", "")))
+        and action.get("surface") in {"inline", "conversation", "review"}
+        and bool(str(action.get("author", "")))
+    )
 
 
 def execute_action(action: dict[str, Any], *, runner: Callable[..., Any] | None = None, allow_mutation: bool = False) -> dict[str, Any]:
@@ -318,8 +346,19 @@ def execute_action(action: dict[str, Any], *, runner: Callable[..., Any] | None 
     """
     if not allow_mutation or runner is None:
         return {"status": "denied", "reason": "explicit runner and allow_mutation are required"}
-    if action.get("action") != "routine_patch":
-        return {"status": "rejected", "reason": "only routine_patch is executor-eligible"}
+    action_name = action.get("action")
+    if action_name == "sahil_escalation":
+        return {"status": "rejected", "reason": "Sahil escalation is never executor-eligible"}
+    if action_name not in ACTIONABLE:
+        return {"status": "rejected", "reason": "unknown executor action"}
+    if not _valid_reply_target(action):
+        return {"status": "rejected", "reason": "stable reply target is required"}
+    content_field = "question" if action_name == "clarification" else "reply"
+    content = action.get(content_field)
+    if not isinstance(content, str) or not content:
+        return {"status": "rejected", "reason": f"{content_field} is required"}
+    if action_name in {"reply_only", "clarification"}:
+        return {"status": "executed", "results": [runner(_reply_command(action, content))]}
     risk_text = " ".join(
         str(action.get(field, "")) for field in ("risk", "body", "scope")
     ).lower()
@@ -332,11 +371,9 @@ def execute_action(action: dict[str, Any], *, runner: Callable[..., Any] | None 
     commands = [[str(part) for part in command] for command in action.get("commands", [])]
     if not commands or any(_forbidden_command(command) for command in commands):
         return {"status": "rejected", "reason": "missing or forbidden mutation command"}
-    if any(command[0] != "git" or "push" not in command for command in commands):
+    if any(len(command) < 2 or command[0] != "git" or command[1] != "push" for command in commands):
         return {"status": "rejected", "reason": "only ordinary git push is allowed"}
-    if not action.get("thread") or not action.get("reply"):
-        return {"status": "rejected", "reason": "original thread and reply are required"}
     results = []
-    for command in tests + commands + [_reply_command(action)]:
+    for command in tests + commands + [_reply_command(action, content)]:
         results.append(runner(command))
     return {"status": "executed", "results": results}
