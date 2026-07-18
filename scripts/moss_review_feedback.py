@@ -97,6 +97,7 @@ def normalise_feedback(payload: dict[str, Any]) -> list[dict[str, Any]]:
                 "pr_title": str(pr.get("title", "")),
                 "pr_url": str(pr.get("url", "")),
                 "author": author,
+                "priority": "maintainer" if author.strip().lower() in MAINTAINER_AUTHORS else "normal",
                 "body": str(item.get("body") or ""),
                 "path": item.get("path"),
                 "line": item.get("line") or item.get("original_line"),
@@ -111,11 +112,11 @@ def dedupe_records(records: list[dict[str, Any]], state: dict[str, Any]) -> list
 
 
 def classify_feedback(record: dict[str, Any]) -> str:
-    """Conservative four-way matrix; Teknium feedback is always escalated."""
-    author = str(record.get("author", "")).strip().lower()
+    """Conservative four-way matrix applied to every human reviewer.
+
+    Maintainer identity changes queue priority, never the safety decision.
+    """
     body = str(record.get("body", "")).lower()
-    if author in MAINTAINER_AUTHORS:
-        return "sahil_escalation"
     if any(term in body for term in (
         "security", "data loss", "breaking change", "architecture", "production outage",
         "unsafe", "privacy", "credential", "regression risk",

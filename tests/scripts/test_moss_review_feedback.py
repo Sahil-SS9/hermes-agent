@@ -60,11 +60,11 @@ def test_normalise_all_review_surfaces_rejects_self_and_bot_authors(feedback):
         ("alice", "Thanks, this looks good.", "conversation", "reply_only"),
         ("alice", "Can you clarify why this is safe?", "conversation", "clarification"),
         ("alice", "This may cause data loss in production.", "review", "sahil_escalation"),
-        # Maintainer priority is never bypassed by a benign-looking message.
-        ("Teknium", "nit: typo", "inline", "sahil_escalation"),
+        # Teknium has priority, but still receives the same safety classification.
+        ("Teknium", "nit: typo", "inline", "routine_patch"),
     ],
 )
-def test_classifier_matrix_preserves_teknium_priority(author, body, surface, expected):
+def test_classifier_matrix_reviews_teknium_without_a_blind_bypass(author, body, surface, expected):
     mod = load_module(MODULE_PATH, "moss_review_feedback_classifier")
 
     assert mod.classify_feedback({"author": author, "body": body, "surface": surface}) == expected
@@ -94,8 +94,8 @@ def test_atomic_paths_are_distinct_and_dedupe_is_namespaced(fake_home, feedback)
 def test_promotion_rule_selection_and_pre_push_report(fake_home, feedback):
     mod = load_module(MODULE_PATH, "moss_review_feedback_promotion")
     records = mod.normalise_feedback(feedback)
-    # Add a non-maintainer question so the report covers every matrix bucket;
-    # the fixture's Teknium question intentionally remains an escalation.
+    # Add a non-maintainer question so the report covers every matrix bucket.
+    # Teknium's question is also a clarification: priority never bypasses review.
     classified = mod.classify_records(records + [{
         "author": "alice", "body": "Can you clarify why this is safe?", "surface": "conversation"
     }])
@@ -104,12 +104,10 @@ def test_promotion_rule_selection_and_pre_push_report(fake_home, feedback):
 
     # The formal review and inline review are independently namespaced and
     # therefore both remain actionable routine patches.
-    assert [r["classification"] for r in promoted] == [
-        "routine_patch", "routine_patch", "sahil_escalation"
-    ]
-    assert report["blocked"] is True
+    assert [r["classification"] for r in promoted] == ["routine_patch", "routine_patch"]
+    assert report["blocked"] is False
     assert report["rule_selection"]["routine_patch"] == "tests-first"
-    assert report["counts"] == {"routine_patch": 2, "reply_only": 1, "clarification": 1, "sahil_escalation": 1}
+    assert report["counts"] == {"routine_patch": 2, "reply_only": 1, "clarification": 2}
 
 
 def test_dry_run_runner_denies_mutating_gh_and_git_commands():
