@@ -218,6 +218,11 @@ def _extract_section_text(body_lines: list[str], heading: str) -> str:
 
 # ── Public API ──────────────────────────────────────────────────
 
+# One hero plus this hard maximum preserves the scheduler's max_images=3 bound,
+# even when a direct caller supplies an unsafe config or max_sections override.
+MAX_SECTION_IMAGES = 2
+
+
 def illustrate(
     draft: dict,
     out_dir: Optional[Path] = None,
@@ -236,6 +241,7 @@ def illustrate(
     stream = draft.get("stream", "ai")
     if max_sections is None:
         max_sections = config.BLOG_MAX_SECTION_IMAGES
+    max_sections = min(max(0, max_sections), MAX_SECTION_IMAGES)
     out_path = Path(out_dir) if out_dir else Path(config.OUTPUT_DIR) / "blog_images"
     out_path.mkdir(parents=True, exist_ok=True)
 

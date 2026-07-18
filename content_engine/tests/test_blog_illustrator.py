@@ -81,6 +81,19 @@ def test_illustrate_caps_at_max_sections(monkeypatch, tmp_path):
     assert len(images["section_paths"]) <= 1
 
 
+def test_illustrate_never_generates_more_than_two_sections_even_if_requested(monkeypatch, tmp_path):
+    body = "# T\n\nLede\n\n" + "\n\n".join(f"## Section {i}\n\nText." for i in range(10))
+    draft = {**_DRAFT, "body_md": body}
+    monkeypatch.setattr(bi, "_generate_codex_image",
+                        lambda prompt, out_path, **kw: (Path(out_path).write_text("x"), out_path)[1])
+    monkeypatch.setattr(bi, "_generate_webp", lambda p: p)
+
+    images = bi.illustrate(draft, out_dir=tmp_path, max_sections=10)
+
+    # One hero plus two sections is the runner's global max_images=3 budget.
+    assert len(images["section_paths"]) <= 2
+
+
 def test_illustrate_hero_only_when_max_sections_zero(monkeypatch, tmp_path):
     writes = []
     def fake_generate(prompt, out_path, **kw):
