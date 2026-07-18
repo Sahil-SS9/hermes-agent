@@ -30,7 +30,7 @@ class RecordingSession:
         self.closed = True
 
 
-def test_adapter_sends_explicit_account_in_allowlisted_stdio_tools_call_and_normalises_content():
+def test_outlook_adapter_uses_documented_metadata_only_contract_and_normalises_value_result():
     session = RecordingSession(
         {
             "jsonrpc": "2.0",
@@ -68,7 +68,12 @@ def test_adapter_sends_explicit_account_in_allowlisted_stdio_tools_call_and_norm
             "method": "tools/call",
             "params": {
                 "name": "list_mail_messages",
-                "arguments": {"account": "jobs@example.test"},
+                "arguments": {
+                    "account": "jobs@example.test",
+                    "select": "id,from,subject,receivedDateTime,bodyPreview",
+                    "filter": "isRead eq false",
+                    "top": 25,
+                },
             },
         }
     ]
@@ -83,6 +88,72 @@ def test_adapter_sends_explicit_account_in_allowlisted_stdio_tools_call_and_norm
     ]
     adapter.close()
     assert session.closed
+
+
+def test_gmail_adapter_uses_documented_explicit_account_unread_search_and_messages_result():
+    session = RecordingSession(
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": json.dumps(
+                            {
+                                "messages": [
+                                    {
+                                        "id": "gmail-1",
+                                        "from": "recruiter@example.test",
+                                        "subject": "Interview",
+                                        "received_at": "2026-07-18T09:00:00Z",
+                                        "snippet": "Choose a time",
+                                    }
+                                ]
+                            }
+                        ),
+                    }
+                ]
+            },
+        }
+    )
+
+    rows = McpReadOnlyAdapter(session)("list_metadata", "jobs@example.test", provider="gmail")
+
+    assert session.envelopes[0]["params"] == {
+        "name": "search_gmail_messages",
+        "arguments": {
+            "user_google_email": "jobs@example.test",
+            "query": "is:unread",
+            "page_size": 25,
+        },
+    }
+    assert rows == [
+        {
+            "id": "gmail-1",
+            "from": "recruiter@example.test",
+            "subject": "Interview",
+            "received_at": "2026-07-18T09:00:00Z",
+            "preview": "Choose a time",
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    ("provider", "text"),
+    [
+        ("outlook", json.dumps({"messages": []})),
+        ("gmail", json.dumps({"value": []})),
+        ("gmail", json.dumps([])),
+    ],
+)
+def test_adapter_rejects_undocumented_text_json_result_shapes(provider: str, text: str):
+    adapter = McpReadOnlyAdapter(
+        RecordingSession({"jsonrpc": "2.0", "id": 1, "result": {"content": [{"type": "text", "text": text}]}})
+    )
+
+    with pytest.raises(McpReadOnlyError, match="documented"):
+        adapter("list_metadata", "jobs@example.test", provider=provider)
 
 
 @pytest.mark.parametrize("operation", ["archive", "delete_message", "send_mail", "mark_read"])
@@ -119,13 +190,15 @@ def test_adapter_rejects_mcp_error_and_non_text_or_malformed_response():
         malformed_adapter("list_metadata", "jobs@example.test", provider="outlook")
 
 
-def test_controlled_stdio_config_is_strict_and_contains_explicit_accounts(tmp_path: Path):
+def test_controlled_stdio_config_is_strict_and_isolates_servers_by_provider(tmp_path: Path):
     config = tmp_path / "mailbox-mcp.json"
     config.write_text(
         json.dumps(
             {
-                "command": "/opt/mcp/read-only-mail",
-                "args": ["--read-only"],
+                "providers": {
+                    "outlook": {"command": "/opt/mcp/outlook", "args": ["--read-only"]},
+                    "gmail": {"command": "/opt/mcp/gmail"},
+                },
                 "accounts": [{"account": "jobs@example.test", "provider": "outlook"}],
             }
         ),
@@ -134,13 +207,18 @@ def test_controlled_stdio_config_is_strict_and_contains_explicit_accounts(tmp_pa
 
     loaded = load_controlled_stdio_config(config)
 
-    assert loaded.command == ("/opt/mcp/read-only-mail", "--read-only")
+    assert loaded.commands == {
+        "outlook": ("/opt/mcp/outlook", "--read-only"),
+        "gmail": ("/opt/mcp/gmail",),
+    }
     assert loaded.policies == (AccountPolicy(account="jobs@example.test", provider="outlook"),)
 
     for unsafe in (
-        {"command": "mail", "accounts": []},
-        {"command": "mail", "accounts": [{"account": "jobs@example.test", "provider": "outlook"}], "env": {}},
-        {"command": "mail", "accounts": [{"account": "", "provider": "outlook"}]},
+        {"providers": {}, "accounts": []},
+        {"providers": {"outlook": {"command": "mail"}}, "accounts": [{"account": "jobs@example.test", "provider": "outlook"}], "env": {}},
+        {"providers": {"outlook": {"command": "mail"}}, "accounts": [{"account": "", "provider": "outlook"}]},
+        {"providers": {"outlook": {"command": "mail"}}, "accounts": [{"account": "jobs@example.test", "provider": "gmail"}]},
+        {"providers": {"mail": {"command": "mail"}}, "accounts": [{"account": "jobs@example.test", "provider": "mail"}]},
     ):
         config.write_text(json.dumps(unsafe), encoding="utf-8")
         with pytest.raises(ControlledMcpConfigError):

@@ -27,15 +27,32 @@ class McpSession(Protocol):
     def close(self) -> None: ...
 
 
-_READ_TOOLS = {
-    "outlook": {"list_metadata": "list_mail_messages", "get_metadata": "get_mail_message"},
-    "gmail": {"list_metadata": "list_gmail_messages", "get_metadata": "get_gmail_message"},
+_METADATA_PAGE_SIZE = 25
+_OUTLOOK_SELECT = "id,from,subject,receivedDateTime,bodyPreview"
+_READ_CALLS: dict[str, dict[str, tuple[str, dict[str, object]]]] = {
+    "gmail": {
+        "list_metadata": (
+            "search_gmail_messages",
+            {"query": "is:unread", "page_size": _METADATA_PAGE_SIZE},
+        )
+    },
+    "outlook": {
+        "list_metadata": (
+            "list_mail_messages",
+            {
+                "select": _OUTLOOK_SELECT,
+                "filter": "isRead eq false",
+                "top": _METADATA_PAGE_SIZE,
+            },
+        )
+    },
 }
+_RESULT_LIST_KEYS = {"gmail": "messages", "outlook": "value"}
 
 
 @dataclass(frozen=True, slots=True)
 class ControlledStdioConfig:
-    command: tuple[str, ...]
+    commands: Mapping[str, tuple[str, ...]]
     policies: tuple[AccountPolicy, ...]
 
 
@@ -64,7 +81,7 @@ def _normalise_message(row: Mapping[str, object]) -> dict[str, str]:
     }
 
 
-def _rows_from_result(result: Mapping[str, object]) -> list[dict[str, str]]:
+def _rows_from_result(result: Mapping[str, object], provider: str) -> list[dict[str, str]]:
     content = result.get("content")
     if not isinstance(content, list):
         raise McpReadOnlyError("MCP result must contain text content")
@@ -76,11 +93,13 @@ def _rows_from_result(result: Mapping[str, object]) -> list[dict[str, str]]:
             parsed = json.loads(_text(item.get("text")))
         except json.JSONDecodeError as exc:
             raise McpReadOnlyError("MCP text content must be JSON metadata") from exc
-        if isinstance(parsed, Mapping):
-            parsed = parsed.get("value", parsed.get("messages", parsed.get("items", [])))
-        if not isinstance(parsed, list) or not all(isinstance(row, Mapping) for row in parsed):
-            raise McpReadOnlyError("MCP JSON content must be a list of metadata objects")
-        rows.extend(_normalise_message(row) for row in parsed)
+        list_key = _RESULT_LIST_KEYS.get(provider)
+        if list_key is None or not isinstance(parsed, Mapping):
+            raise McpReadOnlyError("MCP text content must use a documented provider JSON result shape")
+        provider_rows = parsed.get(list_key)
+        if not isinstance(provider_rows, list) or not all(isinstance(row, Mapping) for row in provider_rows):
+            raise McpReadOnlyError("MCP text content must use a documented provider JSON result shape")
+        rows.extend(_normalise_message(row) for row in provider_rows)
     return rows
 
 
@@ -95,11 +114,14 @@ class McpReadOnlyAdapter:
     def __call__(self, operation: str, account: str, *, provider: str) -> list[dict[str, str]]:
         if not account.strip():
             raise McpReadOnlyError("every MCP read requires an explicit account")
-        tool = _READ_TOOLS.get(provider, {}).get(operation)
-        if tool is None:
-            if provider not in _READ_TOOLS:
+        call = _READ_CALLS.get(provider, {}).get(operation)
+        if call is None:
+            if provider not in _READ_CALLS:
                 raise McpReadOnlyError(f"unsupported MCP provider: {provider}")
             raise McpReadOnlyError(f"operation is not allowlisted: {operation}")
+        tool, arguments = call
+        arguments = dict(arguments)
+        arguments["user_google_email" if provider == "gmail" else "account"] = account
         with self._lock:
             request_id = self._next_id
             self._next_id += 1
@@ -107,7 +129,7 @@ class McpReadOnlyAdapter:
                 "jsonrpc": "2.0",
                 "id": request_id,
                 "method": "tools/call",
-                "params": {"name": tool, "arguments": {"account": account}},
+                "params": {"name": tool, "arguments": arguments},
             }
             response = self._session.request(envelope)
         if response.get("id") not in (None, request_id):
@@ -118,7 +140,7 @@ class McpReadOnlyAdapter:
         result = response.get("result")
         if not isinstance(result, Mapping) or result.get("isError") is True:
             raise McpReadOnlyError("MCP tool call returned an invalid read result")
-        return _rows_from_result(result)
+        return _rows_from_result(result, provider)
 
     def close(self) -> None:
         self._session.close()
@@ -215,15 +237,23 @@ def load_controlled_stdio_config(path: Path) -> ControlledStdioConfig:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise ControlledMcpConfigError("controlled MCP config must be a readable JSON file") from exc
-    if not isinstance(raw, Mapping) or set(raw) - {"command", "args", "accounts"}:
-        raise ControlledMcpConfigError("controlled MCP config only permits command, args, and accounts")
-    command = raw.get("command")
-    args = raw.get("args", [])
+    if not isinstance(raw, Mapping) or set(raw) != {"providers", "accounts"}:
+        raise ControlledMcpConfigError("controlled MCP config requires only providers and accounts")
+    providers = raw.get("providers")
     accounts = raw.get("accounts")
-    if not isinstance(command, str) or not command.strip() or not isinstance(args, list):
-        raise ControlledMcpConfigError("controlled MCP config requires command and optional string args")
-    if not all(isinstance(arg, str) and arg for arg in args):
-        raise ControlledMcpConfigError("controlled MCP args must be non-empty strings")
+    if not isinstance(providers, Mapping) or not providers:
+        raise ControlledMcpConfigError("controlled MCP config requires provider-specific servers")
+    commands: dict[str, tuple[str, ...]] = {}
+    for provider, server in providers.items():
+        if provider not in _READ_CALLS or not isinstance(server, Mapping) or set(server) - {"command", "args"}:
+            raise ControlledMcpConfigError("controlled MCP servers must be documented provider-specific commands")
+        command = server.get("command")
+        args = server.get("args", [])
+        if not isinstance(command, str) or not command.strip() or not isinstance(args, list):
+            raise ControlledMcpConfigError("controlled MCP server requires command and optional string args")
+        if not all(isinstance(arg, str) and arg for arg in args):
+            raise ControlledMcpConfigError("controlled MCP args must be non-empty strings")
+        commands[provider] = (command, *args)
     if not isinstance(accounts, list) or not accounts:
         raise ControlledMcpConfigError("controlled MCP config requires explicit accounts")
     policies: list[AccountPolicy] = []
@@ -236,4 +266,6 @@ def load_controlled_stdio_config(path: Path) -> ControlledStdioConfig:
         raise ControlledMcpConfigError(str(exc)) from exc
     if len({policy.account for policy in policies}) != len(policies):
         raise ControlledMcpConfigError("controlled MCP accounts must be unique")
-    return ControlledStdioConfig(command=(command, *args), policies=tuple(policies))
+    if any(policy.provider not in commands for policy in policies):
+        raise ControlledMcpConfigError("every controlled MCP account requires its provider-specific server")
+    return ControlledStdioConfig(commands=commands, policies=tuple(policies))

@@ -41,17 +41,25 @@ def main(argv: Sequence[str] | None = None) -> int:
         if not args.allow_controlled_read:
             parser.error("--mcp-stdio-config requires --allow-controlled-read")
         config = load_controlled_stdio_config(args.mcp_stdio_config)
-        session = StdioJsonRpcSession(config.command)
-        connector = McpReadOnlyAdapter(session)
+        connectors: dict[str, McpReadOnlyAdapter] = {}
+        try:
+            for provider, command in config.commands.items():
+                connectors[provider] = McpReadOnlyAdapter(StdioJsonRpcSession(command))
+        except Exception:
+            for connector in connectors.values():
+                connector.close()
+            raise
         providers = {policy.account: policy.provider for policy in config.policies}
 
         def read(operation: str, account: str) -> list[dict[str, str]]:
-            return connector(operation, account, provider=providers[account])
+            provider = providers[account]
+            return connectors[provider](operation, account, provider=provider)
 
         try:
             report = run_scheduled(config.policies, read, StateStore(args.state))
         finally:
-            connector.close()
+            for connector in connectors.values():
+                connector.close()
         print(report.text)
         return 0
     if args.allow_controlled_read:
