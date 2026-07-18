@@ -890,6 +890,30 @@ class TestPatchReplacePostWriteVerification:
         assert "could not re-read" in result.error.lower()
 
 
+class TestWriteFilePostWriteVerification:
+    def test_write_file_fails_when_file_not_persisted(self, mock_env):
+        """A backend that reports write success without changing the file must
+        not yield a successful WriteResult."""
+        path = "/tmp/test/write.txt"
+        on_disk = "old content\n"
+
+        def side_effect(command, stdin_data=None, **kwargs):
+            if command.startswith("cat "):
+                return {"output": on_disk, "returncode": 0}
+            if command.startswith("wc -c"):
+                return {"output": str(len(on_disk.encode())), "returncode": 0}
+            # Includes the atomic write command: it appears to work but does
+            # not change on_disk, reproducing a silent persistence failure.
+            return {"output": "", "returncode": 0}
+
+        mock_env.execute.side_effect = side_effect
+        result = ShellFileOperations(mock_env).write_file(path, "new content\n")
+
+        assert result.error is not None
+        assert "verification failed" in result.error.lower()
+        assert "did not persist" in result.error.lower()
+
+
 # =========================================================================
 # Git baseline check for write_file warning
 # =========================================================================

@@ -1524,6 +1524,26 @@ class ShellFileOperations(FileOperations):
         except ValueError:
             bytes_written = len(content.encode('utf-8'))
 
+        # A successful shell exit code alone is not proof that the target was
+        # updated. Some terminal backends can report success after a failed
+        # or misrouted write, leaving the target absent, empty, or unchanged.
+        # Re-read through the same backend before reporting success so callers
+        # never receive a false-positive write result.
+        verify_cmd = f"cat {self._escape_shell_arg(path)} 2>/dev/null"
+        verify_result = self._exec(verify_cmd)
+        if verify_result.exit_code != 0:
+            return WriteResult(
+                error=f"Post-write verification failed: could not re-read {path}"
+            )
+        if verify_result.stdout != content:
+            return WriteResult(
+                error=(
+                    f"Post-write verification failed for {path}: on-disk content "
+                    f"differs from intended write (wrote {len(content)} chars, read back "
+                    f"{len(verify_result.stdout)} chars); the write did not persist."
+                )
+            )
+
         # Post-write lint with delta refinement.
         lint_result = self._check_lint_delta(path, pre_content=pre_content, post_content=content)
 
