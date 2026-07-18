@@ -279,6 +279,84 @@ def run_stream(stream: str, repo: Optional[str] = None,
     }
 
 
+def run_stage_draft_only(
+    stream: str,
+    repo: Optional[str] = None,
+    *,
+    max_new_drafts: int = 1,
+    max_images: int = 3,
+    dry_run: bool = False,
+) -> dict:
+    """Create at most one uncommitted worktree draft with at most three images.
+
+    This is the sole scheduler-facing seam.  It deliberately stops after
+    assembly: it does not invoke ``stage_draft``, approval, publishing, git
+    commit/push, or any delivery surface.  ``dry_run`` validates the request
+    without calling router, generator, illustrator, or other providers.
+    """
+    if max_new_drafts != 1 or max_images != 3:
+        raise ValueError("stage-only scheduler seam requires exactly one draft and three images")
+    if stream not in BLOG_STREAMS:
+        raise ValueError(f"unknown blog stream: {stream}")
+
+    repo_path = str(repo or SAHILBLOG_REPO)
+    if not Path(repo_path).is_dir():
+        raise ValueError(f"blog repo does not exist: {repo_path}")
+    if dry_run:
+        return {
+            "status": "dry_run",
+            "stage_only": True,
+            "provider_execution": "refused",
+            "stream": stream,
+            "repo": repo_path,
+            "max_new_drafts": max_new_drafts,
+            "max_images": max_images,
+        }
+    if not BLOG_ENABLED:
+        return {"status": "skipped_disabled", "stream": stream, "stage_only": True}
+
+    plan = choose(stream)
+    if not plan:
+        return {"status": "skipped_router", "stream": stream, "stage_only": True}
+    try:
+        assert_allowed(title=plan.get("title_hint", ""), topic_id=plan.get("topic_id", ""))
+    except ExcludedContentError as exc:
+        return {
+            "status": "skipped_excluded", "stream": stream, "stage_only": True,
+            "topic_id": plan.get("topic_id", ""), "reason": str(exc),
+        }
+
+    reservation_token = reserve(stream, plan.get("topic_id", ""), plan.get("title_hint", ""))
+    try:
+        draft = write_with_gate(plan, stream=stream)
+        if not draft:
+            return {
+                "status": "skipped_generator", "stream": stream, "stage_only": True,
+                "topic_id": plan.get("topic_id", ""),
+            }
+
+        # Hero plus two sections is the complete, non-overridable three-image cap.
+        images = illustrate(draft, max_sections=max_images - 1)
+        hero_ok = images.get("hero_path") is not None
+        sections_ok = bool(images.get("section_paths"))
+        if not hero_ok and not sections_ok:
+            return {
+                "status": "failed_images", "stream": stream, "stage_only": True,
+                "slug": draft.get("slug", ""), "topic_id": plan.get("topic_id", ""),
+            }
+
+        mdx_path = assemble(draft, images, repo=repo_path)
+        return {
+            "status": "staged", "stage_only": True, "stream": stream,
+            "slug": draft.get("slug", ""), "topic_id": plan.get("topic_id", ""),
+            "mdx_path": str(mdx_path), "drafts_created": 1,
+            "images_requested": max_images,
+        }
+    finally:
+        # Stage-only work is intentionally uncommitted, so it must not burn a topic.
+        release(reservation_token)
+
+
 def retry_failed_images(slug: str, stream: str,
                         repo: Optional[str] = None,
                         raise_on_cap: bool = False) -> dict:

@@ -10,11 +10,10 @@ import argparse
 import fcntl
 import json
 import os
-import subprocess
 import sys
 import time
 import uuid
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -47,27 +46,50 @@ def _validate_bounds(max_new_drafts: int, max_images: int) -> None:
         raise ValueError(f"max_images must be between 0 and {MAX_IMAGES}")
 
 
-def run_subprocess_child(
-    command: Sequence[str], *, deadline: float, **_: Any
-) -> dict[str, Any]:
-    """Run a command only for the remaining deadline budget.
+DANGEROUS_MODES = frozenset({"publish", "approval", "commit", "push", "delivery"})
 
-    This is the process boundary for production callers. Tests can instead pass
-    a small callable to :func:`run_once`, avoiding all real pipeline providers.
+
+def run_production_child(
+    *,
+    stream: str,
+    repo: Path | str,
+    deadline: float,
+    max_new_drafts: int,
+    max_images: int,
+    dry_run: bool = False,
+    **modes: Any,
+) -> dict[str, Any]:
+    """Run the only production child seam: bounded, uncommitted staging.
+
+    The explicit import prevents this runner from acquiring any publisher or
+    delivery dependency.  Unknown mode switches are rejected rather than being
+    forwarded to the pipeline.
     """
-    remaining = deadline - time.monotonic()
-    if remaining <= 0:
-        raise TimeoutError("deadline exceeded before child started")
-    try:
-        completed = subprocess.run(
-            list(command), capture_output=True, text=True, check=False, timeout=remaining
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise TimeoutError("child exceeded deadline") from exc
+    forbidden = sorted(name for name, enabled in modes.items() if enabled and name in DANGEROUS_MODES)
+    if forbidden:
+        raise ValueError(f"mode(s) not permitted by stage-only runner: {', '.join(forbidden)}")
+    if modes:
+        raise ValueError(f"unknown stage-only mode(s): {', '.join(sorted(modes))}")
+    if max_new_drafts != MAX_NEW_DRAFTS or max_images != MAX_IMAGES:
+        raise ValueError("production child requires exactly one draft and three images")
+    if time.monotonic() >= deadline:
+        raise TimeoutError("deadline exceeded before pipeline started")
+
+    from blog.blog_pipeline import run_stage_draft_only
+
+    payload = run_stage_draft_only(
+        stream=stream,
+        repo=str(repo),
+        max_new_drafts=MAX_NEW_DRAFTS,
+        max_images=MAX_IMAGES,
+        dry_run=dry_run,
+    )
     return {
-        "exit_code": completed.returncode,
-        "stdout": completed.stdout.strip(),
-        "stderr": completed.stderr.strip(),
+        "operation": "stage_draft_only",
+        "stage_only": True,
+        "max_new_drafts": MAX_NEW_DRAFTS,
+        "max_images": MAX_IMAGES,
+        "pipeline": payload,
     }
 
 
@@ -130,20 +152,37 @@ def run_once(
 
 
 def _cli() -> int:
-    parser = argparse.ArgumentParser(description="Run one bounded SahilBlog child command")
+    parser = argparse.ArgumentParser(description="Run one bounded, stage-only SahilBlog attempt")
     parser.add_argument("--state-root", type=Path, required=True)
+    parser.add_argument("--repo", type=Path, required=True, help="Existing SahilBlog worktree")
+    parser.add_argument("--stream", default="ai", choices=["ai", "pm", "builder"])
     parser.add_argument("--timeout-seconds", type=float, default=DEFAULT_TIMEOUT_SECONDS)
-    parser.add_argument("--max-new-drafts", type=int, default=MAX_NEW_DRAFTS)
-    parser.add_argument("--max-images", type=int, default=MAX_IMAGES)
-    parser.add_argument("command", nargs=argparse.REMAINDER)
+    execution = parser.add_mutually_exclusive_group(required=True)
+    execution.add_argument(
+        "--controlled-dry-run",
+        action="store_true",
+        help="Validate state/repository paths and refuse all provider execution",
+    )
+    execution.add_argument(
+        "--operator-execute-providers",
+        action="store_true",
+        help="Operator-only: execute the bounded stage-only provider seam",
+    )
     args = parser.parse_args()
-    if not args.command:
-        parser.error("a child command is required after --")
+    if not args.repo.is_dir():
+        parser.error(f"--repo must be an existing directory: {args.repo}")
+
     result = run_once(
         state_root=args.state_root,
-        child_runner=lambda **kwargs: run_subprocess_child(args.command, **kwargs),
-        max_new_drafts=args.max_new_drafts,
-        max_images=args.max_images,
+        child_runner=lambda **kwargs: run_production_child(
+            stream=args.stream,
+            repo=args.repo,
+            dry_run=args.controlled_dry_run,
+            **kwargs,
+        ),
+        # The scheduler CLI has no override switches: these are hard bounds.
+        max_new_drafts=MAX_NEW_DRAFTS,
+        max_images=MAX_IMAGES,
         timeout_seconds=args.timeout_seconds,
     )
     print(terminal_json(result))

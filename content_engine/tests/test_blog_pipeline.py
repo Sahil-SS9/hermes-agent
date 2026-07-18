@@ -398,3 +398,48 @@ def test_retry_prunes_stale_legacy_no_draft(monkeypatch, tmp_path):
     assert "ancient-slug" in res["pruned"]
     assert "ancient-slug" not in res["no_draft"]
     assert bpl._get_failed_entries() == []
+
+
+# ── Safe bounded scheduler seam ─────────────────────────────────────────────
+
+def test_stage_draft_only_assembles_with_three_image_bound_and_no_delivery(monkeypatch, tmp_path):
+    """The scheduler seam writes one worktree draft but never commits or delivers it."""
+    repo = _setup_tmp_repo(tmp_path)
+    plan = {"topic_id": "t1", "title_hint": "t", "tags": [], "source": "manual",
+            "signals": [{"signal_id": "t1", "summary": "s"}]}
+    seen = {}
+    monkeypatch.setattr(bpl, "choose", lambda stream: plan)
+    monkeypatch.setattr(bpl, "write_with_gate", lambda p, stream: _DRAFT)
+    monkeypatch.setattr(
+        bpl,
+        "illustrate",
+        lambda draft, **kwargs: seen.update(kwargs) or {"hero_path": "/tmp/hero.png", "section_paths": {}},
+    )
+    monkeypatch.setattr(bpl, "assemble", lambda draft, images, repo=None, pub_date=None: Path(repo) / "draft.mdx")
+    monkeypatch.setattr(bpl, "stage_draft", lambda *args, **kwargs: pytest.fail("must not commit"))
+    monkeypatch.setattr(bpl, "_maybe_request_approval", lambda *args: pytest.fail("must not request approval"))
+
+    result = bpl.run_stage_draft_only("ai", repo=str(repo), max_new_drafts=1, max_images=3)
+
+    assert result["status"] == "staged"
+    assert result["stage_only"] is True
+    assert result["drafts_created"] == 1
+    assert result["images_requested"] == 3
+    assert seen["max_sections"] == 2
+
+
+def test_stage_draft_only_dry_run_refuses_pipeline_provider_execution(monkeypatch, tmp_path):
+    repo = _setup_tmp_repo(tmp_path)
+    monkeypatch.setattr(bpl, "choose", lambda stream: pytest.fail("dry-run must not call providers"))
+
+    result = bpl.run_stage_draft_only("ai", repo=str(repo), max_new_drafts=1, max_images=3, dry_run=True)
+
+    assert result == {
+        "status": "dry_run",
+        "stage_only": True,
+        "provider_execution": "refused",
+        "stream": "ai",
+        "repo": str(repo),
+        "max_new_drafts": 1,
+        "max_images": 3,
+    }

@@ -87,3 +87,104 @@ def test_terminal_json_is_stable_compact_and_json_parseable(tmp_path):
 
     assert text == '{"result":{"a":1,"b":2},"run_id":"r","status":"completed"}'
     assert json.loads(text)["status"] == "completed"
+
+
+def test_production_child_uses_the_single_stage_only_pipeline_seam(monkeypatch, tmp_path):
+    import blog.blog_pipeline as pipeline
+    from blog.scheduler_runner import run_production_child
+
+    seen = {}
+
+    def stage_only(**kwargs):
+        seen.update(kwargs)
+        return {"status": "staged", "slug": "safe-draft", "mdx_path": "/tmp/safe.mdx"}
+
+    monkeypatch.setattr(pipeline, "run_stage_draft_only", stage_only, raising=False)
+
+    result = run_production_child(
+        stream="ai",
+        repo=tmp_path,
+        deadline=9999999999,
+        max_new_drafts=1,
+        max_images=3,
+    )
+
+    assert seen == {
+        "stream": "ai",
+        "repo": str(tmp_path),
+        "max_new_drafts": 1,
+        "max_images": 3,
+        "dry_run": False,
+    }
+    assert result == {
+        "operation": "stage_draft_only",
+        "stage_only": True,
+        "max_new_drafts": 1,
+        "max_images": 3,
+        "pipeline": {"status": "staged", "slug": "safe-draft", "mdx_path": "/tmp/safe.mdx"},
+    }
+
+
+@pytest.mark.parametrize("dangerous_mode", ["publish", "approval", "commit", "push", "delivery"])
+def test_production_child_rejects_dangerous_modes_before_pipeline_runs(tmp_path, dangerous_mode):
+    from blog.scheduler_runner import run_production_child
+
+    with pytest.raises(ValueError, match="not permitted"):
+        run_production_child(
+            stream="ai",
+            repo=tmp_path,
+            deadline=9999999999,
+            max_new_drafts=1,
+            max_images=3,
+            **{dangerous_mode: True},
+        )
+
+
+def test_controlled_dry_run_cli_verifies_paths_without_provider_execution(monkeypatch, tmp_path, capsys):
+    import blog.scheduler_runner as runner
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    seen = {}
+
+    def child(**kwargs):
+        seen.update(kwargs)
+        return {"operation": "stage_draft_only", "stage_only": True, "dry_run": True}
+
+    monkeypatch.setattr(runner, "run_production_child", child, raising=False)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "scheduler_runner",
+            "--state-root", str(tmp_path / "state"),
+            "--repo", str(repo),
+            "--stream", "ai",
+            "--controlled-dry-run",
+        ],
+    )
+
+    assert runner._cli() == 0
+    terminal = json.loads(capsys.readouterr().out)
+    assert terminal["status"] == "completed"
+    assert seen["dry_run"] is True
+    assert seen["max_new_drafts"] == 1
+    assert seen["max_images"] == 3
+
+
+@pytest.mark.parametrize("dangerous_arg", ["--publish", "--approval", "--commit", "--push", "--delivery"])
+def test_scheduler_cli_rejects_dangerous_mode_arguments(monkeypatch, tmp_path, dangerous_arg):
+    import blog.scheduler_runner as runner
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "scheduler_runner", "--state-root", str(tmp_path / "state"),
+            "--repo", str(repo), "--controlled-dry-run", dangerous_arg,
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        runner._cli()
+    assert exc.value.code == 2
