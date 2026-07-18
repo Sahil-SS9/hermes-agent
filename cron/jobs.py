@@ -1065,6 +1065,7 @@ def create_job(
     workdir: Optional[str] = None,
     no_agent: bool = False,
     attach_to_session: Optional[bool] = None,
+    enabled: bool = True,
 ) -> Dict[str, Any]:
     """
     Create a new cron job.
@@ -1109,6 +1110,10 @@ def create_job(
                 and deliver its stdout directly. Empty stdout = silent (no
                 delivery). Requires ``script`` to be set. Ideal for classic
                 watchdogs and periodic alerts that don't need LLM reasoning.
+        enabled: Whether this job is eligible for scheduling at creation time.
+                ``False`` persists the job atomically as ``state='paused'``;
+                callers must resume it explicitly. This avoids a create-then-
+                pause race for jobs that require review before activation.
 
     Returns:
         The created job dict
@@ -1141,6 +1146,7 @@ def create_job(
     normalized_workdir = _normalize_workdir(workdir)
     normalized_no_agent = bool(no_agent)
     normalized_attach = attach_to_session if isinstance(attach_to_session, bool) else None
+    normalized_enabled = bool(enabled)
 
     # no_agent jobs are meaningless without a script — the script IS the job.
     # Surface this as a clear ValueError at create time so bad configs never
@@ -1215,10 +1221,10 @@ def create_job(
             "times": repeat,  # None = forever
             "completed": 0
         },
-        "enabled": True,
-        "state": "scheduled",
-        "paused_at": None,
-        "paused_reason": None,
+        "enabled": normalized_enabled,
+        "state": "scheduled" if normalized_enabled else "paused",
+        "paused_at": None if normalized_enabled else now,
+        "paused_reason": None if normalized_enabled else "created_disabled",
         "created_at": now,
         "next_run_at": next_run_at,
         "last_run_at": None,
