@@ -155,6 +155,9 @@ def _make_mock_parent(depth=0, **overrides):
     parent.providers_order = None
     parent.provider_sort = None
     parent._session_db = None
+    # Durable async delegation persists this field into SQLite. A MagicMock
+    # attribute is not serialisable and is not representative of a real agent.
+    parent.session_id = ""
     parent._delegate_depth = depth
     parent._active_children = []
     parent._active_children_lock = threading.Lock()

@@ -95,44 +95,21 @@ def _make_registry(
 # ── fixtures ────────────────────────────────────────────────────────────────
 
 
-T3_NAMES = [
-    "denji-monitor",
-    "dezzy-image-prompt",
-    "dezzy-ux-architect",
-    "light-archivist",
-    "octacon-architect",
-    "octacon-frontend",
-    "octacon-techwriter",
-    "remii-deep",
-    "wesker-backup",
-]
-
-T1_NAMES = [
-    "kensei", "misa-misa", "remii", "wesker", "gojo", "octacon",
-    "ceecee", "mrhermagi", "quan", "denji", "kensei-review", "light",
-    "dezzy", "sirvir",
-]
-
-# A representative subset of Tier-2 for fixture (we don't need all 39)
-T2_NAMES = [
-    "ceecee-writer", "ceecee-social", "denji-ledger", "gojo-admin",
-    "octacon-backend", "orchestrator", "wesker-ops", "moss",
-]
+# Deliberately arbitrary fixture profiles. These names and counts must never
+# encode or act as a change detector for the deployed fleet.
+T1_NAMES = ["alpha", "beta"]
+T2_NAMES = ["gamma", "delta"]
+T3_NAMES = ["epsilon"]
 
 
 @pytest.fixture
 def full_fixture(tmp_path):
-    """Build a full 13/39/9-like fixture mirroring real config."""
+    """Build an arbitrary small fixture with all three tier classes."""
     profiles_root = tmp_path / "profiles"
     profiles_root.mkdir()
 
-    # kensei is the default — no config.yaml on disk (expected)
     for n in T1_NAMES:
-        if n == "kensei":
-            # kensei has no config.yaml by convention
-            (profiles_root / n).mkdir(exist_ok=True)
-        else:
-            _make_profile(profiles_root, n, 1)
+        _make_profile(profiles_root, n, 1)
 
     for n in T2_NAMES:
         _make_profile(profiles_root, n, 2)
@@ -156,19 +133,19 @@ class TestDerivesTiersFromConfig:
         mod, profiles_root, _ = full_fixture
         tiers = mod.derive_profile_tiers(profiles_root)
         t3 = {n for n, t in tiers.items() if t == 3}
-        assert t3 == set(T3_NAMES), f"Expected 9 Tier-3, got {t3}"
+        assert t3 == set(T3_NAMES)
 
-    def test_tier3_count_is_nine(self, full_fixture):
-        """Tier-3 count must be 9, not 0."""
+    def test_tier3_count_matches_fixture(self, full_fixture):
+        """Tier-3 count derives from the fixture, never a deployed count."""
         mod, profiles_root, _ = full_fixture
         tiers = mod.derive_profile_tiers(profiles_root)
         t3_count = sum(1 for t in tiers.values() if t == 3)
-        assert t3_count == 9
+        assert t3_count == len(T3_NAMES)
 
     def test_hardcoded_zero_tier3_cannot_occur(self, full_fixture):
         """The bug: a hard-coded roster reporting Tier-3=0 must never happen.
 
-        With 9 profiles having tier:3 in config, derive_profile_tiers() must
+        With fixture profiles having tier:3 in config, derive_profile_tiers() must
         return non-zero Tier-3 count. If the script still used a stale
         CANONICAL dict with no Tier-3 entries, this would fail.
         """
@@ -179,14 +156,11 @@ class TestDerivesTiersFromConfig:
         )
 
     def test_tier1_count(self, full_fixture):
-        """13 Tier-1 configs on disk (kensei has no config, so 13 with tier
-        field, but derive counts only those with config.yaml)."""
+        """Fixture Tier-1 identities derive from the temporary tree."""
         mod, profiles_root, _ = full_fixture
         tiers = mod.derive_profile_tiers(profiles_root)
         t1 = {n for n, t in tiers.items() if t == 1}
-        # kensei has no config.yaml so won't appear; the other 13 do
-        assert len(t1) == 13
-        assert "kensei" not in t1  # no config.yaml
+        assert t1 == set(T1_NAMES)
 
     def test_tier2_count(self, full_fixture):
         """All fixture Tier-2 profiles detected."""
@@ -204,7 +178,7 @@ class TestRegistryValidation:
         mod, profiles_root, reg = full_fixture
         result = mod.run_proof(profiles_root, reg)
         assert result.exit_code == 0
-        assert "Tier 3: 9" in result.stdout
+        assert f"Tier 3: {len(T3_NAMES)}" in result.stdout
 
     def test_registry_mismatch_fails(self, tmp_path):
         """Registry lists a Tier-3 profile not in config → clear failure."""
