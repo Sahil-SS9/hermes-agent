@@ -115,6 +115,26 @@ def _extract_json_blob(raw: str) -> Optional[dict]:
     return parse_llm_json(raw, raise_on_failure=False)
 
 
+def _emit_redacted_telemetry(*, profile: str, model: str, task_class: str, mismatch: str) -> None:
+    """Item A (F001 hardening): record a redacted validation-failure event.
+
+    Wraps ``hermes_cli.kanban_telemetry.record_validation_failure``. Never
+    raises; telemetry must not affect control flow. Provider is defaulted to
+    'unknown' because the specifier resolves its client lazily.
+    """
+    try:
+        from hermes_cli.kanban_telemetry import record_validation_failure
+        record_validation_failure(
+            profile=profile,
+            provider="unknown",
+            model=model,
+            task_class=task_class,
+            schema_or_version_mismatch=mismatch,
+        )
+    except Exception:
+        pass
+
+
 def _profile_author() -> str:
     """Best-effort author name. Delegates to ``hermes_cli.llm_json``
     (I-3: single source, breaks circular import with kanban.py)."""
@@ -203,6 +223,11 @@ def specify_task(
         # the task in triage on a malformed LLM reply.
         stripped_raw = raw.strip()
         if not stripped_raw:
+            # Item A (F001 hardening): redacted telemetry — never raw output.
+            _emit_redacted_telemetry(
+                profile="triage_specifier", model=model,
+                task_class="aux_empty_response", mismatch="LLM returned an empty response",
+            )
             return SpecifyOutcome(
                 task_id, False, "LLM returned an empty response"
             )

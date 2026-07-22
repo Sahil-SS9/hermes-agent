@@ -208,6 +208,90 @@ def _resolve_default_assignee(cfg: dict) -> str:
         return "default"
 
 
+def _structured_output_enabled(cfg: dict) -> bool:
+    """Return True only when config explicitly opts in to native structured
+    output for kanban auxiliary tasks.
+
+    Default OFF. This is the gate that keeps the free-first constraint safe:
+    structured output is only ever requested when the user has explicitly
+    enabled it AND the model is proven capable (see ``_aux_supports_json_schema``).
+    """
+    kanban_cfg = cfg.get("kanban", {}) if isinstance(cfg, dict) else {}
+    return bool(kanban_cfg.get("structured_output", False))
+
+
+def _aux_supports_json_schema(model: str) -> bool:
+    """Strict capability probe: True ONLY when the model is PROVEN to support
+    ``response_format=json_schema``.
+
+    Unlike tool-calling (where a missing ``supported_parameters`` field is
+    treated as permissive), structured output must be proven — we never send
+    ``response_format`` to a model we cannot confirm supports it, because that
+    would cause an HTTP 400 and regress the decomposer on free-tier models
+    (2026-07-19 free-first constraint).
+
+    Resolution order:
+      1. Known-good allowlist of models that reliably support json_schema.
+      2. OpenRouter-style ``supported_parameters`` containing ``response_format``.
+    Anything else (unknown model, local/Ollama without proof) returns False.
+    """
+    if not model:
+        return False
+    m = model.lower()
+
+    # 1. Known-good allowlist (extend deliberately; never assume).
+    _KNOWN_JSON_SCHEMA_MODELS = (
+        "gpt-4o", "gpt-4o-mini", "gpt-4.1", "gpt-4.1-mini", "gpt-4.5",
+        "o1", "o3", "o3-mini", "o4-mini",
+        "claude-3-5-sonnet", "claude-3-7-sonnet", "claude-4", "claude-opus-4",
+        "claude-sonnet-4", "claude-3-5-haiku",
+        "gemini-2.0-flash", "gemini-2.5-flash", "gemini-2.5-pro",
+        "deepseek-chat", "deepseek-v3", "deepseek-v4",
+        "qwen2.5-72b", "qwen3-235b", "llama-3.3-70b", "mistral-large",
+    )
+    if any(m.startswith(k) for k in _KNOWN_JSON_SCHEMA_MODELS):
+        return True
+
+    # 2. OpenRouter-style catalog: only confirm when response_format is
+    #    explicitly advertised. No field => NOT proven => False.
+    try:
+        from hermes_cli.models import fetch_openrouter_models
+        models = fetch_openrouter_models()
+        for item in models:
+            if not isinstance(item, dict):
+                continue
+            if (item.get("id") or "").lower() == m:
+                params = item.get("supported_parameters")
+                if isinstance(params, list):
+                    return "response_format" in params
+                return False  # explicit catalog entry, no proof of support
+    except Exception:
+        pass
+    return False
+
+
+def _emit_redacted_telemetry(*, profile: str, model: str, task_class: str, mismatch: str) -> None:
+    """Item A (F001 hardening): record a redacted validation-failure event.
+
+    Wraps ``hermes_cli.kanban_telemetry.record_validation_failure`` so callers
+    stay lean. Never raises; telemetry must not affect control flow. The
+    provider is intentionally omitted-at-call-site and defaulted to 'unknown'
+    here because the decomposer resolves the client lazily and the provider
+    slug is not always available without a network round-trip.
+    """
+    try:
+        from hermes_cli.kanban_telemetry import record_validation_failure
+        record_validation_failure(
+            profile=profile,
+            provider="unknown",
+            model=model,
+            task_class=task_class,
+            schema_or_version_mismatch=mismatch,
+        )
+    except Exception:
+        pass
+
+
 def _build_roster() -> tuple[list[dict], set[str]]:
     """Return (roster_for_prompt, valid_assignee_names).
 
@@ -343,6 +427,48 @@ def decompose_task(
     # sanitised, structured diagnostic — we never echo raw model output.
     DECOMPOSE_MAX_RETRIES = 2
     last_diagnostic = "no attempt made"
+
+    # Item B (F001 hardening): optionally request native structured output.
+    # Capability-gated and OFF by default — we only send response_format when
+    # (a) config explicitly enables kanban.structured_output AND (b) the
+    # resolved aux model is PROVEN to support json_schema. Free-first
+    # constraint (2026-07-19): many free models lack json_schema, so an
+    # unproven model must fall back to the lenient+retried path — never force
+    # it (would cause HTTP 400 and regress the decomposer).
+    structured_kwargs: dict = {}
+    if _structured_output_enabled(cfg) and _aux_supports_json_schema(model):
+        structured_kwargs["response_format"] = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "kanban_decomposition",
+                "strict": True,
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "fanout": {"type": "boolean"},
+                        "rationale": {"type": "string"},
+                        "title": {"type": "string"},
+                        "body": {"type": "string"},
+                        "assignee": {"type": ["string", "null"]},
+                        "tasks": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "title": {"type": "string"},
+                                    "body": {"type": "string"},
+                                    "assignee": {"type": ["string", "null"]},
+                                    "parents": {"type": "array", "items": {"type": "integer"}},
+                                },
+                                "required": ["title", "body", "assignee", "parents"],
+                            },
+                        },
+                    },
+                    "required": ["fanout", "rationale"],
+                },
+            },
+        }
+
     messages = [
         {"role": "system", "content": _SYSTEM_PROMPT},
         {"role": "user", "content": user_msg},
@@ -367,6 +493,7 @@ def decompose_task(
                 max_tokens=4000,
                 timeout=timeout or 180,
                 extra_body=get_auxiliary_extra_body() or None,
+                **structured_kwargs,
             )
         except Exception as exc:
             logger.info(
@@ -395,6 +522,12 @@ def decompose_task(
         )
     else:
         # All attempts exhausted without a parseable response.
+        # Item A (F001 hardening): redacted telemetry — never raw output.
+        _emit_redacted_telemetry(
+            profile="kanban_decomposer", model=model,
+            task_class="aux_malformed_json" if "malformed" in last_diagnostic else "aux_empty_response",
+            mismatch=last_diagnostic,
+        )
         return DecomposeOutcome(
             task_id, False, f"decomposer failed after {DECOMPOSE_MAX_RETRIES + 1} attempts: {last_diagnostic}"
         )
