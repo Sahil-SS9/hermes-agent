@@ -335,32 +335,69 @@ def decompose_task(
         default_assignee=default_assignee,
     )
 
-    try:
-        resp = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": _SYSTEM_PROMPT},
-                {"role": "user", "content": user_msg},
-            ],
-            temperature=0.3,
-            max_tokens=4000,
-            timeout=timeout or 180,
-            extra_body=get_auxiliary_extra_body() or None,
-        )
-    except Exception as exc:
+    # Bounded retry: a transient model hiccup (prose, truncated JSON,
+    # fenced-but-broken JSON, empty content) must not permanently strand a
+    # triage task. We re-call the SAME configured aux client (never a
+    # different/unauthorised provider, never a silent downgrade) up to
+    # DECOMPOSE_MAX_RETRIES + 1 attempts. Each failed attempt carries a
+    # sanitised, structured diagnostic — we never echo raw model output.
+    DECOMPOSE_MAX_RETRIES = 2
+    last_diagnostic = "no attempt made"
+    messages = [
+        {"role": "system", "content": _SYSTEM_PROMPT},
+        {"role": "user", "content": user_msg},
+    ]
+    for attempt in range(DECOMPOSE_MAX_RETRIES + 1):
+        if attempt > 0:
+            # Structured recovery nudge — tells the model *why* the prior
+            # response was rejected without leaking prior raw output.
+            messages.append({
+                "role": "assistant",
+                "content": "<response was not valid JSON and could not be parsed>",
+            })
+            messages.append({
+                "role": "user",
+                "content": "Your previous response was not valid JSON. Output ONLY the JSON object, no prose, no code fences.",
+            })
+        try:
+            resp = client.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=0.3,
+                max_tokens=4000,
+                timeout=timeout or 180,
+                extra_body=get_auxiliary_extra_body() or None,
+            )
+        except Exception as exc:
+            logger.info(
+                "decompose: API call failed for %s (attempt %d/%d, %s)",
+                task_id, attempt + 1, DECOMPOSE_MAX_RETRIES + 1, type(exc).__name__,
+            )
+            last_diagnostic = f"LLM error: {type(exc).__name__}"
+            continue
+
+        try:
+            raw = resp.choices[0].message.content or ""
+        except Exception:
+            raw = ""
+
+        parsed = _extract_json_blob(raw)
+        if parsed is not None:
+            break  # success — proceed to fanout/spec handling below
+        # Parsed as None: record a sanitised class of failure, retry.
+        if not raw.strip():
+            last_diagnostic = "LLM returned empty content"
+        else:
+            last_diagnostic = "LLM returned malformed JSON"
         logger.info(
-            "decompose: API call failed for %s (%s)", task_id, exc,
+            "decompose: parse failed for %s (attempt %d/%d, %s)",
+            task_id, attempt + 1, DECOMPOSE_MAX_RETRIES + 1, last_diagnostic,
         )
-        return DecomposeOutcome(task_id, False, f"LLM error: {type(exc).__name__}")
-
-    try:
-        raw = resp.choices[0].message.content or ""
-    except Exception:
-        raw = ""
-
-    parsed = _extract_json_blob(raw)
-    if parsed is None:
-        return DecomposeOutcome(task_id, False, "LLM returned malformed JSON")
+    else:
+        # All attempts exhausted without a parseable response.
+        return DecomposeOutcome(
+            task_id, False, f"decomposer failed after {DECOMPOSE_MAX_RETRIES + 1} attempts: {last_diagnostic}"
+        )
 
     fanout = bool(parsed.get("fanout"))
     audit_author = author or _profile_author()
