@@ -235,6 +235,11 @@ class MediaJob(_PersistableModel):
     source_label: str
     review_status: str = "unreviewed"
     state: Optional[MediaState] = None
+    # Current candidate revision and payload digest persisted on the job.
+    # payload_digest is a hash only — never raw payload.
+    candidate_revision: Optional[int] = None
+    payload_digest: Optional[str] = None
+    # Bound outputs set only by approve().
     bound_digest: Optional[str] = None
     bound_revision: Optional[int] = None
 
@@ -345,31 +350,43 @@ def approve(
     *,
     current_state: MediaState,
     payload_digest: str,
-    expected_digest: str,
-    revision: Optional[int] = None,
 ) -> MediaJob:
     """Approve a job for handoff.
 
+    The approval is bound to the job's persisted ``payload_digest`` and
+    ``candidate_revision`` — never to arbitrary caller-supplied values.
+
     Requires:
       * ``current_state`` is ``review_pending``.
-      * ``payload_digest`` matches ``expected_digest``.
+      * ``job.payload_digest`` is set (not None).
+      * ``job.candidate_revision`` is set (not None).
+      * The supplied ``payload_digest`` matches ``job.payload_digest``.
 
     On success returns a copy of *job* with ``state`` set to
-    ``approved_for_handoff`` and ``bound_digest`` / ``bound_revision`` bound.
+    ``approved_for_handoff``, ``bound_digest`` set to ``job.payload_digest``,
+    and ``bound_revision`` set to ``job.candidate_revision``.
     Raises ``InvalidTransition`` otherwise.
     """
     if current_state != MediaState.REVIEW_PENDING:
         raise InvalidTransition(
             f"Approval requires review_pending, got {current_state.value}"
         )
-    if payload_digest != expected_digest:
+    if job.payload_digest is None:
+        raise InvalidTransition(
+            "Approval rejected: job has no persisted payload_digest"
+        )
+    if job.candidate_revision is None:
+        raise InvalidTransition(
+            "Approval rejected: job has no persisted candidate_revision"
+        )
+    if payload_digest != job.payload_digest:
         raise InvalidTransition(
             "Approval rejected: payload digest mismatch"
         )
     return job.model_copy(update={
         "state": MediaState.APPROVED_FOR_HANDOFF,
-        "bound_digest": payload_digest,
-        "bound_revision": revision,
+        "bound_digest": job.payload_digest,
+        "bound_revision": job.candidate_revision,
     })
 
 

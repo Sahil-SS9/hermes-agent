@@ -354,6 +354,7 @@ def test_approval_binds_payload_digest():
     """Transitioning into approved_for_handoff requires the current payload
     digest to be bound - mismatch raises."""
     from p11 import approve
+    digest = hashlib.sha256(b"payload-v1").hexdigest()
     job = MediaJob(
         id="job-1",
         source_bundle_id="sb-1",
@@ -364,17 +365,21 @@ def test_approval_binds_payload_digest():
         aspect="landscape",
         review_status="unreviewed",
         source_label="manual_queue",
+        candidate_revision=1,
+        payload_digest=digest,
     )
-    digest = hashlib.sha256(b"payload-v1").hexdigest()
-    # happy: digest matches
+    # happy: supplied digest matches job.payload_digest
     approved = approve(job, current_state=MediaState.REVIEW_PENDING,
-                       payload_digest=digest, expected_digest=digest)
+                       payload_digest=digest)
     assert approved.state == MediaState.APPROVED_FOR_HANDOFF
     assert approved.bound_digest == digest
+    assert approved.bound_digest == job.payload_digest
 
 
 def test_approval_rejects_digest_mismatch():
     from p11 import approve
+    stored = hashlib.sha256(b"payload-a").hexdigest()
+    supplied = hashlib.sha256(b"payload-b").hexdigest()
     job = MediaJob(
         id="job-1",
         source_bundle_id="sb-1",
@@ -385,14 +390,17 @@ def test_approval_rejects_digest_mismatch():
         aspect="landscape",
         review_status="unreviewed",
         source_label="manual_queue",
+        candidate_revision=1,
+        payload_digest=stored,
     )
     with pytest.raises(InvalidTransition):
         approve(job, current_state=MediaState.REVIEW_PENDING,
-                payload_digest="digest-a", expected_digest="digest-b")
+                payload_digest=supplied)
 
 
 def test_approval_rejects_if_not_in_review_pending():
     from p11 import approve
+    digest = hashlib.sha256(b"x").hexdigest()
     job = MediaJob(
         id="job-1",
         source_bundle_id="sb-1",
@@ -403,16 +411,18 @@ def test_approval_rejects_if_not_in_review_pending():
         aspect="landscape",
         review_status="unreviewed",
         source_label="manual_queue",
+        candidate_revision=1,
+        payload_digest=digest,
     )
-    digest = hashlib.sha256(b"x").hexdigest()
     with pytest.raises(InvalidTransition):
         approve(job, current_state=MediaState.MEDIA_STAGED,
-                payload_digest=digest, expected_digest=digest)
+                payload_digest=digest)
 
 
 def test_approval_binds_revision():
-    """Approval also binds the candidate revision number."""
+    """Approval also binds the candidate revision number from the job."""
     from p11 import approve
+    digest = hashlib.sha256(b"payload-v1").hexdigest()
     job = MediaJob(
         id="job-1",
         source_bundle_id="sb-1",
@@ -423,12 +433,13 @@ def test_approval_binds_revision():
         aspect="landscape",
         review_status="unreviewed",
         source_label="manual_queue",
+        candidate_revision=3,
+        payload_digest=digest,
     )
-    digest = hashlib.sha256(b"payload-v1").hexdigest()
     approved = approve(job, current_state=MediaState.REVIEW_PENDING,
-                       payload_digest=digest, expected_digest=digest,
-                       revision=3)
+                       payload_digest=digest)
     assert approved.bound_revision == 3
+    assert approved.bound_revision == job.candidate_revision
 
 
 # ---------------------------------------------------------------------------
@@ -533,3 +544,155 @@ def test_media_job_rejects_non_unreviewed_initial():
             source_label="manual_queue",
             review_status="approved",
         )
+
+
+# ---------------------------------------------------------------------------
+# P11-S1 approval binding repair: job must persist candidate_revision and
+# payload_digest; approve() must derive bindings from the job, not from
+# arbitrary caller-supplied revision/expected-digest pairs.
+# ---------------------------------------------------------------------------
+
+def test_media_job_persists_candidate_revision_and_payload_digest():
+    """MediaJob must carry candidate_revision (int) and payload_digest (str).
+
+    The payload_digest is a hash only — never the raw payload.
+    """
+    digest = hashlib.sha256(b"payload-v1").hexdigest()
+    job = MediaJob(
+        id="job-1",
+        source_bundle_id="sb-1",
+        claim_set_id="cs-1",
+        brand="coachos",
+        brief_id="b-1",
+        style_preset="editorial",
+        aspect="landscape",
+        source_label="manual_queue",
+        candidate_revision=2,
+        payload_digest=digest,
+    )
+    assert job.candidate_revision == 2
+    assert job.payload_digest == digest
+
+
+def test_media_job_candidate_revision_defaults_none():
+    """When not set, candidate_revision is None (approval will reject)."""
+    job = MediaJob(
+        id="job-1",
+        source_bundle_id="sb-1",
+        claim_set_id="cs-1",
+        brand="coachos",
+        brief_id="b-1",
+        style_preset="editorial",
+        aspect="landscape",
+        source_label="manual_queue",
+    )
+    assert job.candidate_revision is None
+    assert job.payload_digest is None
+
+
+def test_approval_derives_bound_digest_from_job_not_caller():
+    """approve() must bind job.payload_digest, not an arbitrary expected_digest."""
+    from p11 import approve
+    digest = hashlib.sha256(b"payload-v1").hexdigest()
+    job = MediaJob(
+        id="job-1",
+        source_bundle_id="sb-1",
+        claim_set_id="cs-1",
+        brand="coachos",
+        brief_id="b-1",
+        style_preset="editorial",
+        aspect="landscape",
+        source_label="manual_queue",
+        candidate_revision=1,
+        payload_digest=digest,
+    )
+    approved = approve(job, current_state=MediaState.REVIEW_PENDING,
+                       payload_digest=digest)
+    assert approved.bound_digest == digest
+    assert approved.bound_digest == job.payload_digest
+
+
+def test_approval_derives_bound_revision_from_job_not_caller():
+    """approve() must bind job.candidate_revision, not a caller-supplied revision."""
+    from p11 import approve
+    digest = hashlib.sha256(b"payload-v1").hexdigest()
+    job = MediaJob(
+        id="job-1",
+        source_bundle_id="sb-1",
+        claim_set_id="cs-1",
+        brand="coachos",
+        brief_id="b-1",
+        style_preset="editorial",
+        aspect="landscape",
+        source_label="manual_queue",
+        candidate_revision=5,
+        payload_digest=digest,
+    )
+    approved = approve(job, current_state=MediaState.REVIEW_PENDING,
+                       payload_digest=digest)
+    assert approved.bound_revision == 5
+    assert approved.bound_revision == job.candidate_revision
+
+
+def test_approval_rejects_when_job_payload_digest_missing():
+    """If job.payload_digest is None, approval must be rejected."""
+    from p11 import approve, InvalidTransition as _IT
+    digest = hashlib.sha256(b"payload-v1").hexdigest()
+    job = MediaJob(
+        id="job-1",
+        source_bundle_id="sb-1",
+        claim_set_id="cs-1",
+        brand="coachos",
+        brief_id="b-1",
+        style_preset="editorial",
+        aspect="landscape",
+        source_label="manual_queue",
+        candidate_revision=1,
+        # payload_digest deliberately omitted -> None
+    )
+    with pytest.raises(_IT):
+        approve(job, current_state=MediaState.REVIEW_PENDING,
+                payload_digest=digest)
+
+
+def test_approval_rejects_when_job_candidate_revision_missing():
+    """If job.candidate_revision is None, approval must be rejected."""
+    from p11 import approve, InvalidTransition as _IT
+    digest = hashlib.sha256(b"payload-v1").hexdigest()
+    job = MediaJob(
+        id="job-1",
+        source_bundle_id="sb-1",
+        claim_set_id="cs-1",
+        brand="coachos",
+        brief_id="b-1",
+        style_preset="editorial",
+        aspect="landscape",
+        source_label="manual_queue",
+        # candidate_revision deliberately omitted -> None
+        payload_digest=digest,
+    )
+    with pytest.raises(_IT):
+        approve(job, current_state=MediaState.REVIEW_PENDING,
+                payload_digest=digest)
+
+
+def test_approval_rejects_supplied_digest_mismatch_job():
+    """If supplied payload_digest != job.payload_digest, approval must reject."""
+    from p11 import approve, InvalidTransition as _IT
+    stored = hashlib.sha256(b"payload-v1").hexdigest()
+    supplied = hashlib.sha256(b"payload-v2").hexdigest()
+    job = MediaJob(
+        id="job-1",
+        source_bundle_id="sb-1",
+        claim_set_id="cs-1",
+        brand="coachos",
+        brief_id="b-1",
+        style_preset="editorial",
+        aspect="landscape",
+        source_label="manual_queue",
+        candidate_revision=1,
+        payload_digest=stored,
+    )
+    with pytest.raises(_IT):
+        approve(job, current_state=MediaState.REVIEW_PENDING,
+                payload_digest=supplied)
