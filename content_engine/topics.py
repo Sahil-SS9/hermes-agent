@@ -15,7 +15,7 @@ import random
 import re
 import sys
 import uuid
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import List, Dict, Any
 
 # Strip git/commit artefacts so a raw commit subject never becomes a post topic
@@ -312,7 +312,9 @@ def _signal_to_topic(signal: dict, platform: str) -> Dict[str, Any]:
     if signal_ts:
         try:
             ts = datetime.fromisoformat(signal_ts.replace("Z", "+00:00"))
-            age = (datetime.utcnow() - ts.replace(tzinfo=None)).days
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=UTC)
+            age = (datetime.now(UTC) - ts).days
             if age > SIGNAL_MAX_AGE_DAYS:
                 return {}  # Empty = will be filtered out
         except ValueError:
@@ -425,6 +427,8 @@ def get_topics(brand: str, count: int = 6, skip_used: bool = True) -> List[Dict]
     if brand in ("sahil_twitter", "sahil_linkedin") and (_load_activity() or shot_topics):
         platform = "twitter" if brand == "sahil_twitter" else "linkedin"
         try:
+            if _ACTIVITY_COLLECTOR is None:
+                raise RuntimeError("activity collector unavailable")
             result = _ACTIVITY_COLLECTOR()
             signals = result["signals"]
             state = result["state"]
@@ -521,7 +525,7 @@ def get_topics(brand: str, count: int = 6, skip_used: bool = True) -> List[Dict]
                 topics.append(topic)
                 used_ids.append(signal["signal_id"])
 
-        if used_ids and state.get("used_signals") is not None:
+        if used_ids and state.get("used_signals") is not None and _ACTIVITY_MARKER is not None:
             try:
                 _ACTIVITY_MARKER(state, used_ids)
             except Exception as e:
@@ -556,7 +560,7 @@ def get_topics(brand: str, count: int = 6, skip_used: bool = True) -> List[Dict]
                 # Only include future fixtures (temporal gate)
                 try:
                     match_date = datetime.strptime(f["date"], "%Y-%m-%d").date()
-                    if match_date < datetime.utcnow().date():
+                    if match_date < datetime.now(UTC).date():
                         continue  # Skip past fixtures
                 except ValueError:
                     pass

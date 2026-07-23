@@ -15,7 +15,7 @@ enqueue — use postiz_bridge.queue_post instead.
 
 import os
 import uuid
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import psycopg2
@@ -68,10 +68,10 @@ class PostizPublisher:
         integration_id: str,
         publish_at: datetime,
         title: str = "",
-        image_path: str = None,
-        video_path: str = None,
+        image_path: str | None = None,
+        video_path: str | None = None,
         state: str = "QUEUE",
-        group: str = None,
+        group: str | None = None,
     ) -> str:
         """
         Insert a post directly into Postiz database.
@@ -91,7 +91,7 @@ class PostizPublisher:
             Post ID
         """
         post_id = str(uuid.uuid4())
-        now = datetime.utcnow()
+        now = datetime.now(UTC)
         
         # Handle image/video paths
         image_url = None
@@ -152,7 +152,7 @@ class PostizPublisher:
             List of inserted post IDs
         """
         post_ids = []
-        now = datetime.utcnow()
+        now = datetime.now(UTC)
         
         with self._connect() as conn:
             with conn.cursor() as cur:

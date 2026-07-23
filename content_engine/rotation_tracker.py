@@ -14,7 +14,7 @@ Usage:
 
 from __future__ import annotations
 import sqlite3
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -85,7 +85,7 @@ class RotationTracker:
             "model_used": kwargs.get("model_used", ""),
             "generation_cost": kwargs.get("generation_cost", 0.0),
             "ocr_passed": kwargs.get("ocr_passed", 1),
-            "published_at": datetime.utcnow().isoformat(),
+            "published_at": datetime.now(UTC).isoformat(),
         }
         conn = sqlite3.connect(str(self.db_path))
         conn.execute(
@@ -202,7 +202,7 @@ class RotationTracker:
     def prune(self, retention_days: int = 90) -> int:
         """Delete records older than retention_days. Returns count deleted."""
         conn = sqlite3.connect(str(self.db_path))
-        cutoff = (datetime.utcnow().isoformat(),)
+        cutoff = (datetime.now(UTC) - timedelta(days=retention_days)).isoformat()
         cur = conn.execute(
             "DELETE FROM image_publications WHERE published_at < ?",
             (cutoff,),

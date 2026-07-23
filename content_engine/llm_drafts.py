@@ -15,7 +15,7 @@ import json
 import random
 import os
 import re
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import List, Dict, Optional
 
 
@@ -494,7 +494,7 @@ def _is_future_fixture(topic: dict) -> bool:
         return True
     try:
         match_date = datetime.strptime(date_str, "%Y-%m-%d").date()
-        return match_date >= datetime.utcnow().date()
+        return match_date >= datetime.now(UTC).date()
     except ValueError:
         return True
 

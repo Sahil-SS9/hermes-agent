@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from datetime import datetime, date
+from datetime import UTC, datetime, date
 from pathlib import Path
 from typing import Optional
 
@@ -40,7 +40,7 @@ def _read_tracker() -> list[dict]:
 
 def _write_tracker(entries: list[dict]) -> None:
     TRACKER_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with open(TRACKER_PATH, "w") as f:
+    with open(TRACKER_PATH, "w", encoding="utf-8") as f:
         for e in entries:
             f.write(json.dumps(e) + "\n")
 
@@ -130,7 +130,7 @@ def _generate_preview(slug: str, mdx_path: str = "") -> str:
             section_images = [m[1] for m in re.findall(r'!\[([^\]]*)\]\(([^)]+)\)', body)[:6]]
             html = build_preview_html(
                 slug=slug,
-                title=fm.get("title", slug),
+                title=fm.get("title") or slug,
                 description=fm.get("description", ""),
                 stream="builder" if fm.get("tier") == "builder" else fm.get("tier", "ai"),
                 tier=fm.get("tier", "ai"),
@@ -190,7 +190,7 @@ def request(slug: str, title: str, stream: str, tier: str = "",
             "mdx_path": mdx_path,
             "preview_path": preview_path,
             "status": "pending",
-            "created_at": datetime.utcnow().isoformat(),
+            "created_at": datetime.now(UTC).isoformat(),
             "approved_at": None,
             "discord_message_id": None,
             "notes": "",
@@ -212,7 +212,7 @@ def approve(slug: str) -> bool:
     for e in entries:
         if e.get("slug") == slug and e.get("status") == "pending":
             e["status"] = "approved"
-            e["approved_at"] = datetime.utcnow().isoformat()
+            e["approved_at"] = datetime.now(UTC).isoformat()
             _write_tracker(entries)
             logger.info("Approved: %s", slug)
             return True
@@ -386,7 +386,7 @@ def handle_discord_command(text: str) -> dict:
             section_images = [m[1] for m in re.findall(r'!\[([^\]]*)\]\(([^)]+)\)', body)[:6]]
             html = build_preview_html(
                 slug=slug,
-                title=fm.get("title", slug),
+                title=fm.get("title") or slug,
                 description=fm.get("description", ""),
                 stream="builder" if fm.get("tier") == "builder" else fm.get("tier", "ai"),
                 tier=fm.get("tier", "ai"),

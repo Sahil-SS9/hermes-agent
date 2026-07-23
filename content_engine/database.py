@@ -4,7 +4,7 @@ Adds topic_usage_log for recency tracking.
 """
 import json
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import List, Optional
 
@@ -124,7 +124,7 @@ def insert_draft(
             ai_image_path, ai_video_path, slop_score, slop_issues,
             json.dumps(source_provenance or {}, ensure_ascii=False),
             editorial_rationale or "",
-            datetime.utcnow().isoformat(),
+            datetime.now(UTC).isoformat(),
         ),
     )
     conn.commit()
@@ -145,7 +145,7 @@ def log_topic_usage(topic_id: str, brand: str, topic_text: str, platform: str = 
             INSERT OR REPLACE INTO topic_usage_log (topic_id, brand, topic_text, used_at, platform, quality_score)
             VALUES (?, ?, ?, ?, ?, ?)
             """,
-            (topic_id, brand, topic_text, datetime.utcnow().isoformat(), platform, quality_score),
+            (topic_id, brand, topic_text, datetime.now(UTC).isoformat(), platform, quality_score),
         )
     else:
         conn.execute(
@@ -153,7 +153,7 @@ def log_topic_usage(topic_id: str, brand: str, topic_text: str, platform: str = 
             INSERT OR REPLACE INTO topic_usage_log (topic_id, brand, topic_text, used_at, platform)
             VALUES (?, ?, ?, ?, ?)
             """,
-            (topic_id, brand, topic_text, datetime.utcnow().isoformat(), platform),
+            (topic_id, brand, topic_text, datetime.now(UTC).isoformat(), platform),
         )
     conn.commit()
     conn.close()
@@ -161,7 +161,7 @@ def log_topic_usage(topic_id: str, brand: str, topic_text: str, platform: str = 
 def get_recently_used_topics(brand: str, days: int = 30) -> List[str]:
     """Return topic_ids used within the last N days."""
     conn = sqlite3.connect(str(DB_PATH))
-    cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
+    cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat()
     rows = conn.execute(
         "SELECT topic_id FROM topic_usage_log WHERE brand = ? AND used_at > ?",
         (brand, cutoff),
@@ -184,7 +184,7 @@ def get_quality_scores(brand: str) -> list[dict]:
 def is_topic_recently_used(topic_id: str, days: int = 30) -> bool:
     """Check if a specific topic_id was used within the last N days."""
     conn = sqlite3.connect(str(DB_PATH))
-    cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
+    cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat()
     row = conn.execute(
         "SELECT 1 FROM topic_usage_log WHERE topic_id = ? AND used_at > ?",
         (topic_id, cutoff),
@@ -195,7 +195,7 @@ def is_topic_recently_used(topic_id: str, days: int = 30) -> bool:
 def prune_topic_usage_log(retention_days: int = 90) -> int:
     """Delete old topic usage records. Returns count deleted."""
     conn = sqlite3.connect(str(DB_PATH))
-    cutoff = (datetime.utcnow() - timedelta(days=retention_days)).isoformat()
+    cutoff = (datetime.now(UTC) - timedelta(days=retention_days)).isoformat()
     cur = conn.execute("DELETE FROM topic_usage_log WHERE used_at < ?", (cutoff,))
     deleted = cur.rowcount
     conn.commit()
@@ -240,7 +240,7 @@ def approve_draft(draft_id: str) -> None:
     conn = sqlite3.connect(str(DB_PATH))
     conn.execute(
         "UPDATE drafts SET status = 'approved', approved_at = ? WHERE id = ?",
-        (datetime.utcnow().isoformat(), draft_id),
+        (datetime.now(UTC).isoformat(), draft_id),
     )
     conn.commit()
     conn.close()
@@ -249,7 +249,7 @@ def reject_draft(draft_id: str) -> None:
     conn = sqlite3.connect(str(DB_PATH))
     conn.execute(
         "UPDATE drafts SET status = 'rejected', rejected_at = ? WHERE id = ?",
-        (datetime.utcnow().isoformat(), draft_id),
+        (datetime.now(UTC).isoformat(), draft_id),
     )
     conn.commit()
     conn.close()
@@ -258,7 +258,7 @@ def mark_published(draft_id: str, postiz_id: Optional[str] = None) -> None:
     conn = sqlite3.connect(str(DB_PATH))
     conn.execute(
         "UPDATE drafts SET status = 'published', published_at = ?, postiz_id = ?, enqueue_state = 'enqueued' WHERE id = ?",
-        (datetime.utcnow().isoformat(), postiz_id, draft_id),
+        (datetime.now(UTC).isoformat(), postiz_id, draft_id),
     )
     conn.commit()
     conn.close()
@@ -306,7 +306,7 @@ def mark_enriched(draft_id: str) -> None:
     conn = sqlite3.connect(str(DB_PATH))
     conn.execute(
         "UPDATE drafts SET ai_enriched_at = ? WHERE id = ?",
-        (datetime.utcnow().isoformat(), draft_id),
+        (datetime.now(UTC).isoformat(), draft_id),
     )
     conn.commit()
     conn.close()

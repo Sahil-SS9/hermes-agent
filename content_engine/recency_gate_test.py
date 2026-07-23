@@ -5,7 +5,7 @@ Run: python3 recency_gate_test.py
 import sys
 import os
 import uuid
-from datetime import datetime, timedelta, date
+from datetime import UTC, datetime, timedelta, date
 
 # Ensure repo on path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -77,11 +77,11 @@ def test_temporal_gates():
     print("\n--- Temporal Relevance Gates ---")
 
     # Future fixture passes
-    future_topic = {"fixture": {"date": (datetime.utcnow() + timedelta(days=3)).strftime("%Y-%m-%d")}}
+    future_topic = {"fixture": {"date": (datetime.now(UTC) + timedelta(days=3)).strftime("%Y-%m-%d")}}
     assert_true(_is_future_fixture(future_topic), "future fixture passes gate")
 
     # Today fixture passes
-    today_topic = {"fixture": {"date": datetime.utcnow().strftime("%Y-%m-%d")}}
+    today_topic = {"fixture": {"date": datetime.now(UTC).strftime("%Y-%m-%d")}}
     assert_true(_is_future_fixture(today_topic), "today fixture passes gate")
 
     # Past fixture fails
@@ -142,7 +142,7 @@ def test_generate_drafts_integration():
             "id": "fx_001",
             "pillar": "live_predictions",
             "topic": "Arsenal vs City",
-            "fixture": {"home": "Arsenal", "away": "City", "date": (datetime.utcnow() + timedelta(days=1)).strftime("%Y-%m-%d"), "time": "15:00"},
+            "fixture": {"home": "Arsenal", "away": "City", "date": (datetime.now(UTC) + timedelta(days=1)).strftime("%Y-%m-%d"), "time": "15:00"},
         },
         {
             "id": "gm_001",

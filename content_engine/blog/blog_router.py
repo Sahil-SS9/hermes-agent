@@ -1,7 +1,7 @@
 from __future__ import annotations
 from pathlib import Path
 from typing import Optional
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 import json
 import uuid
 
@@ -33,7 +33,7 @@ def _recent_used(stream: str) -> list[str]:
 
 
 def _reservation_cutoff() -> datetime:
-    return datetime.utcnow() - timedelta(minutes=RESERVATION_TTL_MINUTES)
+    return datetime.now(UTC) - timedelta(minutes=RESERVATION_TTL_MINUTES)
 
 
 def _read_reservations() -> list[dict]:
@@ -47,6 +47,8 @@ def _read_reservations() -> list[dict]:
         try:
             item = json.loads(line)
             created = datetime.fromisoformat(item.get("created_at", ""))
+            if created.tzinfo is None:
+                created = created.replace(tzinfo=UTC)
         except Exception:
             continue
         if created >= cutoff:
@@ -77,7 +79,7 @@ def reserve(stream: str, topic_id: str, title: str = "") -> str:
         "stream": stream,
         "topic_id": topic_id,
         "title": title or "",
-        "created_at": datetime.utcnow().isoformat(),
+        "created_at": datetime.now(UTC).isoformat(),
     }
     existing = _read_reservations()
     existing.append(entry)
