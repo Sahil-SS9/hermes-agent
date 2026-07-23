@@ -24,7 +24,7 @@ def _staged_reference() -> StagedReference:
     )
 
 
-def test_codex_plan_is_default_and_keeps_untrusted_prompt_out_of_argv(tmp_path: Path) -> None:
+def test_codex_plan_is_native_and_keeps_untrusted_prompt_out_of_executable_arguments(tmp_path: Path) -> None:
     root = tmp_path / "staging"
     job_dir = root / "job-001"
     job_dir.mkdir(parents=True)
@@ -47,10 +47,9 @@ def test_codex_plan_is_default_and_keeps_untrusted_prompt_out_of_argv(tmp_path: 
 
     assert plan.backend == "codex"
     assert plan.execution_enabled is False
-    assert plan.argv[:2] == ("codex", "exec")
-    assert "--disable" not in plan.argv
-    assert "use_linux_sandbox_bwrap" not in plan.argv
-    assert all("touch /tmp/never-run" not in argument for argument in plan.argv)
+    assert not hasattr(plan, "argv")
+    assert "native openai-codex" in plan.instruction_path.read_text().lower()
+    assert "codex exec" not in plan.instruction_path.read_text().lower()
     assert plan.instruction_path.is_file()
     assert "touch /tmp/never-run" in plan.manifest_path.read_text()
     assert plan.manifest_path.is_file()
@@ -73,21 +72,8 @@ def test_local_plan_is_available_only_when_explicit_and_is_not_execution_enabled
 
     assert plan.backend == "local"
     assert plan.execution_enabled is False
-    assert plan.argv == ()
+    assert not hasattr(plan, "argv")
     assert "manual quality" in plan.reason.lower()
-
-
-def test_router_does_not_fallback_when_codex_runtime_is_unavailable(tmp_path: Path) -> None:
-    root = tmp_path / "staging"
-    job_dir = root / "job-missing"
-    job_dir.mkdir(parents=True)
-    request = prepare_image_request(prompt="A system map.", style="Data Atlas")
-    router = ImageBackendRouter(executable_locator=lambda name: None)
-
-    with pytest.raises(BackendPlanError, match="Codex runtime is unavailable"):
-        router.assert_runtime_ready(request)
-
-    assert router.assert_runtime_ready(request, raise_on_missing=False) is False
 
 
 def test_router_rejects_job_directory_outside_the_trusted_staging_root(tmp_path: Path) -> None:

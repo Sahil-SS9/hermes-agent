@@ -20,7 +20,7 @@ from database import list_approved_pending_enrichment, truncate_drafts, purge_st
 from database import update_draft_ai_image_path, update_draft_ai_video_path
 from llm_drafts import generate_drafts
 from discord_digest import deliver_discord_digest
-from image_job_service import stage_and_plan_image_job
+from image_job_service import execute_staged_image_job, stage_and_plan_image_job
 
 
 def run_stage_1(
@@ -328,6 +328,18 @@ def main() -> int:
     )
     pi.add_argument("--job-id", default=None, help="Required with --stage-root; safe identifier for one staged job")
 
+    # generate-image: the terminal counterpart of the future `/generate-image`
+    # surface. It runs only native Codex, claims its returned output privately,
+    # and leaves database, publishing and delivery untouched.
+    generated = sub.add_parser("generate-image", help="Generate one private native-Codex image job")
+    generated.add_argument("--prompt", required=True)
+    generated.add_argument("--style", required=True)
+    generated.add_argument("--backend", default="codex", choices=("codex", "local"))
+    generated.add_argument("--reference", action="append", default=[], help="User-supplied URL; repeat for multiple sources")
+    generated.add_argument("--stage-root", type=Path, required=True, help="Private root for one staged image job")
+    generated.add_argument("--job-id", required=True, help="Safe identifier for one private image job")
+    generated.add_argument("--aspect-ratio", default="landscape", choices=("landscape", "square", "portrait"))
+
     # deliver-discord: grouped-by-brand review to Discord
     dd = sub.add_parser("deliver-discord", help="Deliver recent drafts to Discord, grouped by brand")
     dd.add_argument("--since-minutes", type=int, default=75)
@@ -433,6 +445,50 @@ def main() -> int:
             print(f"Invalid image request: {exc}")
             return 2
         print(json.dumps(payload, sort_keys=True))
+        return 0
+
+    if args.cmd == "generate-image":
+        from image_backends import BackendPlanError
+        from image_job_service import ImageExecutionError
+        from image_jobs import ImageRequestError, prepare_image_request
+        from image_reference_staging import ReferenceStagingError
+
+        try:
+            prepared = prepare_image_request(
+                prompt=args.prompt,
+                style=args.style,
+                backend=args.backend,
+                references=args.reference,
+            )
+            if prepared.backend != "codex":
+                raise ImageExecutionError("Local execution is disabled pending manual quality acceptance")
+            staged_job = stage_and_plan_image_job(
+                prepared,
+                staging_root=args.stage_root,
+                job_id=args.job_id,
+            )
+            completed = execute_staged_image_job(
+                prepared,
+                staged_job,
+                staging_root=args.stage_root,
+                job_id=args.job_id,
+                aspect_ratio=args.aspect_ratio,
+            )
+        except (BackendPlanError, ImageExecutionError, ImageRequestError, OSError, ReferenceStagingError, ValueError) as exc:
+            print(f"Image generation failed: {exc}")
+            return 2
+        print(
+            json.dumps(
+                {
+                    "backend": {"provider": completed.provider, "model": completed.model},
+                    "completion_path": str(completed.completion_path),
+                    "job_id": args.job_id,
+                    "output_path": str(completed.output_path),
+                    "sha256": completed.sha256,
+                },
+                sort_keys=True,
+            )
+        )
         return 0
 
     init_db()

@@ -1,23 +1,18 @@
-"""Provider-plan seam for the converged image-generation workflow.
+"""Private plan seam for the converged image-generation workflow.
 
-This module creates private, auditable *plans*. It deliberately contains no
-subprocess, HTTP, ComfyUI or publishing call. A later explicitly approved lane
-may execute one of these plans after service-account and output-correlation
-proof exists.
+This module creates auditable plans only. It contains no subprocess, HTTP,
+provider, ComfyUI or publishing call. The separate native executor consumes a
+Codex plan and records the returned output's private completion provenance.
 """
 from __future__ import annotations
 
 import json
-import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Iterable
 
 from image_jobs import PreparedImageRequest
 from image_reference_staging import StagedReference
-
-ExecutableLocator = Callable[[str], str | None]
-
 
 class BackendPlanError(RuntimeError):
     """The selected backend cannot safely be planned or made ready."""
@@ -26,7 +21,6 @@ class BackendPlanError(RuntimeError):
 @dataclass(frozen=True)
 class ImageBackendPlan:
     backend: str
-    argv: tuple[str, ...]
     job_dir: Path
     instruction_path: Path
     manifest_path: Path
@@ -36,9 +30,6 @@ class ImageBackendPlan:
 
 class ImageBackendRouter:
     """Create one selected backend plan; never choose a fallback backend."""
-
-    def __init__(self, *, executable_locator: ExecutableLocator = shutil.which) -> None:
-        self._executable_locator = executable_locator
 
     @staticmethod
     def _trusted_job_directory(job_dir: Path, staging_root: Path) -> tuple[Path, Path]:
@@ -70,20 +61,6 @@ class ImageBackendRouter:
         with path.open("x", encoding="utf-8") as handle:
             handle.write(text)
         path.chmod(0o600)
-
-    def assert_runtime_ready(self, request: PreparedImageRequest, *, raise_on_missing: bool = True) -> bool:
-        """Check only runtime availability; never execute a backend."""
-        if request.backend == "local":
-            if raise_on_missing:
-                raise BackendPlanError("Local execution is disabled pending manual quality acceptance")
-            return False
-        if request.backend != "codex":
-            raise BackendPlanError(f"unsupported backend: {request.backend}")
-        if self._executable_locator("codex"):
-            return True
-        if raise_on_missing:
-            raise BackendPlanError("Codex runtime is unavailable for the service account")
-        return False
 
     def plan(
         self,
@@ -129,27 +106,22 @@ class ImageBackendRouter:
 
         if request.backend == "codex":
             instruction = (
-                "# Codex image job\n\n"
-                "Read `image-job.json` in this directory. Generate exactly one original preview image "
-                "from its prompt, named style and staged references. Do not publish, deliver, queue, "
-                "commit, push, edit source material or invoke another image backend.\n\n"
-                "If an image is generated, write `codex-completion.json` in this directory with the exact "
-                "absolute source image path and its SHA-256. If you cannot generate it, state the failure in "
-                "that same file. Do not select a fallback provider.\n"
+                "# Native openai-codex image job\n\n"
+                "This job is staged for the explicit Hermes native `openai-codex` provider. "
+                "A trusted executor must use the request manifest, pass only staged visual references, "
+                "claim the returned provider output into this private job directory, and write "
+                "`image-completion.json` with request and output SHA-256 values.\n\n"
+                "Do not invoke Codex CLI, choose another provider, publish, deliver, queue, commit, push, "
+                "edit source material or invoke a local image backend.\n"
             )
             self._write_private_text(instruction_path, instruction)
             return ImageBackendPlan(
                 backend="codex",
-                argv=(
-                    "codex",
-                    "exec",
-                    f"Read and follow only {instruction_path}",
-                ),
                 job_dir=job,
                 instruction_path=instruction_path,
                 manifest_path=manifest_path,
                 execution_enabled=False,
-                reason="Codex execution requires separate runtime/auth and output-correlation approval",
+                reason="native openai-codex execution is explicit and separate from planning",
             )
 
         if request.backend == "local":
@@ -161,7 +133,6 @@ class ImageBackendRouter:
             )
             return ImageBackendPlan(
                 backend="local",
-                argv=(),
                 job_dir=job,
                 instruction_path=instruction_path,
                 manifest_path=manifest_path,
