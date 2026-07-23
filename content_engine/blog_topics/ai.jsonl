@@ -68,3 +68,4 @@
 {"topic_id": "research-2607.04542", "title_hint": "Proving What Repeats — Compiling Agent Behavior into Verified Binaries", "tags": ["research-paper", "paper-synthesis", "agent-compilation", "verification", "rl-training", "research-agents"], "priority": 5, "curated": true, "source": "paper-synthesis", "source_url": "https://arxiv.org/abs/2607.04542"}
 {"topic_id": "research-2607.08497", "title_hint": "Design Agents That Remember — Episodic Visual Memory for Content Pipelines", "tags": ["research-paper", "paper-synthesis", "design-agents", "visual-memory", "multimodal", "content-pipeline", "ceecee"], "priority": 6, "curated": true, "source": "paper-synthesis", "source_url": "https://arxiv.org/abs/2607.08497"}
 {"topic_id": "manual-0700", "title_hint": "New Concept", "tags": [], "priority": 10}
+{"topic_id": "manual-3274", "title_hint": "New Concept", "tags": [], "priority": 10}
