@@ -5,7 +5,7 @@ so a misspelled image (e.g. 'DABUG'/'MISPATCH') never ships."""
 from __future__ import annotations
 import re, sys
 from difflib import SequenceMatcher
-from typing import Iterable
+from typing import Iterable, Optional
 
 
 def _norm(s: str) -> str:
@@ -29,7 +29,7 @@ def _present(needle: str, haystack: str, threshold: float = 0.82) -> bool:
     return False
 
 
-def ocr_text(image_path: str) -> str:
+def ocr_text(image_path: str) -> Optional[str]:
     try:
         import pytesseract
         from PIL import Image
@@ -38,24 +38,25 @@ def ocr_text(image_path: str) -> str:
         print("[text_integrity] WARN: pytesseract not installed, OCR skipped", file=sys.stderr)
     except Exception as exc:
         print(f"[text_integrity] WARN: OCR failed: {exc}", file=sys.stderr)
-    return ""
+    return None
 
 
 def verify_text(image_path: str, expected: Iterable[str],
                 threshold: float = 0.82):
-    """Return (ok, missing). ok=True when every expected string is present
-    (fuzzy) in the OCR output.
+    """Return (ok, missing) from locally recognised text.
 
-    If OCR itself fails (dependency missing, binary absent, corrupt image)
-    the gate passes with a warning so the image pipeline can proceed rather
-    than entering an infinite regen loop.
+    A required-text check fails closed when OCR is unavailable or cannot read
+    the image. Publishing a label we cannot verify is less safe than a retry.
     """
+    expected_values = list(expected)
     haystack = ocr_text(image_path)
-    if not haystack and expected:
-        print(f"[text_integrity] WARN: OCR produced no text for {image_path}, "
-              "passing gate (degraded)", file=sys.stderr)
-        return True, []
-    missing = [e for e in expected if not _present(e, haystack, threshold)]
+    if haystack is None:
+        print(
+            f"[text_integrity] WARN: OCR unavailable for {image_path}, failing text gate",
+            file=sys.stderr,
+        )
+        return False, expected_values
+    missing = [item for item in expected_values if not _present(item, haystack, threshold)]
     return (len(missing) == 0, missing)
 
 
@@ -70,6 +71,12 @@ def has_significant_text(image_path: str, min_words: int = 2,
     might add by accident but tight enough to catch real labels.
     """
     haystack = ocr_text(image_path)
+    if haystack is None:
+        print(
+            f"[text_integrity] WARN: OCR unavailable for {image_path}, rejecting textless gate",
+            file=sys.stderr,
+        )
+        return True
     if not haystack:
         return False
     words = haystack.split()
