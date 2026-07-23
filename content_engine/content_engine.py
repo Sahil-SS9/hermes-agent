@@ -302,12 +302,22 @@ def main() -> int:
     rls = sub.add_parser("review-list", help="List recent drafts (id, brand, platform, content_type, body)")
     rls.add_argument("--since-minutes", type=int, default=75)
 
-    # gen-image: cheapest-first image for one draft, persisted to ai_image_path
-    gi = sub.add_parser("gen-image", help="Generate + persist an image for a draft (FAL flux_klein → pollinations)")
+    # gen-image: legacy draft-image generation. Replaced only after the shared
+    # Codex backend has proven every active caller.
+    gi = sub.add_parser("gen-image", help="Generate + persist an image for a draft (legacy route)")
     gi.add_argument("draft_id")
     gi.add_argument("--prompt", default=None, help="Art-directed prompt; falls back to an on-brand prompt from body_text")
     gi.add_argument("--model", default=None, help="Override the primary model (else the degrading chain)")
     gi.add_argument("--force", action="store_true", help="Regenerate even if ai_image_path is already set")
+
+    # prepare-image: provider-free input validation for the future unified
+    # /generate-image command. This must never initialise the content DB or call
+    # a generation backend.
+    pi = sub.add_parser("prepare-image", help="Validate an ad-hoc image request without generating media")
+    pi.add_argument("--prompt", required=True)
+    pi.add_argument("--style", required=True)
+    pi.add_argument("--backend", default="codex", choices=("codex", "local"))
+    pi.add_argument("--reference", action="append", default=[], help="User-supplied URL; repeat for multiple sources")
 
     # deliver-discord: grouped-by-brand review to Discord
     dd = sub.add_parser("deliver-discord", help="Deliver recent drafts to Discord, grouped by brand")
@@ -374,7 +384,28 @@ def main() -> int:
     rt.add_argument("--json", action="store_true", help="Output as JSON")
 
     args = parser.parse_args()
-    
+
+    if args.cmd == "prepare-image":
+        from image_jobs import ImageRequestError, prepare_image_request
+
+        try:
+            prepared = prepare_image_request(
+                prompt=args.prompt,
+                style=args.style,
+                backend=args.backend,
+                references=args.reference,
+            )
+        except ImageRequestError as exc:
+            print(f"Invalid image request: {exc}")
+            return 2
+        print(json.dumps({
+            "backend": prepared.backend,
+            "prompt": prepared.prompt,
+            "references": [reference.url for reference in prepared.references],
+            "style_id": prepared.style_id,
+        }, sort_keys=True))
+        return 0
+
     init_db()
 
     if args.cmd == "stage1":
