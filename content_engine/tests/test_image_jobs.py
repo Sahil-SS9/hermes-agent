@@ -105,6 +105,15 @@ def test_canonical_layout_catalogue_preserves_legacy_social_layout_ids() -> None
     assert "architectural cross-section" in layouts
 
 
+def test_prepare_image_caps_distinct_reference_fanout_before_staging() -> None:
+    with pytest.raises(ImageRequestError, match="at most"):
+        prepare_image_request(
+            prompt="A secure reference-aware image.",
+            style="Data Atlas",
+            references=tuple(f"https://example.com/source-{index}" for index in range(9)),
+        )
+
+
 @pytest.mark.parametrize(
     "url",
     [

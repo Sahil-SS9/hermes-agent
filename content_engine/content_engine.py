@@ -9,6 +9,7 @@ import json
 import os
 import argparse
 from datetime import datetime
+from pathlib import Path
 from typing import List, Optional
 
 # Core imports
@@ -19,6 +20,7 @@ from database import list_approved_pending_enrichment, truncate_drafts, purge_st
 from database import update_draft_ai_image_path, update_draft_ai_video_path
 from llm_drafts import generate_drafts
 from discord_digest import deliver_discord_digest
+from image_job_service import stage_and_plan_image_job
 
 
 def run_stage_1(
@@ -318,6 +320,13 @@ def main() -> int:
     pi.add_argument("--style", required=True)
     pi.add_argument("--backend", default="codex", choices=("codex", "local"))
     pi.add_argument("--reference", action="append", default=[], help="User-supplied URL; repeat for multiple sources")
+    pi.add_argument(
+        "--stage-root",
+        type=Path,
+        default=None,
+        help="Explicit private root for safe source staging; still never invokes a generation backend",
+    )
+    pi.add_argument("--job-id", default=None, help="Required with --stage-root; safe identifier for one staged job")
 
     # deliver-discord: grouped-by-brand review to Discord
     dd = sub.add_parser("deliver-discord", help="Deliver recent drafts to Discord, grouped by brand")
@@ -386,8 +395,13 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.cmd == "prepare-image":
+        from image_backends import BackendPlanError
         from image_jobs import ImageRequestError, prepare_image_request
+        from image_reference_staging import ReferenceStagingError
 
+        if (args.stage_root is None) != (args.job_id is None):
+            print("Invalid image request: --stage-root and --job-id must be supplied together")
+            return 2
         try:
             prepared = prepare_image_request(
                 prompt=args.prompt,
@@ -395,15 +409,30 @@ def main() -> int:
                 backend=args.backend,
                 references=args.reference,
             )
-        except ImageRequestError as exc:
+            payload = {
+                "backend": prepared.backend,
+                "prompt": prepared.prompt,
+                "references": [reference.url for reference in prepared.references],
+                "style_id": prepared.style_id,
+            }
+            if args.stage_root is not None:
+                staged_job = stage_and_plan_image_job(
+                    prepared,
+                    staging_root=args.stage_root,
+                    job_id=args.job_id,
+                )
+                payload["staging"] = {
+                    "backend": staged_job.plan.backend,
+                    "execution_enabled": staged_job.plan.execution_enabled,
+                    "job_id": args.job_id,
+                    "reason": staged_job.plan.reason,
+                    "reference_count": len(staged_job.staged_references),
+                    "reference_sha256": [reference.sha256 for reference in staged_job.staged_references],
+                }
+        except (BackendPlanError, ImageRequestError, OSError, ReferenceStagingError, ValueError) as exc:
             print(f"Invalid image request: {exc}")
             return 2
-        print(json.dumps({
-            "backend": prepared.backend,
-            "prompt": prepared.prompt,
-            "references": [reference.url for reference in prepared.references],
-            "style_id": prepared.style_id,
-        }, sort_keys=True))
+        print(json.dumps(payload, sort_keys=True))
         return 0
 
     init_db()

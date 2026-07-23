@@ -5,7 +5,7 @@ import importlib.util
 import json
 import sys
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 
 
 def _load_engine_script(monkeypatch) -> ModuleType:
@@ -50,3 +50,49 @@ def test_prepare_image_cli_returns_a_plan_without_opening_the_content_database(
     assert payload["backend"] == "codex"
     assert payload["style_id"] == "data-atlas"
     assert payload["references"] == ["https://example.com/brief.pdf"]
+
+
+def test_prepare_image_cli_can_explicitly_stage_and_plan_without_a_provider(
+    monkeypatch, capsys, tmp_path: Path
+) -> None:
+    engine = _load_engine_script(monkeypatch)
+    observed: dict[str, object] = {}
+
+    def _stage(request, *, staging_root: Path, job_id: str):
+        observed.update({"request": request, "staging_root": staging_root, "job_id": job_id})
+        return SimpleNamespace(
+            staged_references=(SimpleNamespace(sha256="b" * 64),),
+            plan=SimpleNamespace(
+                backend=request.backend,
+                execution_enabled=False,
+                reason="provider execution deliberately disabled",
+            ),
+        )
+
+    monkeypatch.setattr(engine, "stage_and_plan_image_job", _stage, raising=False)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "content_engine.py",
+            "prepare-image",
+            "--prompt",
+            "A compact visual system map.",
+            "--style",
+            "Data Atlas",
+            "--reference",
+            "https://example.com/source",
+            "--stage-root",
+            str(tmp_path / "staging"),
+            "--job-id",
+            "job-cli",
+        ],
+    )
+    monkeypatch.setattr(engine, "init_db", lambda: (_ for _ in ()).throw(AssertionError("no DB")))
+
+    assert engine.main() == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert observed["job_id"] == "job-cli"
+    assert payload["staging"]["reference_count"] == 1
+    assert payload["staging"]["execution_enabled"] is False

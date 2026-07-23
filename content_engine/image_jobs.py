@@ -21,6 +21,7 @@ class ImageRequestError(ValueError):
 
 _ALLOWED_BACKENDS = frozenset({"codex", "local"})
 _REFERENCE_ROLES = frozenset({"written_inspiration", "visual_reference"})
+MAX_REFERENCES = 8
 
 
 @dataclass(frozen=True)
@@ -156,6 +157,8 @@ def _normalise_references(values: Iterable[str]) -> tuple[ReferenceRequest, ...]
         url = _validate_reference_url(value)
         if url not in seen:
             references.append(ReferenceRequest(url=url))
+            if len(references) > MAX_REFERENCES:
+                raise ImageRequestError(f"at most {MAX_REFERENCES} distinct reference URLs are permitted")
             seen.add(url)
     return tuple(references)
 
