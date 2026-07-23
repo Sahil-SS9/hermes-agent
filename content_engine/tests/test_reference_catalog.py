@@ -5,6 +5,7 @@ Uses tmp_path fixture data only; never depends on the real external root.
 
 import hashlib
 import json
+import os
 
 import pytest
 
@@ -25,10 +26,15 @@ def _sha(content=b"img"):
 def _manifest_row(rid, rel, content=None, cls="review-required"):
     content = content if content is not None else b"img"
     return {
+        "record_schema_version": "2",
         "reference_id": rid,
         "path": rel,
         "sha256": _sha(content),
+        "provenance_class": "sahil_curated",
+        "ownership_or_usage_basis": "fixture-only explicit review required",
         "usage_classification": cls,
+        "allowed_roles": ["layout", "style", "composition", "palette", "subject"],
+        "parent_reference_id": None,
         "collection": "sahil_staging",
         "source": "Sahil staging reference pack",
         "provenance_state": "baseline-import-unreviewed",
@@ -40,15 +46,19 @@ def _manifest_row(rid, rel, content=None, cls="review-required"):
 def _core_row(rid, rel, content=None, cls="review-required"):
     content = content if content is not None else b"img"
     return {
+        "record_schema_version": "2",
         "reference_id": rid,
         "path": rel,
         "sha256": _sha(content),
+        "provenance_class": "sahil_curated",
+        "ownership_or_usage_basis": "fixture-only explicit review required",
         "usage_classification": cls,
+        "parent_reference_id": None,
         "collection": "sahil_staging",
         "core_role": "composition",
         "core_tag": "abstract-ink",
         "curation_status": "visually-reviewed-core-candidate-2026-07-23",
-        "allowed_roles": ["taxonomy", "provider-free contract test"],
+        "allowed_roles": ["composition"],
         "blocked_roles": ["generation", "publication"],
         "visual_rationale": "abstract systems/editorial texture",
         "_content": content,
@@ -126,15 +136,9 @@ def _write_jsonl(path, rows):
 
 
 def test_sha256_mismatch_rejected(tmp_path):
-    root = _make_root(
-        tmp_path,
-        baseline_rows=[{
-            "reference_id": "ref-1",
-            "path": "a.png",
-            "sha256": "0" * 64,
-            "usage_classification": "review-required",
-        }],
-    )
+    row = _manifest_row("ref-1", "a.png")
+    row["sha256"] = "0" * 64
+    root = _make_root(tmp_path, baseline_rows=[row])
     with pytest.raises(rc.CatalogIntegrityError, match="sha256 mismatch"):
         rc.ReferenceCatalog.load(root)
 
@@ -198,13 +202,13 @@ def test_core_hash_differs_from_baseline_rejected(tmp_path):
     root = tmp_path / "refs"
     root.mkdir()
     _write_file(root, "a.png", b"img")
+    _write_file(root, "b.png", b"different")
     base = _manifest_row("ref-1", "a.png", b"img")
-    # core shares id+path with baseline but declares a different sha.
-    core = _core_row("ref-1", "a.png", b"img")
-    core["sha256"] = _sha(b"different")
+    # Core shares the id but resolves to a different content-addressed baseline.
+    core = _core_row("ref-1", "b.png", b"different")
     _write_jsonl(root / "manifest.jsonl", [base])
     _write_jsonl(root / "core-pack.jsonl", [core])
-    with pytest.raises(rc.CatalogIntegrityError, match="hash differs from baseline"):
+    with pytest.raises(rc.CatalogIntegrityError, match="path/hash must match baseline"):
         rc.ReferenceCatalog.load(root)
 
 
@@ -281,7 +285,9 @@ def test_blocked_classification_loads_and_fails_closed(tmp_path):
         core_rows=[_core_row("ref-1", "a.png", content, cls="blocked")],
     )
     cat = rc.ReferenceCatalog.load(root)
-    assert cat.get("ref-1").usage_classification == "blocked"
+    record = cat.get("ref-1")
+    assert record is not None
+    assert record.usage_classification == "blocked"
     with pytest.raises(rc.GenerationEligibilityError, match="not permitted"):
         cat.references_for_generation(["ref-1"])
 
@@ -313,3 +319,39 @@ def test_permitted_record_succeeds_for_generation(tmp_path):
     assert recs[0].reference_id == "ref-1"
     assert recs[0].usage_classification == "permitted"
     # eligibility only — no generation happens here; this is just the contract.
+
+
+def test_schema_v2_taxonomy_is_preserved_and_core_is_not_double_counted(tmp_path):
+    root = _make_root(
+        tmp_path,
+        baseline_rows=[_manifest_row("ref-1", "a.png")],
+        core_rows=[_core_row("ref-1", "a.png")],
+    )
+    cat = rc.ReferenceCatalog.load(root)
+    record = cat.get("ref-1")
+    assert record is not None
+    assert record.provenance_class == "sahil_curated"
+    assert record.ownership_or_usage_basis == "fixture-only explicit review required"
+    assert record.allowed_roles == ("composition",)
+    assert len(cat) == 1
+    assert [r.reference_id for r in cat.all_records()] == ["ref-1"]
+
+
+def test_manifest_row_missing_schema_v2_provenance_is_rejected(tmp_path):
+    row = _manifest_row("ref-1", "a.png")
+    del row["provenance_class"]
+    root = _make_root(tmp_path, baseline_rows=[row])
+    with pytest.raises(rc.CatalogIntegrityError, match="provenance_class"):
+        rc.ReferenceCatalog.load(root)
+
+
+def test_resolved_symlink_outside_root_is_rejected(tmp_path):
+    root = tmp_path / "refs"
+    root.mkdir()
+    outside = tmp_path / "outside.png"
+    outside.write_bytes(b"outside")
+    os.symlink(outside, root / "linked.png")
+    row = _manifest_row("ref-1", "linked.png", b"outside")
+    _write_jsonl(root / "manifest.jsonl", [row])
+    with pytest.raises(rc.CatalogIntegrityError, match="resolves outside"):
+        rc.ReferenceCatalog.load(root)

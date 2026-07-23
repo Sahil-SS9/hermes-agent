@@ -4,6 +4,8 @@
 **Owner:** KENSEI
 **Execution mode:** Sequential, block-by-block. Zero technical debt. No incremental week-by-week changes — each block delivers a finished, tested, merged capability before the next starts.
 
+**P11 correction (23/07/26):** P11 adds only provider-free visual planning and planned provenance manifests. Tests prove the implementation seam with a mocked generator; they do **not** prove real image quality, provider activation, local ComfyUI or publishing. Those remain P10/runtime work.
+
 ---
 
 ## Execution Rules

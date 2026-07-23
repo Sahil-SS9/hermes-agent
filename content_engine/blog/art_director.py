@@ -19,7 +19,12 @@ import json
 import hashlib
 import random
 import re
-from typing import Optional
+from pathlib import Path
+from typing import Mapping, Optional
+
+from blog.asset_manifest import AssetManifest, build_asset_manifest
+from blog.reference_catalog import ReferenceCatalog
+from blog.visual_plan import VisualPlan, build_visual_plan
 
 # ── Creative direction contract ─────────────────────────────────────────────
 
@@ -621,12 +626,14 @@ def build_art_brief(
         try:
             from llm_generate import _call_llm, _llm_configs
 
-            def llm(system: str, user: str) -> Optional[str]:
+            def default_llm(system: str, user: str) -> Optional[str]:
                 for cfg in _llm_configs(longform=True):
                     body = _call_llm(system, user, cfg, timeout=180, max_tokens=4000)
                     if body:
                         return body
                 return None
+
+            llm = default_llm
         except Exception:
             return None
 
@@ -675,3 +682,155 @@ def fallback_brief(draft: dict, headings: list[str],
         "hero_prompt": concept,
         "section_prompts": {h: f"{h} — in the context of: {concept}" for h in headings},
     }
+
+
+# ── Provider-free P11 contract seam ─────────────────────────────────────────
+
+_PLAN_DIMENSIONS = {"width": 1600, "height": 900}
+
+
+def _article_id_for_plan(draft: Mapping[str, object], brief: Mapping[str, object]) -> str:
+    slug = str(draft.get("slug", "")).strip()
+    if slug:
+        return slug
+    seed = str(brief.get("selection_seed", "")).strip()
+    if seed:
+        return f"article-{seed[:16]}"
+    stable_title = str(draft.get("title", "")).strip() or "untitled"
+    return f"article-{hashlib.sha256(stable_title.encode('utf-8')).hexdigest()[:16]}"
+
+
+def _planned_layouts(
+    brief: Mapping[str, object], count: int, fallback_layout_ids: list[str]
+) -> list[str]:
+    """Use brief layouts when supplied; otherwise name reviewed layout inputs.
+
+    Older brief producers only supplied the shared art family. Naming the
+    deterministically selected reviewed layout references keeps that public
+    brief shape compatible without inventing a visual direction.
+    """
+    candidates: list[str] = []
+    raw_variants = brief.get("layout_variants")
+    variants = raw_variants if isinstance(raw_variants, list) else []
+    for value in [brief.get("layout", ""), *variants]:
+        text = str(value).strip()
+        if text and text not in candidates:
+            candidates.append(text)
+    for reference_id in fallback_layout_ids:
+        fallback = f"reviewed-layout:{reference_id}"
+        if fallback not in candidates:
+            candidates.append(fallback)
+        if len(candidates) >= count:
+            break
+    if len(candidates) < count:
+        raise ValueError("canonical core pack does not provide enough distinct layouts")
+    return candidates[:count]
+
+
+def _core_record_ids(catalog: ReferenceCatalog, visual_role: str, count: int) -> list[str]:
+    candidates = [
+        record.reference_id
+        for record in catalog.records_for_contract()
+        if visual_role in record.allowed_roles
+    ]
+    if not candidates:
+        raise ValueError(f"canonical core pack has no {visual_role!r} reference")
+    return [candidates[index % len(candidates)] for index in range(count)]
+
+
+def build_visual_plan_from_brief(
+    draft: Mapping[str, object],
+    headings: list[str],
+    brief: Mapping[str, object],
+    *,
+    catalog_root: Path,
+) -> VisualPlan:
+    """Bind one existing art brief to reviewed core references before generation.
+
+    This is deliberately deterministic and provider-free: the plan can be
+    reviewed or persisted without authorising any reference for generation.
+    """
+    catalog = ReferenceCatalog.load(Path(catalog_root))
+    asset_count = 1 + len(headings)
+    layout_ids = _core_record_ids(catalog, "layout", asset_count)
+    layouts = _planned_layouts(brief, asset_count, layout_ids)
+    style_ids = _core_record_ids(catalog, "style", asset_count)
+    composition_ids = _core_record_ids(catalog, "composition", asset_count)
+    style = str(brief.get("style", "")).strip()
+    palette = str(brief.get("palette", "")).strip()
+    motif = str(brief.get("motif", "")).strip()
+    direction = str(brief.get("art_direction", "")).strip() or str(brief.get("hero_prompt", "")).strip()
+    if not all((style, palette, motif, direction)):
+        raise ValueError("art brief is missing shared style, palette, motif or direction")
+    asset_rows: list[Mapping[str, object]] = []
+    for index in range(asset_count):
+        is_hero = index == 0
+        asset_rows.append(
+            {
+                "role": "hero" if is_hero else "section",
+                "key": "hero" if is_hero else f"section-{index:02d}",
+                "layout": layouts[index],
+                "style": style,
+                "palette": palette,
+                "motif": motif,
+                "reference_assignments": {
+                    "layout": [layout_ids[index]],
+                    "style": [style_ids[index]],
+                    "composition": [composition_ids[index]],
+                },
+                **({} if is_hero else {"section_heading": headings[index - 1]}),
+            }
+        )
+    return build_visual_plan(
+        article_id=_article_id_for_plan(draft, brief),
+        art_brief=direction,
+        assets=asset_rows,
+        catalog=catalog,
+    )
+
+
+def build_planned_asset_manifest_from_plan(
+    plan: VisualPlan,
+    prompts_by_key: Mapping[str, str],
+    output_paths_by_key: Mapping[str, str],
+    *,
+    text_policy: str,
+) -> AssetManifest:
+    """Create the immutable planned state before an unchanged generator runs."""
+    records: list[Mapping[str, object]] = []
+    for asset in plan.assets:
+        prompt = str(prompts_by_key.get(asset.key, "")).strip()
+        output_path = str(output_paths_by_key.get(asset.key, "")).strip()
+        if not prompt or not output_path:
+            raise ValueError(f"missing prompt or output path for planned asset {asset.key!r}")
+        records.append(
+            {
+                "asset_key": asset.key,
+                "article_id": plan.article_id,
+                "state": "planned",
+                "visual_plan_schema_version": plan.version,
+                "visual_plan_digest": plan.digest(),
+                "prompt": prompt,
+                "prompt_digest": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+                "reference_inputs": [
+                    {
+                        "reference_id": assignment.reference_id,
+                        "sha256": assignment.sha256,
+                        "provenance_class": assignment.provenance_class,
+                        "visual_role": assignment.visual_role,
+                    }
+                    for assignment in asset.reference_assignments
+                ],
+                "provider": None,
+                "model": None,
+                "output_path": output_path,
+                "output_digest": None,
+                "requested_dimensions": dict(_PLAN_DIMENSIONS),
+                "actual_dimensions": None,
+                "generated_at": None,
+                "text_ocr": {"policy": text_policy or "none", "result": "not-run"},
+                "visual_qa": {"status": "pending", "rejection_reasons": []},
+                "review_status": "pending",
+            }
+        )
+    return build_asset_manifest(plan.article_id, records)

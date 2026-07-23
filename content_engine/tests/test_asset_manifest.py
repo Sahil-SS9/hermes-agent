@@ -1,5 +1,6 @@
-"""Tests for blog.asset_manifest — provider-free asset provenance/QA (P11)."""
+"""Tests for P11 planned/generated asset provenance manifests."""
 
+import hashlib
 import json
 
 import pytest
@@ -7,180 +8,165 @@ import pytest
 from blog import asset_manifest as am
 
 
-_D = "a" * 64  # valid 64-char lowercase hex
+def _digest(value="x"):
+    return hashlib.sha256(value.encode()).hexdigest()
 
 
-def _good_record(key="hero", qa_state="pending", qa_metadata=None, **over):
-    rec = {
-        "asset_key": key,
-        "article_id": "art-001",
-        "visual_plan_digest": _D,
-        "prompt_digest": _D,
-        "reference_ids": ["ref-1"],
-        "output_path": "output/art-001/hero.png",
-        "output_digest": _D,
-        "generated_at": "2026-07-23T10:00:00Z",
-        "qa_state": qa_state,
+def _reference_input(reference_id="layout-hero", role="layout"):
+    return {
+        "reference_id": reference_id,
+        "sha256": _digest(reference_id),
+        "provenance_class": "sahil_curated",
+        "visual_role": role,
     }
-    if qa_metadata is not None:
-        rec["qa_metadata"] = qa_metadata
-    rec.update(over)
-    return rec
 
 
-# ---- deterministic JSON / parse round trip --------------------------------
+def _planned_record(**overrides):
+    record = {
+        "asset_key": "hero",
+        "article_id": "article-1",
+        "state": "planned",
+        "visual_plan_schema_version": "1",
+        "visual_plan_digest": _digest("plan"),
+        "prompt": "A brass control hall showing the article mechanism.",
+        "prompt_digest": _digest("A brass control hall showing the article mechanism."),
+        "reference_inputs": [_reference_input()],
+        "provider": None,
+        "model": None,
+        "output_path": "hero.png",
+        "output_digest": None,
+        "requested_dimensions": {"width": 1600, "height": 900},
+        "actual_dimensions": None,
+        "generated_at": None,
+        "text_ocr": {"policy": "none", "result": "not-run"},
+        "visual_qa": {"status": "pending", "rejection_reasons": []},
+        "review_status": "pending",
+    }
+    record.update(overrides)
+    return record
 
-def test_record_to_json_deterministic():
-    r1 = am._build_record(_good_record())
-    r2 = am._build_record(_good_record())
-    assert r1.to_json() == r2.to_json()
+
+def _generated_record(**overrides):
+    record = _planned_record(
+        state="generated",
+        provider="local-comfyui-rest",
+        model="unbound-in-p11",
+        output_digest=_digest("output"),
+        actual_dimensions={"width": 1600, "height": 900},
+        generated_at="2026-07-23T11:00:00+00:00",
+        text_ocr={"policy": "none", "result": "pass"},
+        visual_qa={"status": "approved", "rejection_reasons": []},
+        review_status="approved",
+    )
+    record.update(overrides)
+    return record
 
 
-def test_manifest_to_json_deterministic():
-    m1 = am.build_asset_manifest("art-001", [_good_record()])
-    m2 = am.build_asset_manifest("art-001", [_good_record()])
-    assert m1.to_json() == m2.to_json()
+def test_planned_record_is_valid_without_provider_or_output():
+    manifest = am.build_asset_manifest("article-1", [_planned_record()])
+    record = manifest.records[0]
+    assert record.state == "planned"
+    assert record.provider is None
+    assert record.output_digest is None
+    assert record.reference_inputs[0].visual_role == "layout"
 
 
-def test_manifest_round_trip():
-    m = am.build_asset_manifest("art-001", [_good_record(), _good_record("sec-1")])
-    j = m.to_json()
-    rt = am.AssetManifest.from_json(j)
-    assert rt.to_json() == j
-    assert len(rt) == 2
-    assert {r.asset_key for r in rt} == {"hero", "sec-1"}
+def test_generated_record_requires_completion_evidence():
+    manifest = am.build_asset_manifest("article-1", [_generated_record()])
+    assert manifest.records[0].state == "generated"
+    assert manifest.records[0].actual_dimensions == {"height": 900, "width": 1600}
 
 
-def test_manifest_from_dict_version_check():
-    m = am.build_asset_manifest("art-001", [_good_record()])
-    data = m.to_dict()
+@pytest.mark.parametrize(
+    "overrides, message",
+    [
+        ({"state": "planned", "output_digest": _digest("wrong")}, "planned"),
+        ({"state": "generated", "provider": None}, "provider"),
+        ({"state": "generated", "actual_dimensions": None}, "actual_dimensions"),
+        ({"prompt_digest": _digest("different")}, "prompt_digest"),
+    ],
+)
+def test_invalid_lifecycle_evidence_is_rejected(overrides, message):
+    base = _generated_record() if overrides.get("state") == "generated" else _planned_record()
+    base.update(overrides)
+    with pytest.raises(am.AssetManifestError, match=message):
+        am.build_asset_manifest("article-1", [base])
+
+
+def test_reference_input_must_bind_hash_provenance_and_role():
+    ref = _reference_input()
+    del ref["provenance_class"]
+    with pytest.raises(am.AssetManifestError, match="provenance_class"):
+        am.build_asset_manifest("article-1", [_planned_record(reference_inputs=[ref])])
+
+
+def test_credential_fields_are_rejected_but_prompt_is_preserved():
+    data = _planned_record(api_key="[REDACTED]")
+    with pytest.raises(am.AssetManifestError, match="credential"):
+        am.build_asset_manifest("article-1", [data])
+
+
+def test_duplicate_asset_keys_and_escaping_output_path_are_rejected():
+    with pytest.raises(am.AssetManifestError, match="duplicate asset keys"):
+        am.build_asset_manifest("article-1", [_planned_record(), _planned_record()])
+    with pytest.raises(am.AssetManifestError, match="must be relative"):
+        am.build_asset_manifest("article-1", [_planned_record(output_path="../hero.png")])
+
+
+def test_manifest_json_round_trip_is_deterministic_and_save_is_explicit(tmp_path):
+    manifest = am.build_asset_manifest("article-1", [_planned_record(), _generated_record(asset_key="section")])
+    restored = am.AssetManifest.from_json(manifest.to_json())
+    assert restored.to_json() == manifest.to_json()
+    output = tmp_path / "article.asset-manifest.json"
+    am.save_asset_manifest(manifest, output)
+    assert json.loads(output.read_text()) == manifest.to_dict()
+    assert output.read_text() == manifest.to_json() + "\n"
+
+
+def test_empty_article_id_and_asset_key_are_rejected():
+    with pytest.raises(am.AssetManifestError, match="article_id is required"):
+        am.build_asset_manifest("", [_planned_record()])
+    with pytest.raises(am.AssetManifestError, match="asset_key is required"):
+        am.build_asset_manifest("article-1", [_planned_record(asset_key="")])
+
+
+def test_absolute_output_path_is_rejected():
+    with pytest.raises(am.AssetManifestError, match="must be relative"):
+        am.build_asset_manifest("article-1", [_planned_record(output_path="/tmp/hero.png")])
+
+
+def test_missing_visual_plan_digest_is_rejected():
+    with pytest.raises(am.AssetManifestError, match="visual_plan_digest"):
+        am.build_asset_manifest("article-1", [_planned_record(visual_plan_digest="")])
+
+
+def test_invalid_digest_format_is_rejected():
+    with pytest.raises(am.AssetManifestError, match="64-character"):
+        am.build_asset_manifest("article-1", [_planned_record(visual_plan_digest="not-a-digest")])
+
+
+def test_generated_record_requires_an_output_digest():
+    record = _generated_record(output_digest=None)
+    with pytest.raises(am.AssetManifestError, match="output_digest"):
+        am.build_asset_manifest("article-1", [record])
+
+
+def test_rejected_visual_qa_requires_reasons():
+    record = _generated_record(
+        visual_qa={"status": "rejected", "rejection_reasons": []},
+        review_status="rejected",
+    )
+    with pytest.raises(am.AssetManifestError, match="rejection_reasons"):
+        am.build_asset_manifest("article-1", [record])
+
+
+def test_invalid_review_status_is_rejected():
+    with pytest.raises(am.AssetManifestError, match="review_status"):
+        am.build_asset_manifest("article-1", [_planned_record(review_status="published")])
+
+
+def test_unknown_manifest_version_is_rejected():
+    data = am.build_asset_manifest("article-1", [_planned_record()]).to_dict()
     data["version"] = "999"
     with pytest.raises(am.AssetManifestError, match="unsupported manifest version"):
         am.AssetManifest.from_dict(data)
-
-
-def test_manifest_sorted_keys():
-    m = am.build_asset_manifest("art-001", [_good_record()])
-    data = json.loads(m.to_json())
-    assert list(data.keys()) == sorted(data.keys())
-
-
-# ---- reject escaping path, missing digests, duplicate key, unapproved ---
-
-def test_absolute_output_path_rejected():
-    with pytest.raises(am.AssetManifestError, match="must be relative"):
-        am._build_record(_good_record(output_path="/etc/passwd"))
-
-
-def test_escaping_output_path_rejected():
-    with pytest.raises(am.AssetManifestError, match="escape the root"):
-        am._build_record(_good_record(output_path="../escape.png"))
-
-
-def test_missing_visual_plan_digest_rejected():
-    with pytest.raises(am.AssetManifestError, match="visual_plan_digest"):
-        am._build_record(_good_record(visual_plan_digest=""))
-
-
-def test_bad_digest_format_rejected():
-    with pytest.raises(am.AssetManifestError, match="64-char lowercase hex"):
-        am._build_record(_good_record(visual_plan_digest="not-a-hash"))
-
-
-def test_missing_prompt_digest_rejected():
-    with pytest.raises(am.AssetManifestError, match="prompt_digest"):
-        am._build_record(_good_record(prompt_digest=""))
-
-
-def test_missing_output_digest_rejected():
-    with pytest.raises(am.AssetManifestError, match="output_digest"):
-        am._build_record(_good_record(output_digest=""))
-
-
-def test_empty_reference_ids_rejected():
-    with pytest.raises(am.AssetManifestError, match="reference_ids"):
-        am._build_record(_good_record(reference_ids=[]))
-
-
-def test_duplicate_asset_key_rejected():
-    with pytest.raises(am.AssetManifestError, match="duplicate asset keys"):
-        am.build_asset_manifest(
-            "art-001",
-            [_good_record(key="hero"), _good_record(key="hero")],
-        )
-
-
-def test_published_without_qa_metadata_rejected():
-    with pytest.raises(am.AssetManifestError, match="requires explicit qa_metadata"):
-        am._build_record(_good_record(qa_state="published"))
-
-
-def test_approved_without_qa_metadata_rejected():
-    with pytest.raises(am.AssetManifestError, match="requires explicit qa_metadata"):
-        am._build_record(_good_record(qa_state="approved"))
-
-
-def test_rejected_without_qa_metadata_rejected():
-    with pytest.raises(am.AssetManifestError, match="requires explicit qa_metadata"):
-        am._build_record(_good_record(qa_state="rejected"))
-
-
-def test_approved_with_qa_metadata_accepted():
-    rec = am._build_record(_good_record(
-        qa_state="approved",
-        qa_metadata={"reviewer": "kensei", "decision": "ship"},
-    ))
-    assert rec.qa_state == "approved"
-    assert rec.qa_metadata["reviewer"] == "kensei"
-
-
-def test_pending_without_qa_metadata_accepted():
-    rec = am._build_record(_good_record(qa_state="pending"))
-    assert rec.qa_state == "pending"
-    assert rec.qa_metadata is None
-
-
-def test_invalid_qa_state_rejected():
-    with pytest.raises(am.AssetManifestError, match="qa_state must be one of"):
-        am._build_record(_good_record(qa_state="shipped"))
-
-
-# ---- no raw prompt/token-like fields are emitted -------------------------
-
-def test_no_raw_prompt_field_in_record_dict():
-    rec = am._build_record(_good_record())
-    d = rec.to_dict()
-    forbidden = {"api_key", "provider_token", "token", "secret", "raw_prompt", "prompt"}
-    assert not (forbidden.intersection(d.keys()))
-
-
-def test_no_raw_prompt_field_in_manifest_json():
-    m = am.build_asset_manifest("art-001", [_good_record()])
-    data = json.loads(m.to_json())
-    forbidden = {"api_key", "provider_token", "token", "secret", "raw_prompt", "prompt"}
-    for rec in data["records"]:
-        assert not (forbidden.intersection(rec.keys()))
-
-
-def test_record_rejects_secret_field_in_input():
-    bad = _good_record()
-    bad["api_key"] = "sk-xxx"
-    with pytest.raises(am.AssetManifestError, match="must not contain secret/raw-prompt fields"):
-        am._build_record(bad)
-
-
-def test_record_rejects_raw_prompt_field_in_input():
-    bad = _good_record()
-    bad["raw_prompt"] = "a vivid hero scene"
-    with pytest.raises(am.AssetManifestError, match="must not contain secret/raw-prompt fields"):
-        am._build_record(bad)
-
-
-def test_empty_article_id_rejected():
-    with pytest.raises(am.AssetManifestError, match="article_id is required"):
-        am.build_asset_manifest("", [_good_record()])
-
-
-def test_empty_asset_key_rejected():
-    with pytest.raises(am.AssetManifestError, match="asset_key is required"):
-        am._build_record(_good_record(key=""))

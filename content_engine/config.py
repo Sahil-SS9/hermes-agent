@@ -350,19 +350,19 @@ IMAGERY_QA_MIN_SCORE = int(os.getenv("CONTENT_IMAGERY_QA_MIN_SCORE", "6"))
 SAHILBLOG_REPO = os.path.expanduser(os.getenv("SAHILBLOG_REPO", "~/repos/SahilBlog"))
 BLOG_ENABLED = os.getenv("BLOG_ENABLED", "1").strip() not in ("0", "false", "")
 BLOG_STREAMS = tuple(s.strip() for s in os.getenv("BLOG_STREAMS", "ai,pm,builder").split(",") if s.strip())
-# Per-section images cap. Default hero-only (BLOG_MAX_SECTION_IMAGES=0) keeps
-# daily spend at £0.039 x 3 streams = ~£3.5/mo, well under the £10 cap when
-# combined with social (~£7/mo). Set to 1 for hero + 1 section (~£14/mo, over
-# cap unless the social budget is reduced or a separate blog image budget is
-# allocated). See Task 4 budget note.
+# Per-section images cap. The hard cap is two sections, so one post can request
+# one hero plus at most two section images. P11 only persists a provider-free
+# visual plan/provenance manifest; it does not alter generator cost or provider
+# behaviour. Any future provider/budget decision belongs to P10.
 BLOG_MAX_SECTION_IMAGES = int(os.getenv("BLOG_MAX_SECTION_IMAGES", "2"))
 BLOG_TOPIC_RECENCY_DAYS = int(os.getenv("BLOG_TOPIC_RECENCY_DAYS", "45"))
 
 # ── Blog back-population ──────────────────────────────────────────────
-# Blog images now use Codex CLI (ChatGPT subscription, £0 per image).
-# The deprecated FAL config (BLOG_IMAGE_MODEL, BLOG_IMAGE_COST_GBP) has been
-# removed. Backfill budget tracking remains for the social content pipeline
-# which still uses FAL for product brand images (intentional, separate system).
+# The current legacy blog image generator remains unchanged in P11. P11 adds
+# provider-free planning and provenance manifests only; P10 owns any provider
+# replacement/runtime proof. Deprecated FAL config (BLOG_IMAGE_MODEL,
+# BLOG_IMAGE_COST_GBP) remains removed from the blog path. Backfill budget
+# tracking belongs to the separate social content pipeline.
 BACKFILL_SPEND_CAP_GBP = float(os.getenv("BACKFILL_SPEND_CAP_GBP", "9.0"))
 BACKFILL_LEDGER_PATH = str(Path(os.getenv(
     "BACKFILL_LEDGER_PATH", str(Path(__file__).parent / "output" / "backfill_ledger.json"))))

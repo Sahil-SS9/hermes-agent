@@ -4,6 +4,7 @@ The illustrator now drives every image from a single art brief (art_director):
 one style + locked palette/motif + shared direction, with a unique prompt for
 the hero and each section. Generation backend is Codex CLI (no FAL/Pollinations).
 """
+import json
 from pathlib import Path
 
 import pytest
@@ -27,6 +28,9 @@ def stub_art_brief(monkeypatch):
             "palette": "stone grey, brass, warm amber",
             "motif": "a recurring archway",
             "art_direction": "vast, awe-of-scale, one warm focal light.",
+            "layout": "architectural cross-section",
+            "layout_variants": ["control hall", "vault map"],
+            "text_policy": "labels",
             "hero_prompt": f"hero for {draft.get('title','')}",
             "section_prompts": {h: f"section image for {h}" for h in headings},
         }
@@ -59,7 +63,7 @@ The takeaway.
 def test_illustrate_returns_hero_and_section_paths(monkeypatch, tmp_path):
     def fake_generate(prompt, out_path, **kw):
         Path(out_path).parent.mkdir(parents=True, exist_ok=True)
-        Path(out_path).write_text("png")
+        Path(out_path).write_text("png", encoding="utf-8")
         return out_path
     monkeypatch.setattr(bi, "_generate_codex_image", fake_generate)
     monkeypatch.setattr(bi, "_generate_webp", lambda p: p)
@@ -75,7 +79,7 @@ def test_illustrate_caps_at_max_sections(monkeypatch, tmp_path):
     body = "# T\n\nLede\n\n" + "\n\n".join(f"## Section {i}\n\nText." for i in range(10))
     draft = {**_DRAFT, "body_md": body}
     monkeypatch.setattr(bi, "_generate_codex_image",
-                        lambda prompt, out_path, **kw: (Path(out_path).write_text("x"), out_path)[1])
+                        lambda prompt, out_path, **kw: (Path(out_path).write_text("x", encoding="utf-8"), out_path)[1])
     monkeypatch.setattr(bi, "_generate_webp", lambda p: p)
     images = bi.illustrate(draft, out_dir=tmp_path, max_sections=1)
     assert len(images["section_paths"]) <= 1
@@ -85,7 +89,7 @@ def test_illustrate_never_generates_more_than_two_sections_even_if_requested(mon
     body = "# T\n\nLede\n\n" + "\n\n".join(f"## Section {i}\n\nText." for i in range(10))
     draft = {**_DRAFT, "body_md": body}
     monkeypatch.setattr(bi, "_generate_codex_image",
-                        lambda prompt, out_path, **kw: (Path(out_path).write_text("x"), out_path)[1])
+                        lambda prompt, out_path, **kw: (Path(out_path).write_text("x", encoding="utf-8"), out_path)[1])
     monkeypatch.setattr(bi, "_generate_webp", lambda p: p)
 
     images = bi.illustrate(draft, out_dir=tmp_path, max_sections=10)
@@ -98,7 +102,7 @@ def test_illustrate_hero_only_when_max_sections_zero(monkeypatch, tmp_path):
     writes = []
     def fake_generate(prompt, out_path, **kw):
         writes.append(out_path)
-        Path(out_path).write_text("x")
+        Path(out_path).write_text("x", encoding="utf-8")
         return out_path
     monkeypatch.setattr(bi, "_generate_codex_image", fake_generate)
     monkeypatch.setattr(bi, "_generate_webp", lambda p: p)
@@ -110,7 +114,7 @@ def test_illustrate_hero_only_when_max_sections_zero(monkeypatch, tmp_path):
 
 def test_illustrate_section_paths_keyed_by_h2_heading(monkeypatch, tmp_path):
     monkeypatch.setattr(bi, "_generate_codex_image",
-                        lambda prompt, out_path, **kw: (Path(out_path).write_text("x"), out_path)[1])
+                        lambda prompt, out_path, **kw: (Path(out_path).write_text("x", encoding="utf-8"), out_path)[1])
     monkeypatch.setattr(bi, "_generate_webp", lambda p: p)
     images = bi.illustrate(_DRAFT, out_dir=tmp_path, max_sections=3)
     for key in images["section_paths"]:
@@ -122,7 +126,7 @@ def test_illustrate_handles_failed_hero(monkeypatch, tmp_path):
     def fake_generate(prompt, out_path, **kw):
         if "hero.png" in out_path:
             return None
-        Path(out_path).write_text("x")
+        Path(out_path).write_text("x", encoding="utf-8")
         return out_path
     monkeypatch.setattr(bi, "_generate_codex_image", fake_generate)
     monkeypatch.setattr(bi, "_generate_webp", lambda p: p)
@@ -135,7 +139,7 @@ def test_all_images_share_one_style(monkeypatch, tmp_path):
     prompts = []
     def fake_generate(prompt, out_path, **kw):
         prompts.append(prompt)
-        Path(out_path).write_text("x")
+        Path(out_path).write_text("x", encoding="utf-8")
         return out_path
     monkeypatch.setattr(bi, "_generate_codex_image", fake_generate)
     monkeypatch.setattr(bi, "_generate_webp", lambda p: p)
@@ -151,7 +155,7 @@ def test_prompts_are_unique_per_image(monkeypatch, tmp_path):
     prompts = []
     def fake_generate(prompt, out_path, **kw):
         prompts.append(prompt)
-        Path(out_path).write_text("x")
+        Path(out_path).write_text("x", encoding="utf-8")
         return out_path
     monkeypatch.setattr(bi, "_generate_codex_image", fake_generate)
     monkeypatch.setattr(bi, "_generate_webp", lambda p: p)
@@ -161,7 +165,7 @@ def test_prompts_are_unique_per_image(monkeypatch, tmp_path):
 
 def test_default_max_sections_from_config(monkeypatch, tmp_path):
     monkeypatch.setattr(bi, "_generate_codex_image",
-                        lambda prompt, out_path, **kw: (Path(out_path).write_text("x"), out_path)[1])
+                        lambda prompt, out_path, **kw: (Path(out_path).write_text("x", encoding="utf-8"), out_path)[1])
     monkeypatch.setattr(bi, "_generate_webp", lambda p: p)
     monkeypatch.setattr(config, "BLOG_MAX_SECTION_IMAGES", 2)
     images = bi.illustrate(_DRAFT, out_dir=tmp_path)
@@ -180,7 +184,7 @@ def test_hard_fails_when_art_director_unavailable(monkeypatch, tmp_path):
     prompts = []
     def fake_generate(prompt, out_path, **kw):
         prompts.append(prompt)
-        Path(out_path).write_text("x")
+        Path(out_path).write_text("x", encoding="utf-8")
         return out_path
     monkeypatch.setattr(bi, "_generate_codex_image", fake_generate)
     monkeypatch.setattr(bi, "_generate_webp", lambda p: p)
@@ -206,7 +210,7 @@ def test_art_brief_log_includes_seed_and_layout(monkeypatch, tmp_path, capsys):
         }
     monkeypatch.setattr(bi, "build_art_brief", fake_brief)
     monkeypatch.setattr(bi, "_generate_codex_image",
-                        lambda prompt, out_path, **kw: (Path(out_path).write_text("x"), out_path)[1])
+                        lambda prompt, out_path, **kw: (Path(out_path).write_text("x", encoding="utf-8"), out_path)[1])
     monkeypatch.setattr(bi, "_generate_webp", lambda p: p)
 
     bi.illustrate(_DRAFT, out_dir=tmp_path, max_sections=0)
@@ -217,7 +221,7 @@ def test_art_brief_log_includes_seed_and_layout(monkeypatch, tmp_path, capsys):
 
 def test_records_style_to_rotation_state(monkeypatch, tmp_path):
     monkeypatch.setattr(bi, "_generate_codex_image",
-                        lambda prompt, out_path, **kw: (Path(out_path).write_text("x"), out_path)[1])
+                        lambda prompt, out_path, **kw: (Path(out_path).write_text("x", encoding="utf-8"), out_path)[1])
     monkeypatch.setattr(bi, "_generate_webp", lambda p: p)
     bi.illustrate(_DRAFT, out_dir=tmp_path, max_sections=0)
     assert (tmp_path / "skill_rotation.json").exists()
@@ -233,3 +237,30 @@ def test_no_fal_imports():
     assert "fal_client" not in joined
     assert "draft_media" not in joined
     assert "Pollinations" not in joined
+
+
+def test_illustrate_persists_provider_free_plan_before_generator(monkeypatch, tmp_path):
+    calls = []
+
+    def fake_generate(prompt, out_path, **kwargs):
+        plan_path = tmp_path / "visual-plan.json"
+        manifest_path = tmp_path / "asset-manifest.json"
+        assert plan_path.exists()
+        assert manifest_path.exists()
+        assert json.loads(plan_path.read_text())["assets"]
+        records = json.loads(manifest_path.read_text())["records"]
+        assert records and all(record["state"] == "planned" for record in records)
+        assert all(record["provider"] is None for record in records)
+        calls.append((prompt, out_path))
+        Path(out_path).write_text("png", encoding="utf-8")
+        return out_path
+
+    monkeypatch.setattr(bi, "_generate_codex_image", fake_generate)
+    monkeypatch.setattr(bi, "_generate_webp", lambda path: path)
+    monkeypatch.setattr(bi.subprocess, "run", lambda *args, **kwargs: pytest.fail("provider subprocess invoked"))
+
+    result = bi.illustrate(_DRAFT, out_dir=tmp_path, max_sections=1)
+
+    assert calls
+    assert result["visual_plan_path"] == str(tmp_path / "visual-plan.json")
+    assert result["asset_manifest_path"] == str(tmp_path / "asset-manifest.json")

@@ -1,124 +1,76 @@
 # P11 — Provider-free visual contracts
 
-This slice implements the **provider-free** visual contracts for the P11 image
-lane. It adds deterministic, testable data contracts that make future local
-ComfyUI image work accountable **without activating any image provider**.
+P11 now records exactly what an article image was planned to look like **before** any image generator is called. It does not change, activate, configure or test an image provider. P10 owns the later local-ComfyUI runtime decision.
 
-## Scope boundary (what this code does NOT do)
+## What P11 does
 
-- It does **not** call Codex, OpenAI, FAL, ComfyUI, any cloud tool, or any
-  browser tool.
-- It does **not** generate, publish, schedule, or queue images.
-- It does **not** import or merge the frozen legacy P11 branch
-  (`p11/media-orchestration-20260722`).
-- It does **not** modify `art_director.py`, `blog_illustrator.py`,
-  `draft_media.py`, any provider configuration, cron, publishing, queue, or
-  approval code.
-- Future P10 is local ComfyUI REST on GPU1 only. This slice **intentionally
-  does not implement P10**.
+1. Loads the private canonical reference root at `/home/kensei/content-references`.
+2. Verifies every selected reference remains physically inside that root and matches its SHA-256 record.
+3. Builds one deterministic visual plan per article: hero/section layouts, shared style/palette/motif, and role-bound reviewed reference IDs.
+4. Persists `visual-plan.json` and `asset-manifest.json` before the existing legacy generator is reached.
+5. Fails closed: the current 26 core references are `review-required`, so none is approved for real reference-image generation.
 
-## Canonical reference root
+## What P11 does not do
 
-The canonical reference root is `/home/kensei/content-references`.
+- It does not call, select, configure or replace Codex, OpenAI, FAL, ComfyUI, or any cloud provider.
+- It does not generate a real image as P11 proof.
+- It does not publish, schedule, queue, or approve an image.
+- It does not merge the frozen legacy P11 branch.
+- It does not promote a reference from `review-required` to `permitted`.
 
-- `manifest.jsonl` — the baseline reference manifest. 262 hash-verified
-  reference images. Each row carries `reference_id`, relative `path`,
-  `sha256`, `usage_classification`, `collection`, `source`, and
-  `provenance_state`.
-- `core-pack.jsonl` — 26 visually reviewed core candidates. A core row
-  shares its `reference_id` with a baseline row (the same image, visually
-  reviewed) and adds `core_role`, `core_tag`, `curation_status`,
-  `allowed_roles`, `blocked_roles`, and `visual_rationale`.
+## Canonical reference data
 
-### `usage_classification` values
+`manifest.jsonl` contains 262 hash-bound records:
 
-| value             | meaning                                                      | generation-eligible? |
-|-------------------|--------------------------------------------------------------|----------------------|
-| `permitted`       | Promoted after provenance review.                            | yes                  |
-| `review-required`| Visually reviewed but not yet promoted.                       | **no — fail closed** |
-| `blocked`         | Explicitly blocked from generation.                          | **no — fail closed** |
+| Class | Records | Status |
+|---|---:|---|
+| `sahil_curated` | 121 | review required |
+| `baoyu_derived` | 124 | review required |
+| `derived` | 17 | blocked pending parent linkage |
 
-Every real `core-pack.jsonl` entry today is `usage_classification =
-review-required`. A generation-mode request using any such entry **must fail
-closed**. This is enforced by `ReferenceCatalog.references_for_generation`.
+`core-pack.jsonl` selects 26 visually reviewed candidates. A core record must match the baseline record’s ID, path, hash and provenance, and may only narrow its allowed visual roles.
 
-## Modules
+## Contract modules
 
 ### `blog/reference_catalog.py`
 
-A stdlib-only catalogue layer.
-
-- `ReferenceRecord` — immutable data object (frozen dataclass).
-- `ReferenceCatalog.load(root: Path)` — reads `manifest.jsonl` and the
-  optional `core-pack.jsonl`. Strict validation:
-  - unique `reference_id` values within each file;
-  - safe relative paths (rejects absolute and `..`-escaping paths);
-  - the referenced file must exist under `root`;
-  - declared `sha256` matches the file content;
-  - `usage_classification` is one of the allowed values;
-  - every core row must resolve to a baseline row with the same
-    `reference_id`, path, and hash (a core row is an enrichment of a baseline
-    row, not a new image).
-- `records_for_contract()` — returns the visually reviewed core records
-  (candidates, not generation-approved input).
-- `references_for_generation(ids)` — fails closed if any id is absent, is not
-  a core record, or has `usage_classification != "permitted"`.
-- No global mutable state. No implicit filesystem root outside the
-  caller-provided path.
+- Enforces schema-v2 provenance fields.
+- Rejects absolute paths, `..` traversal and symlinks resolving outside the root.
+- Validates file hashes and core-to-baseline identity.
+- Exposes reviewed core records for planning.
+- Allows generation eligibility only for individually promoted `permitted` core records.
 
 ### `blog/visual_plan.py`
 
-Pure data contracts for the per-article visual plan.
-
-- `VisualPlan` and `VisualAssetPlan` — versioned, immutable data structures.
-- `build_visual_plan(article_id, art_brief, assets)` — validates one hero
-  plus zero-or-more section assets. Each asset needs a unique role/key,
-  exact reference IDs, a selected layout, and the shared
-  style/palette/motif. Section assets carry an optional section heading.
-- The plan preserves a single shared style, palette, and motif across the
-  article while allowing declared layout variants per asset.
-- The module never calls an LLM or provider, writes no files, and never
-  selects an unreviewed image automatically.
-- JSON serialisation is deterministic (sorted keys, compact separators).
+- Requires an explicit `ReferenceCatalog`.
+- Binds each selected core record to `layout`, `style`, `composition`, `palette` or `subject`.
+- Preserves reference hash and provenance in the plan.
+- Requires one hero, shared article family, and distinct layouts for multi-asset articles.
+- Persists deterministic JSON only through an explicit file path.
 
 ### `blog/asset_manifest.py`
 
-Pure output-accountability contracts.
+- Records a `planned` state before generation, with an unbound provider/model and no output digest.
+- Supports generated/QA evidence later: provider/model, requested/actual dimensions, output hash, OCR policy/result, visual-QA/rejection reasons and review status.
+- Binds the visual-plan digest, exact prompt plus digest, and every reference ID/hash/provenance/role.
+- Rejects credential fields and unsafe output paths.
+- Persists deterministic JSON only through an explicit file path.
 
-- `AssetManifest` / `GeneratedAssetRecord` — versioned structures.
-- A record binds article id, visual-plan digest, prompt digest, selected
-  reference IDs, relative output path, output digest, generation timestamp,
-  and QA state.
-- Rejects absolute/escaping output paths, missing digests, duplicate asset
-  keys, and a `published`/`approved`/`rejected` state without explicit QA
-  metadata.
-- Stores no API key, provider token, or raw private prompt — only a SHA-256
-  digest. Any input dict carrying `api_key`, `provider_token`, `token`,
-  `secret`, `raw_prompt`, or `prompt` is rejected.
-- Deterministic JSON serialisation and parse/round-trip support.
+## Existing caller seam
 
-## Promotion path (future P10 owner decision)
+`blog_illustrator.illustrate()` now performs this order:
 
-A core record is promoted from `review-required` to `permitted` only after a
-P10 owner reviews provenance and explicitly upgrades the
-`usage_classification` of that individual `reference_id` in
-`core-pack.jsonl`. There is no batch promotion, no automatic promotion, and
-no promotion path inside this code slice. Until that individual promotion
-happens, `references_for_generation` fails closed for that id.
+```text
+art brief → reviewed-core visual plan → planned provenance manifest → unchanged legacy generator
+```
+
+If the plan or manifest cannot be created, it stops before generation. This is an implementation contract, not a live visual-quality or provider-runtime proof.
 
 ## Tests
 
-- `tests/test_reference_catalog.py` — valid baseline + core load; hash/path/
-  ID mismatch rejection; core-set only contract enumeration; fail-closed
-  generation for `review-required` and `blocked`; explicit `permitted`
-  record succeeds in generation eligibility only.
-- `tests/test_visual_plan.py` — deterministic JSON; locked shared
-  style/palette/motif; valid hero + section records; reject missing hero,
-  duplicate keys, out-of-family style/palette/motif, invalid layout, invalid
-  reference IDs.
-- `tests/test_asset_manifest.py` — deterministic JSON / parse round trip;
-  reject escaping path, missing digests, duplicate key, unapproved published
-  state; verify no raw prompt/token-like fields are emitted.
+- Catalogue unit tests cover schema-v2 preservation, hash checking, physical symlink containment and fail-closed eligibility.
+- Visual-plan unit tests cover role-bound core references, provenance, distinct layouts, deterministic persistence and invalid assignments.
+- Asset-manifest unit tests cover planned/generated lifecycles, prompt/hash binding, reference provenance, credential rejection and deterministic persistence.
+- The blog-illustrator integration test mocks the legacy generator and proves the plan and planned manifest exist before that boundary is reached. No test invokes a provider.
 
-All tests use `tmp_path` fixture data only and never depend on the real
-external reference root.
+P11 is not complete or mergeable until these tests, independent review, and the wider P11 acceptance gates all pass.

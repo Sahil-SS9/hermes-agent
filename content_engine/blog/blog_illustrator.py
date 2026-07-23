@@ -1,15 +1,11 @@
-"""Blog illustrator — one art-directed illustration set per post via Codex CLI.
+"""Blog illustrator — art-directed image set with a provider-free P11 seam.
 
-A single art brief (see art_director) chooses one style and a locked palette +
-motif + shared direction for the whole post, then supplies a unique prompt for
-the hero and each section. This module fills those prompts into the Codex CLI
-image backend so the hero and body images read as one designed set while each
-depicts its own part of the article.
-
-Generation backend: Codex CLI (ChatGPT subscription OAuth, £0 cost).
-No FAL, no Pollinations, no Baoyu content-engine pipeline.
+P11 persists an immutable visual plan and a planned provenance manifest before
+any legacy image generator runs. It does not change the current provider,
+provider configuration or publishing path; P10 owns that future replacement.
 """
 from __future__ import annotations
+
 
 import json
 import re
@@ -22,6 +18,9 @@ from typing import Optional
 import config
 from blog import art_director
 from blog.art_director import build_art_brief, fallback_brief, compose_prompt
+from blog.asset_manifest import AssetManifestError, save_asset_manifest
+from blog.reference_catalog import CatalogIntegrityError
+from blog.visual_plan import VisualPlanError, save_visual_plan
 
 
 # ── Rotation state (persisted so variety survives cron restarts) ──
@@ -268,9 +267,43 @@ def illustrate(
           f"palette={brief.get('palette','')[:60]!r} motif={brief.get('motif','')[:60]!r}")
     _record_style(brief["style"])
 
+    # P11 contract seam: select only reviewed core references, write the plan
+    # and planned provenance before the unchanged legacy generator is reached.
+    planned_prompts = {"hero": compose_prompt(brief["hero_prompt"], brief)}
+    planned_outputs = {"hero": "hero.png"}
+    section_prompts = brief.get("section_prompts", {})
+    body_lines = body_md.splitlines()
+    for index, heading in enumerate(headings, 1):
+        concept = section_prompts.get(heading) or _extract_section_text(body_lines, heading) or heading
+        key = f"section-{index:02d}"
+        planned_prompts[key] = compose_prompt(concept, brief)
+        planned_outputs[key] = f"section_{index:02d}.png"
+    try:
+        visual_plan = art_director.build_visual_plan_from_brief(
+            draft,
+            headings,
+            brief,
+            catalog_root=Path(config.IMAGERY_ANCHORS_DIR),
+        )
+        planned_manifest = art_director.build_planned_asset_manifest_from_plan(
+            visual_plan,
+            planned_prompts,
+            planned_outputs,
+            text_policy=str(brief.get("text_policy", "none")),
+        )
+        visual_plan_path = save_visual_plan(visual_plan, out_path / "visual-plan.json")
+        asset_manifest_path = save_asset_manifest(
+            planned_manifest, out_path / "asset-manifest.json"
+        )
+    except (AssetManifestError, CatalogIntegrityError, OSError, ValueError, VisualPlanError) as exc:
+        print(f"[blog_illustrator] P11 visual contract failed — refusing generation: {exc}")
+        return result
+    result["visual_plan_path"] = str(visual_plan_path)
+    result["asset_manifest_path"] = str(asset_manifest_path)
+
     # ── Hero ────────────────────────────────────────────────
     hero_out = str(out_path / "hero.png")
-    hero_prompt = compose_prompt(brief["hero_prompt"], brief)
+    hero_prompt = planned_prompts["hero"]
     gen = _generate_codex_image(hero_prompt, hero_out, raise_on_cap=raise_on_cap)
     if gen and Path(gen).exists():
         result["hero_path"] = gen
@@ -281,12 +314,10 @@ def illustrate(
 
     # ── Sections ────────────────────────────────────────────
     if headings:
-        body_lines = body_md.splitlines()
-        section_prompts = brief.get("section_prompts", {})
         for idx, heading in enumerate(headings, 1):
-            concept = section_prompts.get(heading) or _extract_section_text(body_lines, heading) or heading
-            section_out = str(out_path / f"section_{idx:02d}.png")
-            prompt = compose_prompt(concept, brief)
+            key = f"section-{idx:02d}"
+            section_out = str(out_path / planned_outputs[key])
+            prompt = planned_prompts[key]
             gen_sec = _generate_codex_image(prompt, section_out, raise_on_cap=raise_on_cap)
             if gen_sec and Path(gen_sec).exists():
                 result["section_paths"][heading] = gen_sec
