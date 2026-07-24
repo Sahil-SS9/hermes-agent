@@ -39,12 +39,12 @@ class TestJaccardSimilarity:
     def test_partial_overlap(self):
         sim = _jaccard_similarity("build feature for dashboard", "build feature for ui")
         assert 0.0 < sim < 1.0
-        # Common words: "build", "feature", "for" (all > 2 chars)
-        # Unique: "dashboard", "ui" (but "ui" is 2 chars, filtered)
-        # So tokens a = {build, feature, dashboard}, b = {build, feature}
-        # intersection = {build, feature} = 2, union = {build, feature, dashboard} = 3
-        # sim = 2/3
-        assert abs(sim - 2/3) < 0.01
+        # Common words: "build", "feature", "for" (all > 2 chars, all pass filter)
+        # "ui" is 2 chars, filtered by _tokenize
+        # tokens a = {build, feature, for, dashboard}, b = {build, feature, for}
+        # intersection = {build, feature, for} = 3, union = {build, feature, for, dashboard} = 4
+        # sim = 3/4 = 0.75
+        assert abs(sim - 0.75) < 0.01
 
     def test_empty_string(self):
         assert _jaccard_similarity("", "test") == 0.0

@@ -142,7 +142,7 @@ class TestCaptureDuplicate:
         assert result.card.dedup_status == IdeaStatus.DUPLICATE
         assert len(result.card.dedup_matches) > 0
         assert "Potential duplicate" in result.message
-        assert "kanban: existing task" in result.message
+        assert "**kanban**: existing task" in result.message
 
     def test_duplicate_card_can_still_be_confirmed(self):
         """Even duplicates can be confirmed — the card is presented for Sahil's choice."""
