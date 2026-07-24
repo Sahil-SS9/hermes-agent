@@ -42,25 +42,48 @@ shape would mean either fabricating a `register(ctx)` that only registers
 dashboard assets, or stuffing `dashboard/manifest.json` into a plugin
 that does no actual plugin work.
 
-## Recommendation
+## Recommendation (revised after dependency check)
 
-Move all 10 directories to `dashboard/src/<name>/`. Treat them as
-dashboard sub-applications, not plugins. The `manifest.json` becomes the
-registration mechanism (it already is one). The Python `plugin_api.py`
-stays where it is — the dashboard backend has a known place for
-per-fragment API hooks.
+**Do not move the dashboard fragments.** The runtime API contract is
+hardcoded by upstream:
 
-After the move, the spec's `dashboard/{src/, package.json}` is the
-authoritative home for all dashboard work. The `plugins/` tree contains
-only true plugin-shaped code: memory providers, image-gen backends, web
-providers, browser providers, model providers, observability, platforms,
-cron providers, security-guidance, disk-cleanup, prompt-optimizer, spotify,
-google_meet, teams_pipeline, tts.
+```python
+# hermes_cli/web_server.py:15963-15967
+"""Scan plugins/*/dashboard/manifest.json for dashboard extensions.
 
-**Proposed commit:** commit 8 of the repo-reorg plan ("Move dashboard
-fragments to `dashboard/src/`"). This ADR is filed first so the
-reclassification is captured as a structural decision, not a one-off
-move.
+1. User plugins:    ~/.hermes/plugins/<name>/dashboard/manifest.json
+2. Bundled plugins: <repo>/plugins/<name>/dashboard/manifest.json
+```
+
+Tests assert the same contract:
+- `tests/hermes_cli/test_web_server.py:5974` — `GET /api/plugins/hermes-achievements/overview`
+- `tests/plugins/test_achievements_plugin.py:13` — `plugins/hermes-achievements/tests/`
+- `tests/plugins/test_plugin_dashboard_auth_contract.py:55` — bundled plugins expected
+
+The handoff's CRITICAL CONSTRAINTS forbid patching `hermes_cli/`. So
+moving the dashboard fragments under `dashboard/src/<name>/` would
+silently break the dashboard at runtime.
+
+## Decision
+
+Keep `plugins/kanban/`, `plugins/hermes-achievements/`, and the 8
+`plugins/kensei-*/` directories in place. They continue to ship as
+plugin-shaped entries but their `plugin.yaml` (if added) would be a
+no-op — they exist solely as the bundle unit the dashboard loader
+expects.
+
+If a future Kensei fork-patch policy is adopted for
+`hermes_cli/web_server.py:_discover_dashboard_plugins`, the move
+becomes possible atomically. Until then, the spec target
+`dashboard/{src/, package.json}` is forward-only for any NEW
+dashboard work that does not need plugin discovery.
+
+## Revisit triggers
+
+- Upstream renames the discovery path → consolidate.
+- Kensei fork-patch policy for `hermes_cli/web_server.py` adopted → move atomically.
+- A test that specifically asserts `dashboard/src/<name>/manifest.json`
+  discovery is added (no such test exists today) → reconsider.
 
 ## Alternative considered
 
