@@ -95,20 +95,23 @@ scripts/.backup-staleness-state.json
 scripts/.paper_cache/
 
 # Test cache / timing output from local pytest runs (re-emitted each run;
-# never a code change — see #commit-1 / repo-reorg 2026-07-24).
+# Test cache / timing output from local pytest runs (re-emitted each run;
+# never a code change — see repo-reorg 2026-07-24).
 test_durations.json
 
 # Per-profile runtime state (caches, in-progress process lists, Discord
 # thread maps, mrhermagi lesson-fetch status, prompt-optimizer metrics DB).
 # See docs/adr/0005-tracked-runtime-state.md for the 33 already-tracked
 # files that need a separate human decision to untrack.
-*/cache/
-*/image_cache/
-*/audio_cache/
-*/processes.json
-*/discord_threads.json
-*/disk-cleanup/
-*/arxiv_fetch_status.md
+**/cache/
+**/image_cache/
+**/audio_cache/
+**/processes.json
+**/discord_threads.json
+**/disk-cleanup/
+**/arxiv_fetch_status.md
+**/*.bak-*
+**/index-cache/
 plugins/prompt-optimizer/metrics.db
 plugins/prompt-optimizer/metrics.db-*
 
