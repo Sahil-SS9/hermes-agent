@@ -12,6 +12,7 @@ can surface them to Sahil.
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass, field
 from enum import Enum
@@ -73,6 +74,29 @@ def _jaccard_similarity(a: str, b: str) -> float:
     return len(ta & tb) / len(ta | tb)
 
 
+def _within_30_days(date_str: str) -> bool:
+    """Check if an ISO date string is within the last 30 days.
+
+    session_search has no native date filter, so we post-filter on the
+    ``when`` field.  Returns True for unparseable dates (best-effort —
+    a session with a malformed date is included rather than excluded).
+    """
+    from datetime import datetime, timezone, timedelta
+
+    try:
+        # session_search returns ISO timestamps like "2026-07-20" or
+        # "2026-07-20T14:32:00+00:00".  Handle both.
+        dt = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        return True  # Best-effort: include if we can't parse the date
+
+    now = datetime.now(timezone.utc)
+    # If the parsed datetime is naive, assume UTC
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return (now - dt) <= timedelta(days=30)
+
+
 # Thresholds per source — how similar is "duplicate"?
 SIMILARITY_THRESHOLD = 0.35
 
@@ -105,24 +129,33 @@ class DedupChecker:
     # -- Kanban ----------------------------------------------------------
 
     def _check_kanban(self, idea_text: str) -> list[DedupMatch]:
-        """Query open Kanban tasks for title/body similarity."""
+        """Query open Kanban tasks for title/body similarity.
+
+        Only open tasks (todo, ready, running, triage, blocked) are
+        considered — done and archived tasks are skipped.  The SQL
+        ``include_archived=False`` already excludes archived at the
+        query level; the Python-side ``done`` skip is intentional
+        because we only dedup against active work.
+        """
         matches: list[DedupMatch] = []
         if self._kanban_conn is None:
             try:
                 from hermes_cli import kanban_db as kb
-                _, conn = kb.connect()
+                conn = kb.connect()
             except Exception:
                 logger.debug("Kanban unavailable for dedup", exc_info=True)
                 return matches
         else:
             conn = self._kanban_conn
-
-        try:
             from hermes_cli import kanban_db as kb
 
+        try:
             tasks = kb.list_tasks(conn, include_archived=False)
             for task in tasks:
-                # Skip done/archived — only open work matters
+                # Skip done and archived — only open work matters for dedup.
+                # include_archived=False handles archived at the SQL level,
+                # but we also check here for defense-in-depth (and so
+                # tests with mocked list_tasks that ignore the kwarg work).
                 if task.status in ("done", "archived"):
                     continue
                 title_sim = _jaccard_similarity(idea_text, task.title or "")
@@ -164,16 +197,27 @@ class DedupChecker:
                 return matches
 
         try:
-            import json
             raw = search_fn(query=idea_text, limit=5)
             data = json.loads(raw) if isinstance(raw, str) else raw
-            sessions = data.get("data", data) if isinstance(data, dict) else []
-            if not isinstance(sessions, list):
-                sessions = sessions.get("sessions", []) if isinstance(sessions, dict) else []
+            # Real session_search discovery returns {"results": [...], "count": N, ...}
+            if isinstance(data, dict):
+                sessions = data.get("results", [])
+            elif isinstance(data, list):
+                sessions = data
+            else:
+                sessions = []
 
             for sess in sessions:
                 snippet = ""
                 if isinstance(sess, dict):
+                    # Enforce 30-day window (PRD acceptance criterion #2).
+                    # session_search has no native date filter; post-filter
+                    # on the ``when`` field.  Sessions without a date are
+                    # included (best-effort — date may be missing).
+                    when_str = sess.get("when", sess.get("created_at", ""))
+                    if when_str:
+                        if not _within_30_days(when_str):
+                            continue
                     snippet = sess.get("snippet", sess.get("title", ""))
                     sid = sess.get("session_id", sess.get("id", ""))
                     sim = _jaccard_similarity(idea_text, snippet)
@@ -184,7 +228,7 @@ class DedupChecker:
                             summary=snippet[:200],
                             ref_id=str(sid),
                             score=round(sim, 3),
-                            extra={"when": sess.get("when", sess.get("created_at", ""))},
+                            extra={"when": when_str},
                         ))
         except Exception:
             logger.debug("session_search dedup query failed", exc_info=True)
@@ -194,23 +238,28 @@ class DedupChecker:
     # -- Mnemosyne --------------------------------------------------------
 
     def _check_mnemosyne(self, idea_text: str) -> list[DedupMatch]:
-        """Query Mnemosyne for semantically similar memories."""
+        """Query Mnemosyne for semantically similar memories.
+
+        Mnemosyne is accessed via the tool injection layer at runtime.
+        When the ``mnemosyne_recall_fn`` is not injected, the dedup
+        gracefully reports no matches from this source.  The caller
+        (agent loop / skill) is responsible for wiring the real recall
+        function when available.
+        """
         matches: list[DedupMatch] = []
         recall_fn = self._mnemosyne_recall_fn
 
         if recall_fn is None:
-            try:
-                # Mnemosyne tools are injected at runtime; use a lazy import
-                from hermes_state.memory.mnemosyne_client import recall as mnemosyne_recall
-                recall_fn = mnemosyne_recall
-            except Exception:
-                logger.debug("Mnemosyne unavailable for dedup", exc_info=True)
-                return matches
+            # No injected recall function — Mnemosyne dedup is a no-op.
+            # The agent/skill layer wires the real recall function at
+            # runtime via the constructor.  We don't guess an import
+            # path here because Mnemosyne's entry point depends on
+            # the configured memory provider.
+            return matches
 
         try:
             results = recall_fn(query=idea_text, limit=5)
             if isinstance(results, str):
-                import json
                 results = json.loads(results)
             if isinstance(results, dict):
                 memories = results.get("memories", results.get("results", []))

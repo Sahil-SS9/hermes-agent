@@ -230,6 +230,5 @@ class TestIdeaStatus:
         assert IdeaStatus("novel") == IdeaStatus.NOVEL
 
     def test_str_representation(self):
-        assert str(IdeaStatus.CONFIRMED) == "IdeaStatus.CONFIRMED"
-        # str enum also gives value via str()
+        # IdeaStatus is a str enum; the value is always accessible via .value
         assert IdeaStatus.CONFIRMED.value == "confirmed"

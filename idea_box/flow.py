@@ -15,8 +15,10 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Optional
 
 from idea_box.models import DedupResult, IdeaCard, IdeaStatus, SourceRef
@@ -300,16 +302,18 @@ class IdeaBoxFlow:
         # Fallback: use kanban_db directly
         try:
             from hermes_cli import kanban_db as kb
-            kb_module, conn = kb.connect()
-            new_id = kb_module.create_task(
-                conn,
-                title=title,
-                body=body,
-                assignee=assignee,
-                triage=triage,
-                created_by="idea-box",
-            )
-            conn.close()
+            conn = kb.connect()
+            try:
+                new_id = kb.create_task(
+                    conn,
+                    title=title,
+                    body=body,
+                    assignee=assignee,
+                    triage=triage,
+                    created_by="idea-box",
+                )
+            finally:
+                conn.close()
             return new_id
         except Exception as e:
             logger.error("Kanban task creation failed: %s", e)
@@ -325,8 +329,6 @@ class IdeaBoxFlow:
 
         # Fallback: write to the wiki directory directly
         try:
-            import os
-            from pathlib import Path
             wiki_path = Path(os.environ.get("WIKI_PATH", str(Path.home() / "wiki")))
             wiki_path.mkdir(parents=True, exist_ok=True)
 
@@ -334,7 +336,7 @@ class IdeaBoxFlow:
             ideas_dir = wiki_path / "raw" / "ideas"
             ideas_dir.mkdir(parents=True, exist_ok=True)
 
-            safe_id = (card.idea_id or "rejected").replace("/", "_")
+            safe_id = (card.idea_id or card.source.message_id or "rejected").replace("/", "_")
             filename = f"{action}-{safe_id}.md"
             filepath = ideas_dir / filename
 

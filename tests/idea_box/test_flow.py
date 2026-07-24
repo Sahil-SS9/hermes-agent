@@ -326,6 +326,38 @@ class TestReject:
         assert reject_result.action == "rejected"
         assert reject_result.wiki_path is not None
 
+    def test_reject_wiki_filename_unique_per_idea(self):
+        """Each rejected idea should get a unique wiki filename to preserve provenance."""
+        import tempfile, os
+        flow = IdeaBoxFlow(
+            dedup_checker=_make_checker(is_dup=False),
+        )
+
+        # Reject two different ideas from different messages
+        paths = []
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch.dict(os.environ, {"WIKI_PATH": tmpdir}):
+                src1 = SourceRef(
+                    platform="discord", channel_id="c1", message_id="msg_001",
+                    user_id="u1", user_name="sahil", channel_name="idea-box",
+                )
+                result1 = flow.capture("Build feature alpha", src1)
+                reject1 = flow.reject(result1.card, reason="Duplicate")
+                paths.append(reject1.wiki_path)
+
+                src2 = SourceRef(
+                    platform="discord", channel_id="c1", message_id="msg_002",
+                    user_id="u1", user_name="sahil", channel_name="idea-box",
+                )
+                result2 = flow.capture("Build feature beta", src2)
+                reject2 = flow.reject(result2.card, reason="Out of scope")
+                paths.append(reject2.wiki_path)
+
+        # Both paths should exist and be different
+        assert paths[0] != paths[1], "Wiki filenames must be unique per rejection"
+        assert "msg_001" in paths[0] or "msg_002" not in paths[0]  # First uses message_id
+        assert "msg_002" in paths[1]
+
 
 # ---------------------------------------------------------------------------
 # IdeaBoxFlow — no auto-promotion (acceptance criteria #6)

@@ -143,14 +143,19 @@ class TestDedupCheckerSessionSearch:
     def test_session_search_match(self):
         """When session_search returns a similar session, it's a match."""
         mock_search_fn = MagicMock(return_value=json.dumps({
-            "sessions": [
+            "success": True,
+            "mode": "discover",
+            "query": "test",
+            "results": [
                 {
                     "session_id": "s_001",
                     "title": "Build dashboard feature",
                     "snippet": "Discussed building a dashboard feature for analytics",
                     "when": "2026-07-20",
                 }
-            ]
+            ],
+            "count": 1,
+            "sessions_searched": 10
         }))
         checker = DedupChecker(
             kanban_conn=MagicMock(),  # empty kanban
@@ -166,14 +171,16 @@ class TestDedupCheckerSessionSearch:
     def test_session_search_no_match(self):
         """When session_search returns unrelated sessions, no match."""
         mock_search_fn = MagicMock(return_value=json.dumps({
-            "sessions": [
+            "success": True,
+            "results": [
                 {
                     "session_id": "s_002",
                     "title": "Unrelated topic",
                     "snippet": "Discussed something completely different",
                     "when": "2026-07-20",
                 }
-            ]
+            ],
+            "count": 1,
         }))
         checker = DedupChecker(
             kanban_conn=MagicMock(),
@@ -199,6 +206,56 @@ class TestDedupCheckerSessionSearch:
         session_matches = [m for m in result.matches if m["source"] == "session_search"]
         assert len(session_matches) == 0
 
+    def test_session_search_30_day_window_filters_old_sessions(self):
+        """Sessions older than 30 days should be excluded from dedup."""
+        from datetime import datetime, timezone, timedelta
+        old_date = (datetime.now(timezone.utc) - timedelta(days=60)).isoformat()
+        mock_search_fn = MagicMock(return_value=json.dumps({
+            "success": True,
+            "results": [
+                {
+                    "session_id": "s_old",
+                    "title": "Build dashboard feature for analytics",
+                    "snippet": "Build dashboard feature for analytics discussion",
+                    "when": old_date,
+                }
+            ],
+            "count": 1,
+        }))
+        checker = DedupChecker(
+            kanban_conn=MagicMock(),
+            session_search_fn=mock_search_fn,
+        )
+        with patch("hermes_cli.kanban_db.list_tasks", return_value=[]):
+            result = checker.check("Build dashboard feature for analytics")
+        session_matches = [m for m in result.matches if m["source"] == "session_search"]
+        assert len(session_matches) == 0, "Old session should be filtered by 30-day window"
+
+    def test_session_search_recent_session_included(self):
+        """Sessions within the last 30 days should be included in dedup."""
+        from datetime import datetime, timezone, timedelta
+        recent_date = (datetime.now(timezone.utc) - timedelta(days=5)).isoformat()
+        mock_search_fn = MagicMock(return_value=json.dumps({
+            "success": True,
+            "results": [
+                {
+                    "session_id": "s_recent",
+                    "title": "Build dashboard feature for analytics",
+                    "snippet": "Build dashboard feature for analytics discussion",
+                    "when": recent_date,
+                }
+            ],
+            "count": 1,
+        }))
+        checker = DedupChecker(
+            kanban_conn=MagicMock(),
+            session_search_fn=mock_search_fn,
+        )
+        with patch("hermes_cli.kanban_db.list_tasks", return_value=[]):
+            result = checker.check("Build dashboard feature for analytics")
+        session_matches = [m for m in result.matches if m["source"] == "session_search"]
+        assert len(session_matches) >= 1, "Recent session should not be filtered"
+
 
 class TestDedupCheckerMnemosyne:
     def test_mnemosyne_match(self):
@@ -214,7 +271,7 @@ class TestDedupCheckerMnemosyne:
         })
         checker = DedupChecker(
             kanban_conn=MagicMock(),
-            session_search_fn=MagicMock(return_value='{"sessions": []}'),
+            session_search_fn=MagicMock(return_value='{"results": []}'),
             mnemosyne_recall_fn=mock_recall_fn,
         )
         with patch("hermes_cli.kanban_db.list_tasks", return_value=[]):
@@ -236,7 +293,7 @@ class TestDedupCheckerMnemosyne:
         })
         checker = DedupChecker(
             kanban_conn=MagicMock(),
-            session_search_fn=MagicMock(return_value='{"sessions": []}'),
+            session_search_fn=MagicMock(return_value='{"results": []}'),
             mnemosyne_recall_fn=mock_recall_fn,
         )
         with patch("hermes_cli.kanban_db.list_tasks", return_value=[]):
@@ -249,7 +306,7 @@ class TestDedupCheckerMnemosyne:
         mock_recall_fn = MagicMock(side_effect=Exception("Mnemosyne offline"))
         checker = DedupChecker(
             kanban_conn=MagicMock(),
-            session_search_fn=MagicMock(return_value='{"sessions": []}'),
+            session_search_fn=MagicMock(return_value='{"results": []}'),
             mnemosyne_recall_fn=mock_recall_fn,
         )
         with patch("hermes_cli.kanban_db.list_tasks", return_value=[]):
@@ -262,7 +319,7 @@ class TestDedupCheckerAggregation:
         """All three sources should appear in checked_sources even if no matches."""
         checker = DedupChecker(
             kanban_conn=MagicMock(),
-            session_search_fn=MagicMock(return_value='{"sessions": []}'),
+            session_search_fn=MagicMock(return_value='{"results": []}'),
             mnemosyne_recall_fn=MagicMock(return_value='{"memories": []}'),
         )
         with patch("hermes_cli.kanban_db.list_tasks", return_value=[]):
@@ -283,14 +340,16 @@ class TestDedupCheckerAggregation:
         checker = DedupChecker(
             kanban_conn=MagicMock(),
             session_search_fn=MagicMock(return_value=json.dumps({
-                "sessions": [
+                "success": True,
+                "results": [
                     {
                         "session_id": "s_001",
                         "title": "Build dashboard feature",
                         "snippet": "Build dashboard feature discussion",
                         "when": "2026-07-20",
                     }
-                ]
+                ],
+                "count": 1,
             })),
             mnemosyne_recall_fn=MagicMock(return_value={
                 "memories": [
