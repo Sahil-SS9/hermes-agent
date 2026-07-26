@@ -14,10 +14,13 @@ from unittest.mock import MagicMock, patch, PropertyMock
 
 import pytest
 
-# Add the scripts directory to path so we can import the module
-# Use the actual scripts path (not HERMES_HOME which gets overridden by fixtures)
+# Pre-import the real mcp SDK before adding the scripts directory to sys.path.
+# The scripts dir contains a local mcp/ package that shadows the installed SDK.
+import mcp as _real_mcp
 _SCRIPTS_DIR = Path("/home/kensei/.hermes/scripts")
 sys.path.insert(0, str(_SCRIPTS_DIR))
+# Restore the real mcp in sys.modules so the shadowed package doesn't win.
+sys.modules["mcp"] = _real_mcp
 
 # ---------------------------------------------------------------------------
 # Mock Mnemosyne at module level so create_app() doesn't raise.

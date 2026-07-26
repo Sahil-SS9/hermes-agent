@@ -3126,14 +3126,18 @@ def test_default_spawn_passes_task_skills_verbatim(kanban_home, monkeypatch):
     )
 
 
-def test_dispatch_rejects_invisible_forced_skill_before_spawn(kanban_home):
-    """Regression fixture for t_d05cdaac: invisible forced skill blocks pre-spawn."""
+def test_dispatch_rejects_invisible_forced_skill_when_broker_denies(kanban_home, monkeypatch):
+    """Denied task-scoped grants must block an invisible forced skill pre-spawn."""
     profile_home = kanban_home / "profiles" / "orchestrator"
     visible_skill = profile_home / "skills" / "devops" / "kanban-orchestrator"
     visible_skill.mkdir(parents=True)
     (visible_skill / "SKILL.md").write_text(
         "---\nname: kanban-orchestrator\ndescription: visible\n---\n\n# Visible\n",
         encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "tools.skill_grants.grant_skill",
+        lambda **_kwargs: {"granted": False, "reason": "fixture denial"},
     )
 
     spawn_calls = []

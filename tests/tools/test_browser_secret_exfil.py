@@ -7,6 +7,13 @@ import pytest
 from tests.content_trust_helpers import loads_fenced_json
 
 
+def _loads_extract_result(value: str):
+    """Extract results are fenced; early backend errors are typed plain JSON."""
+    if "<<<UNTRUSTED_DOCUMENT>>>" in value:
+        return loads_fenced_json(value)
+    return json.loads(value)
+
+
 @pytest.fixture(autouse=True)
 def _ensure_redaction_enabled(monkeypatch):
     """Ensure redaction is active regardless of host HERMES_REDACT_SECRETS."""
@@ -134,7 +141,7 @@ class TestWebExtractSecretExfil:
             "https://example.com/blog?session=summer",
         ):
             result = await web_extract_tool(urls=[url])
-            parsed = loads_fenced_json(result)
+            parsed = _loads_extract_result(result)
             # Not blocked by the credential-query guard (may fail for other
             # reasons like a missing backend, but never with this specific
             # error string).
@@ -146,7 +153,7 @@ class TestWebExtractSecretExfil:
         from tools.web_tools import web_extract_tool
         # This will fail due to no API key, but should NOT be blocked by secret check
         result = await web_extract_tool(urls=["https://example.com"])
-        parsed = loads_fenced_json(result)
+        parsed = _loads_extract_result(result)
         # Should fail for API/config reason, not secret blocking
         assert "API key" not in parsed.get("error", "") or "Blocked" not in parsed.get("error", "")
 
