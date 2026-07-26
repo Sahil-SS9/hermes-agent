@@ -106,20 +106,12 @@
     }
     return { postizEmail: "", postizPassword: "" };
   }
-  function getDashboardToken() {
-    return window.__HERMES_SESSION_TOKEN__ ?? null;
-  }
   async function pluginFetch(path, init = {}) {
-    const token = getDashboardToken();
     const headers = new Headers(init.headers);
-    if (token) {
-      headers.set("Authorization", `Bearer ${token}`);
-      headers.set("X-Hermes-Session-Token", token);
-    }
     if (init.body && !headers.has("Content-Type")) {
       headers.set("Content-Type", "application/json");
     }
-    return fetch(`${PLUGIN_BASE}${path}`, { ...init, headers });
+    return SDK.authedFetch(`${PLUGIN_BASE}${path}`, { ...init, headers });
   }
   async function loginPostiz(creds) {
     const r = await pluginFetch("/login", {

@@ -175,9 +175,7 @@
   }
 
   // src/index.tsx
-  function getToken() {
-    return window.__HERMES_SESSION_TOKEN__ ?? null;
-  }
+
   function chatHref(sessionId) {
     const embedded = window.__HERMES_DASHBOARD_EMBEDDED_CHAT__;
     if (embedded) {
@@ -186,15 +184,7 @@
     return "/kensei-console";
   }
   async function authedJson(path) {
-    const token = getToken();
-    const headers = {};
-    if (token) {
-      headers["Authorization"] = `Bearer ${token}`;
-      headers["X-Hermes-Session-Token"] = token;
-    }
-    const r = await fetch(path, { headers });
-    if (!r.ok) throw new Error(`${path} \u2192 ${r.status}`);
-    return r.json();
+    return SDK.fetchJSON(path);
   }
   async function fetchSessions() {
     const data = await authedJson("/api/sessions");

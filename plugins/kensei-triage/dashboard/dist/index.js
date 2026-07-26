@@ -87,9 +87,7 @@
   ]);
   var LONG_RUNNING_THRESHOLD_MS = 2 * 60 * 60 * 1e3;
   var COMPLETED_LIMIT = 50;
-  function getToken() {
-    return window.__HERMES_SESSION_TOKEN__ ?? null;
-  }
+
   function chatHref(sessionId) {
     const embedded = window.__HERMES_DASHBOARD_EMBEDDED_CHAT__;
     if (embedded) {
@@ -98,15 +96,7 @@
     return "/kensei-console";
   }
   async function fetchSessions() {
-    const token = getToken();
-    const headers = {};
-    if (token) {
-      headers["Authorization"] = `Bearer ${token}`;
-      headers["X-Hermes-Session-Token"] = token;
-    }
-    const r = await fetch("/api/sessions", { headers });
-    if (!r.ok) throw new Error(`sessions fetch failed: ${r.status}`);
-    const data = await r.json();
+    const data = await SDK.fetchJSON("/api/sessions");
     return Array.isArray(data) ? data : data.sessions ?? [];
   }
   function formatRelative(iso) {
