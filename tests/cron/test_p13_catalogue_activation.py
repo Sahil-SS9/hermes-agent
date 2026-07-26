@@ -155,3 +155,71 @@ def test_mutating_actions_require_exact_go_authority() -> None:
         with pytest.raises(PermissionError):
             module.require_go_authority(value)
     module.require_go_authority("!go")
+
+
+def test_select_authorised_wave_rejects_entries_not_explicitly_stage_approved(
+    tmp_path: Path,
+) -> None:
+    module = _module()
+    path, digest = _catalogue(tmp_path)
+    catalogue = module.load_catalogue(path, digest)
+    disposition = {
+        "catalogue_sha256": digest,
+        "entries": [
+            {
+                "source_instance": "VPS:cron/jobs.json:source-a",
+                "audit_no_stage_state": "NO_STAGE_PENDING_ROW_PROOF",
+            },
+            {
+                "source_instance": "VPS:cron/jobs.json:source-b",
+                "audit_no_stage_state": "NO_STAGE_PENDING_ROW_PROOF",
+            },
+        ],
+    }
+
+    with pytest.raises(ValueError, match="not stage-approved"):
+        module.select_authorised_wave(
+            catalogue,
+            disposition,
+            "WAVE_1_BOUNDED_SCRIPTS",
+        )
+
+
+def test_main_plan_requires_a_checksum_bound_disposition_matrix(tmp_path: Path) -> None:
+    module = _module()
+    path, digest = _catalogue(tmp_path)
+
+    with pytest.raises(SystemExit, match="--disposition is required"):
+        module.main(
+            [
+                "plan",
+                "--catalogue",
+                str(path),
+                "--sha256",
+                digest,
+                "--wave",
+                "WAVE_1_BOUNDED_SCRIPTS",
+            ]
+        )
+
+
+def test_select_authorised_wave_requires_complete_matrix_coverage(tmp_path: Path) -> None:
+    module = _module()
+    path, digest = _catalogue(tmp_path)
+    catalogue = module.load_catalogue(path, digest)
+    incomplete = {
+        "catalogue_sha256": digest,
+        "entries": [
+            {
+                "source_instance": "VPS:cron/jobs.json:source-a",
+                "audit_no_stage_state": "STAGE_APPROVED",
+            },
+        ],
+    }
+
+    with pytest.raises(ValueError, match="entry set mismatch"):
+        module.select_authorised_wave(
+            catalogue,
+            incomplete,
+            "WAVE_1_BOUNDED_SCRIPTS",
+        )

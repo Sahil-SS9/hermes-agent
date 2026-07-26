@@ -80,6 +80,48 @@ def select_wave(catalogue: dict[str, Any], wave: str) -> list[dict[str, Any]]:
     return selected
 
 
+def select_authorised_wave(
+    catalogue: dict[str, Any],
+    disposition: dict[str, Any],
+    wave: str,
+) -> list[dict[str, Any]]:
+    """Return a catalogue wave only when every row is explicitly stage-approved."""
+    matrix_entries = [
+        item
+        for item in disposition.get("entries", [])
+        if isinstance(item, dict) and item.get("source_instance")
+    ]
+    states = {
+        item["source_instance"]: item.get("audit_no_stage_state")
+        for item in matrix_entries
+    }
+    catalogue_sources = {
+        entry.get("source_instance") for entry in catalogue.get("entries", [])
+    }
+    if (
+        len(matrix_entries) != len(states)
+        or set(states) != catalogue_sources
+        or len(matrix_entries) != len(catalogue_sources)
+    ):
+        raise ValueError("disposition matrix entry set mismatch")
+    selected = select_wave(catalogue, wave)
+    for entry in selected:
+        source_instance = entry["source_instance"]
+        if states.get(source_instance) != "STAGE_APPROVED":
+            raise ValueError(f"entry is not stage-approved: {source_instance}")
+    return selected
+
+
+def load_disposition_matrix(path: Path, catalogue_sha256: str) -> dict[str, Any]:
+    """Load the independent row-authority matrix bound to this catalogue."""
+    matrix = json.loads(path.read_text(encoding="utf-8"))
+    if matrix.get("catalogue_sha256") != catalogue_sha256:
+        raise ValueError("disposition matrix catalogue checksum mismatch")
+    if not isinstance(matrix.get("entries"), list):
+        raise ValueError("disposition matrix entries must be a list")
+    return matrix
+
+
 def _schedule_text(schedule: Any, display: str | None = None) -> str:
     if isinstance(schedule, str):
         return schedule
@@ -293,6 +335,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("action", choices=["plan", "stage", "enable", "pause"])
     parser.add_argument("--catalogue", type=Path, required=True)
     parser.add_argument("--sha256", required=True)
+    parser.add_argument("--disposition", type=Path)
     parser.add_argument("--wave")
     parser.add_argument("--receipt", type=Path)
     return parser
@@ -305,7 +348,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.action in {"plan", "stage"}:
         if not args.wave:
             raise SystemExit("--wave is required for plan/stage")
-        entries = select_wave(catalogue, args.wave)
+        if not args.disposition:
+            raise SystemExit("--disposition is required for plan/stage")
+        disposition = load_disposition_matrix(args.disposition, args.sha256)
+        entries = select_authorised_wave(catalogue, disposition, args.wave)
         if args.action == "plan":
             print(json.dumps({"wave": args.wave, "jobs": len(entries), "mutation": False}, indent=2))
             return 0
