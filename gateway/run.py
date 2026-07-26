@@ -17981,7 +17981,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # so changing the mode busts the cache and rebuilds the agent
             # with the new ephemeral prompt.  auto returns None (no overlay)
             # so the existing combined_ephemeral is unchanged.
-            _session_agent_mode = self.session_store.get_agent_mode(session_key)
+            # Some focused GatewayRunner fixtures intentionally omit a full
+            # SessionStore.  Missing mode support is equivalent to the default
+            # ``auto`` mode; a real SessionStore still supplies get_agent_mode.
+            _session_store = getattr(self, "session_store", None)
+            _get_agent_mode = getattr(_session_store, "get_agent_mode", None)
+            _session_agent_mode = (
+                _get_agent_mode(session_key)
+                if callable(_get_agent_mode)
+                else "auto"
+            )
             if _session_agent_mode and _session_agent_mode != "auto":
                 from hermes_cli.mode_prompts import get_mode_prompt as _gmp
                 _mode_prompt = _gmp(_session_agent_mode)
