@@ -1047,6 +1047,61 @@ def _normalized_inference_axes(job: Dict[str, Any]) -> Tuple[Optional[str], Opti
     )
 
 
+class ContextFromCycleError(ValueError):
+    """Raised when a prospective cron dependency graph contains a cycle."""
+
+
+def _context_from_refs(job: Dict[str, Any]) -> List[str]:
+    """Return a job's stored context dependencies in normalized list form."""
+    raw = job.get("context_from")
+    if isinstance(raw, str):
+        value = raw.strip()
+        return [value] if value else []
+    if isinstance(raw, list):
+        return [str(ref).strip() for ref in raw if str(ref).strip()]
+    return []
+
+
+def _validate_context_from_acyclic(jobs: List[Dict[str, Any]]) -> None:
+    """Reject cycles in the prospective jobs graph before it is persisted.
+
+    References to absent jobs are ignored here: reference-existence validation
+    belongs to the caller/tool boundary, while legacy jobs may already contain
+    stale references. A stale reference still participates if that ID is added
+    to the prospective graph and would close a cycle.
+    """
+    graph = {
+        str(job["id"]): _context_from_refs(job)
+        for job in jobs
+        if job.get("id")
+    }
+    state: Dict[str, int] = {}
+    path: List[str] = []
+
+    def visit(job_id: str) -> None:
+        marker = state.get(job_id, 0)
+        if marker == 2:
+            return
+        if marker == 1:
+            cycle_start = path.index(job_id)
+            cycle = path[cycle_start:] + [job_id]
+            raise ContextFromCycleError(
+                "context_from dependency cycle: " + " -> ".join(cycle)
+            )
+
+        state[job_id] = 1
+        path.append(job_id)
+        for dependency_id in graph.get(job_id, []):
+            if dependency_id in graph:
+                visit(dependency_id)
+        path.pop()
+        state[job_id] = 2
+
+    for job_id in graph:
+        if state.get(job_id, 0) == 0:
+            visit(job_id)
+
+
 def create_job(
     prompt: Optional[str],
     schedule: str,
@@ -1245,6 +1300,7 @@ def create_job(
 
     with _jobs_lock():
         jobs = load_jobs()
+        _validate_context_from_acyclic([*jobs, job])
         jobs.append(job)
         save_jobs(jobs)
     _record_cron_activity(
@@ -1406,6 +1462,9 @@ def update_job(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]
                     )
                 updated["next_run_at"] = next_run
 
+            prospective_jobs = [*jobs]
+            prospective_jobs[i] = updated
+            _validate_context_from_acyclic(prospective_jobs)
             jobs[i] = updated
             save_jobs(jobs)
             normalized = _normalize_job_record(jobs[i])
