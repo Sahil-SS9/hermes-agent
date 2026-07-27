@@ -60,6 +60,12 @@ DOMAIN_LEADS = {
 
 DEFAULT_ESCALATION = "kensei-review"
 
+# P13 isolation: when --dry-run is passed, every write path (task UPDATE,
+# task_events INSERT) is suppressed. Read paths (board scan, skill map
+# build, classification) run unchanged so the proposed reroutes are
+# still computed and printed.
+_DRY_RUN = False
+
 # ─── Helpers ──────────────────────────────────────────────────────────────
 
 def get_board_paths():
@@ -202,6 +208,13 @@ def scan_and_reroute(db_path, board_label, skill_map):
         old_assignee = current_assignee or "(unassigned)"
         reason = f"Auto-rerouted from {old_assignee} to {new_assignee} — missing forced skill(s): {', '.join(missing_skills)}"
 
+        if _DRY_RUN:
+            rerouted += 1
+            print(f"  ⊘ DRY-RUN REROUTE: {tid} '{row['title'][:50].strip()}'")
+            print(f"    From: {old_assignee} → To: {new_assignee}")
+            print(f"    Missing skills: {', '.join(missing_skills)}")
+            continue
+
         if write_lock is not None:
             with write_lock(conn):
                 cur.execute(
@@ -264,6 +277,9 @@ def scan_and_reroute(db_path, board_label, skill_map):
 # ─── Main ─────────────────────────────────────────────────────────────────
 
 def main():
+    global _DRY_RUN
+    if "--dry-run" in sys.argv:
+        _DRY_RUN = True
     boards = get_board_paths()
     if not boards:
         return  # silent — no kanban boards
