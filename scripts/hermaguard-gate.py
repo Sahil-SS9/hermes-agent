@@ -73,11 +73,12 @@ def _scan_boards():
             rows = conn.execute(
                 """
                 SELECT id, title, body, assignee, status, tier, pipeline_stage,
-                       created_at, updated_at, completed_at
+                       created_at, completed_at,
+                       COALESCE(completed_at, started_at, created_at) AS updated_at
                 FROM tasks
                 WHERE status IN ('review', 'running', 'done')
-                  AND updated_at >= ?
-                ORDER BY updated_at DESC
+                  AND COALESCE(completed_at, started_at, created_at) >= ?
+                ORDER BY COALESCE(completed_at, started_at, created_at) DESC
                 """,
                 (cutoff,),
             ).fetchall()
