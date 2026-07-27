@@ -11,20 +11,39 @@ from pathlib import Path
 
 HERMES = Path("/home/kensei/.hermes")
 
-# All gateway services to check
-SERVICES = [
-    ("kensei", "hermes-gateway.service"),
-    ("ceecee", "hermes-gateway-ceecee.service"),
-    ("denji", "hermes-gateway-denji.service"),
-    ("dezzy", "hermes-gateway-dezzy.service"),
-    ("gojo", "hermes-gateway-gojo.service"),
-    ("light", "hermes-gateway-light.service"),
-    ("misa-misa", "hermes-gateway-misa-misa.service"),
-    ("mrhermagi", "hermes-gateway-mrhermagi.service"),
-    ("octacon", "hermes-gateway-octacon.service"),
-    ("remii", "hermes-gateway-remii.service"),
-    ("wesker", "hermes-gateway-wesker.service"),
-]
+
+def discover_services():
+    """List every installed Hermes gateway service from systemd."""
+    try:
+        result = subprocess.run(
+            [
+                "systemctl",
+                "list-unit-files",
+                "--type=service",
+                "--no-legend",
+                "hermes-gateway*.service",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except Exception:
+        return []
+
+    services = []
+    for line in result.stdout.splitlines():
+        fields = line.split()
+        if not fields:
+            continue
+        service = fields[0]
+        if service == "hermes-gateway.service":
+            name = "kensei"
+        elif service.startswith("hermes-gateway-") and service.endswith(".service"):
+            name = service.removeprefix("hermes-gateway-").removesuffix(".service")
+        else:
+            continue
+        services.append((name, service))
+    return sorted(services)
 
 def check_service(name, service):
     """Check if a systemd service is active."""
@@ -72,7 +91,7 @@ def check_gateway_log_errors(name):
 def main():
     alerts = []
     
-    for name, service in SERVICES:
+    for name, service in discover_services():
         is_active = check_service(name, service)
         if not is_active:
             alerts.append(f"**{name}** - service NOT active ({service})")
