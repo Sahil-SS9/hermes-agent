@@ -1602,7 +1602,7 @@
       "paused_at": null,
       "paused_reason": null,
       "profile": null,
-      "prompt": "Read /home/kensei/.hermes/data/pending-investigation.json. If no uninvestigated tasks, output nothing (SILENT). For each uninvestigated task, delegate to the relevant specialist lead to investigate and produce 2-3 options with a default recommendation. Then produce ONE consolidated notification to Discord with all tasks + their recommendation tables. Do NOT execute any recommendations — only propose options. Use backticks for task IDs, bold for titles. End with a call-to-action: \"Reply with: do A on t_XXXX, B on t_YYYY or all defaults\".",
+      "prompt": "Read $HERMES_HOME/data/pending-investigation.json (falls back to ~/.hermes/data/pending-investigation.json). If no uninvestigated tasks, respond exactly [SILENT]. For each uninvestigated task, delegate to the relevant specialist lead to investigate and produce 2-3 options with a default recommendation. Then produce ONE consolidated notification to Discord with all tasks + their recommendation tables. Do NOT execute any recommendations — only propose options. Use backticks for task IDs, bold for titles. End with a call-to-action: \"Reply with: do A on t_XXXX, B on t_YYYY or all defaults\".",
       "provider": null,
       "repeat": {
         "completed": 146,
