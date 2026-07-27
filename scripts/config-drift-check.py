@@ -3,6 +3,8 @@ import os
 import sys
 from pathlib import Path
 
+DRY_RUN = os.environ.get("CONFIG_DRIFT_DRY_RUN", "") == "1"
+
 import yaml
 
 MIN_SKILLS = 45

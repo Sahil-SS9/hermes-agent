@@ -18,7 +18,7 @@ Detection rules:
 import os, sys, json, glob, time, re
 from datetime import datetime, timedelta
 
-HERMES = os.path.expanduser("~/.hermes")
+HERMES = os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes"))
 LOGBOARD = os.path.join(HERMES, "governance", "logboard")
 FOUR_HRS = 4 * 3600
 

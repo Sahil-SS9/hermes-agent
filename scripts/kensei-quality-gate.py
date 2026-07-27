@@ -14,6 +14,7 @@ import datetime as dt
 import sys
 import os
 import secrets
+import argparse
 from pathlib import Path
 
 # Cross-process write lock - prevents WAL checkpoint races
@@ -37,6 +38,8 @@ BOARDS = _board_compat.build_board_db_map([
 
 TZ = dt.timezone(dt.timedelta(hours=1))
 now = dt.datetime.now(TZ)
+
+DRY_RUN = False
 
 
 # --- 1. Find tasks in 'review' status across all boards ---
@@ -177,6 +180,12 @@ def process_tasks(tasks_in_review):
                             (int(now.timestamp()), tid),
                         )
                 results.append({"task": tid[:12], "board": board_slug, "gates": [], "outcome": "skip"})
+            if DRY_RUN:
+                gate_names = ", ".join(g["gate"] for g in gates)
+                print(f"[dry-run] would dispatch gates for {tid[:12]} ({board_slug}): {gate_names}")
+                results.append({"task": tid[:12], "board": board_slug, "gates": [{"gate": g["gate"], "worker": g["worker"]} for g in gates], "outcome": "dry-run"})
+                continue
+
                 continue
 
             # Update task to note gates, then create sub-tasks - single txn
@@ -276,6 +285,15 @@ def process_tasks(tasks_in_review):
 # --- 4. Main ---
 def main():
     tasks_in_review, _ = _scan_boards()
+    if DRY_RUN:
+        print(f"[dry-run] found {len(tasks_in_review)} tasks in review status")
+        if tasks_in_review:
+            for t in tasks_in_review:
+                gates = get_required_gates(t["title"] or "", t["body"] or "")
+                gate_names = ", ".join(g["gate"] for g in gates) if gates else "(no gates)"
+                print(f"[dry-run] {t["id"][:12]} ({t["_board_slug"]}): {gate_names}")
+        return
+
     results = process_tasks(tasks_in_review)
 
     count = len(tasks_in_review)
@@ -314,4 +332,9 @@ def main():
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="KENSEI Quality Gate")
+    parser.add_argument("--dry-run", action="store_true", help="Dry-run: print what would be dispatched without writing")
+    args = parser.parse_args()
+    if args.dry_run:
+        globals()["DRY_RUN"] = True
     main()
