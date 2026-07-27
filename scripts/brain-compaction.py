@@ -34,13 +34,21 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
-REPO = Path("/home/kensei/repos/KenseiAgent")
+# P13 isolation: REPO derives from KENSEI_REPO_ROOT (env-overridable) so
+# the sys.path insert targets the active checkout, not a hardcoded path.
+REPO = Path(os.environ.get("KENSEI_REPO_ROOT", "/home/kensei/repos/KenseiAgent"))
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
 BRAIN_DIR = Path(os.environ.get("GBRAIN_REPO", "~/brain")).expanduser()
 COMPACTION_BULLET_THRESHOLD = int(os.environ.get("BRAIN_COMPACTION_BULLET_THRESHOLD", "5"))
 DATE_TAG = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+# P13 isolation: when --dry-run is passed, the brain page rewrite
+# (fp.write_text) is suppressed. Read paths (_list_brain_pages,
+# _extract_dated_bullets, _find_bullet_blocks, _compact_entries) run
+# unchanged so the compaction decisions are still computed and printed.
+_DRY_RUN = False
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -262,6 +270,9 @@ def _tag_compacted(body: str) -> str:
 
 
 def main() -> int:
+    global _DRY_RUN
+    if "--dry-run" in sys.argv:
+        _DRY_RUN = True
     pages = _list_brain_pages()
     total_compacted = 0
     total_blocks = 0
@@ -298,8 +309,11 @@ def main() -> int:
 
         full_content = frontmatter + "\n" + body if frontmatter else body
         fp = BRAIN_DIR / f"{slug}.md"
-        fp.write_text(full_content, encoding="utf-8")
-        total_compacted += 1
+        if _DRY_RUN:
+            total_compacted += 1
+        else:
+            fp.write_text(full_content, encoding="utf-8")
+            total_compacted += 1
 
         # Count changes for this page
         orig_bullets = len(entries)
