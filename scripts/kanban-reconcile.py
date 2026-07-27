@@ -27,8 +27,16 @@ try:
 except ImportError:
     write_lock = None
 
-HERMES = Path(os.path.expanduser("~/.hermes"))
+# P13 isolation: HERMES derives from HERMES_HOME (env-overridable) so
+# local disposable runs never touch /home/kensei/.hermes.
+HERMES = Path(os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes")))
 DRIFT_STATE = HERMES / "governance" / "reconcile-drift-state.json"
+
+# P13 isolation: when --dry-run is passed, every write path (reopen_task
+# SQLite UPDATE + event INSERT, save_state drift file) is suppressed.
+# Read paths (board_dbs, scan_board, detect_profile_drift, load_state)
+# run unchanged so drift is still detected and reported.
+_DRY_RUN = False
 SUCCESS_OUTCOMES = {"completed", "done"}
 TERMINAL_STATUSES = {"done", "completed", "archived"}
 # Review-flow tasks may legitimately close without a successful run
@@ -133,6 +141,8 @@ def is_manual_closure(status_reason: str | None) -> bool:
 
 def reopen_task(conn: sqlite3.Connection, task_id: str, reason: str) -> bool:
     """Reopen a drifted task: set status=triage, log event."""
+    if _DRY_RUN:
+        return False  # dry-run: suppress the UPDATE + event INSERT
     now = now_ts()
     cur = conn.execute(
         "UPDATE tasks SET status = 'triage', status_reason = ?, "
@@ -288,6 +298,8 @@ def load_state() -> dict:
 
 
 def save_state(state: dict) -> None:
+    if _DRY_RUN:
+        return
     DRIFT_STATE.parent.mkdir(parents=True, exist_ok=True)
     tmp = DRIFT_STATE.with_suffix(".tmp")
     tmp.write_text(json.dumps(state, indent=2, sort_keys=True))
@@ -296,6 +308,9 @@ def save_state(state: dict) -> None:
 
 def main() -> str:
     """Main entry point. Returns alert text (empty string = clean)."""
+    global _DRY_RUN
+    if "--dry-run" in sys.argv:
+        _DRY_RUN = True
     dbs = board_dbs()
     all_findings: list[dict] = []
     fixed: list[dict] = []

@@ -2,14 +2,34 @@
 # Vault daily pull — fetches latest project docs from GitHub
 # Silent on success, errors printed on failure
 # Includes retry with exponential backoff for transient auth/network failures
-set -euo pipefail
+#
+# Env overrides (P13 isolation / local disposable runs):
+#   VAULT_PULL_DRY_RUN=1 — print the git commands that would run, do not
+#                          pull, probe auth, or touch the working tree
+#   VAULT_PULL_DIR        — override the vault checkout
+#                          (default $HOME/vaults/obsidian-master)
+set -uo pipefail
+# NOTE: errexit (set -e) intentionally OFF so the dry-run path and the
+# auth-failure path can print diagnostics without aborting early.
 
-export HOME=/home/kensei
+DRY_RUN=0
+if [ "${VAULT_PULL_DRY_RUN:-0}" = "1" ]; then DRY_RUN=1; fi
+
+export HOME=${HOME:-/home/kensei}
 export GIT_TERMINAL_PROMPT=0
-export PATH="/usr/bin:/home/kensei/.local/bin:$PATH"
+export PATH="/usr/bin:${HOME}/.local/bin:${PATH:-}"
 
-VAULT_DIR="$HOME/vaults/obsidian-master"
-cd "$VAULT_DIR" || { echo "ERROR: cannot cd to $VAULT_DIR"; exit 1; }
+VAULT_DIR="${VAULT_PULL_DIR:-${HOME}/vaults/obsidian-master}"
+
+if [ "${DRY_RUN}" = "1" ]; then
+    echo "dry-run: would cd ${VAULT_DIR} and git pull --ff-only origin main"
+    exit 0
+fi
+
+cd "${VAULT_DIR}" 2>/dev/null || {
+    echo "ERROR: cannot cd to ${VAULT_DIR}"
+    exit 1
+}
 
 # --- Auth setup ---
 # Fetch token from env (set by Hermes config) or gh CLI as fallback.
@@ -26,7 +46,7 @@ else
     }
 fi
 export GH_TOKEN
-export GIT_ASKPASS="$HOME/.hermes/scripts/git-askpass.sh"
+export GIT_ASKPASS="${HOME}/.hermes/scripts/git-askpass.sh"
 # Suppress credential helper — force GIT_ASKPASS path (fresh token each run)
 export GIT_CONFIG_COUNT=1
 export GIT_CONFIG_KEY_0=credential.helper

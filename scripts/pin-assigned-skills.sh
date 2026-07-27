@@ -6,7 +6,17 @@
 # Idempotent — pinning an already-pinned skill is a no-op.
 # Cron: daily 06:00, no_agent=true, delivers to #governance
 
-set -euo pipefail
+# Env overrides (P13 isolation / local disposable runs):
+#   PIN_DRY_RUN=1 — print the skills that would be pinned, do not call
+#                   `hermes curator pin`, do not touch the lockfile
+#   HERMES_HOME    — override the .hermes root (default $HOME/.hermes)
+#                   so a temp home is used instead of /home/kensei/.hermes
+set -uo pipefail
+# NOTE: errexit (set -e) intentionally OFF so the dry-run path and the
+# auth-failure path can print diagnostics without aborting early.
+
+DRY_RUN=0
+if [ "${PIN_DRY_RUN:-0}" = "1" ]; then DRY_RUN=1; fi
 
 # ── Safety: require Bash 4+ for associative arrays ──
 if [ -z "${BASH_VERSINFO:-}" ] || [ "${BASH_VERSINFO:-0}" -lt 4 ]; then
@@ -15,19 +25,22 @@ if [ -z "${BASH_VERSINFO:-}" ] || [ "${BASH_VERSINFO:-0}" -lt 4 ]; then
 fi
 
 # ── PID lockfile to prevent concurrent runs ──
-LOCKFILE="$HOME/.hermes/.pin_assigned_skills.lock"
-if [ -f "$LOCKFILE" ]; then
+HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
+LOCKFILE="$HERMES_HOME/.pin_assigned_skills.lock"
+if [ "$DRY_RUN" = "1" ]; then
+    : # dry-run: never touch the lockfile
+elif [ -f "$LOCKFILE" ]; then
     OLD_PID=$(cat "$LOCKFILE" 2>/dev/null)
     if kill -0 "$OLD_PID" 2>/dev/null; then
         echo "WARNING: Another pin instance is running (PID $OLD_PID). Exiting." >&2
         exit 0
     fi
     rm -f "$LOCKFILE"
+    echo $$ > "$LOCKFILE"
+    trap 'rm -f "$LOCKFILE"' EXIT
 fi
-echo $$ > "$LOCKFILE"
-trap 'rm -f "$LOCKFILE"' EXIT
 
-BASE="$HOME/.hermes"
+BASE="$HERMES_HOME"
 SKILL_NAME_RE='^[A-Za-z0-9._-]+$'
 
 # Problem lines are buffered; routine successes are NOT printed so a clean run
@@ -111,7 +124,10 @@ for SKILL in "${!ALL_SKILLS[@]}"; do
     fi
 
     # Pin via hermes curator — check exit code, not output text
-    if hermes curator pin "$SKILL" > /dev/null 2>&1; then
+    if [ "$DRY_RUN" = "1" ]; then
+        echo "dry-run: would pin $SKILL"
+        PINNED=$((PINNED + 1))
+    elif hermes curator pin "$SKILL" > /dev/null 2>&1; then
         PINNED=$((PINNED + 1))
     else
         FAILED=$((FAILED + 1))

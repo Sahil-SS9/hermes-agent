@@ -1,14 +1,35 @@
 #!/bin/bash
 # Wiki daily sync - commits and pushes any changes to GitHub
 # Silent on no changes, brief log on push
-set -euo pipefail
+#
+# Env overrides (P13 isolation / local disposable runs):
+#   WIKI_SYNC_DRY_RUN=1 — print the git commands that would run, do not
+#                          push, commit, or touch the working tree
+#   WIKI_SYNC_DIR        — override the wiki checkout (default $HOME/wiki)
+set -uo pipefail
+# NOTE: errexit (set -e) intentionally OFF so the dry-run path and the
+# auth-failure path can print diagnostics without aborting early.
 
-export HOME=/home/kensei
+DRY_RUN=0
+if [ "${WIKI_SYNC_DRY_RUN:-0}" = "1" ]; then DRY_RUN=1; fi
+
+export HOME=${HOME:-/home/kensei}
 export GIT_TERMINAL_PROMPT=0
-export PATH="/usr/bin:/home/kensei/.local/bin:$PATH"
+export PATH="/usr/bin:${HOME}/.local/bin:${PATH:-}"
 
-WIKI_DIR="$HOME/wiki"
-cd "$WIKI_DIR" || { echo "ERROR: cannot cd to $WIKI_DIR"; exit 1; }
+WIKI_DIR="${WIKI_SYNC_DIR:-${HOME}/wiki}"
+
+# Dry-run short-circuits before cd so the target dir need not exist.
+if [ "${DRY_RUN}" = "1" ]; then
+    echo "dry-run: cd ${WIKI_DIR}"
+    echo "dry-run: would push unpushed commits, detect new work, commit + push"
+    exit 0
+fi
+
+cd "${WIKI_DIR}" 2>/dev/null || {
+    echo "ERROR: cannot cd to ${WIKI_DIR}"
+    exit 1
+}
 
 # --- Auth setup ---
 # Fetch token from env (set by Hermes config) or gh CLI as fallback.
@@ -25,7 +46,7 @@ else
     }
 fi
 export GH_TOKEN
-export GIT_ASKPASS="$HOME/.hermes/scripts/git-askpass.sh"
+export GIT_ASKPASS="${HOME}/.hermes/scripts/git-askpass.sh"
 # Suppress credential helper - force GIT_ASKPASS path (fresh token each run)
 export GIT_CONFIG_COUNT=1
 export GIT_CONFIG_KEY_0=credential.helper

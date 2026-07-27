@@ -23,12 +23,20 @@ import sys
 from datetime import date, datetime, timezone
 from pathlib import Path
 
-REPO = Path("/home/kensei/repos/KenseiAgent")
+# P13 isolation: REPO derives from KENSEI_REPO_ROOT (env-overridable) so
+# the sys.path insert targets the active checkout, not a hardcoded path.
+REPO = Path(os.environ.get("KENSEI_REPO_ROOT", "/home/kensei/repos/KenseiAgent"))
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
 BRAIN_DIR = Path(os.environ.get("GBRAIN_REPO", "~/brain")).expanduser()
 WIKI_DIR = Path(os.environ.get("WIKI_DIR", "~/wiki")).expanduser()
+
+# P13 isolation: when --dry-run is passed, every write path (wiki page
+# write_text, index.md update, log.md append) is suppressed. Read paths
+# (_read_brain_page, _brain_mtime, _wiki_mtime, _read_wiki_page) run
+# unchanged so the synthesis decisions are still computed and printed.
+_DRY_RUN = False
 CONCEPTS_DIR = WIKI_DIR / "concepts"
 COMPARISONS_DIR = WIKI_DIR / "comparisons"
 SCHEMA_PATH = WIKI_DIR / "SCHEMA.md"
@@ -305,6 +313,8 @@ def _update_index(new_pages: list[dict]) -> None:
         content,
     )
 
+    if _DRY_RUN:
+        return
     INDEX_PATH.write_text(content, encoding="utf-8")
 
 
@@ -319,6 +329,8 @@ def _append_to_log(entries: list[str]) -> None:
     concept_count = len([f for f in CONCEPTS_DIR.glob("*.md") if f.is_file()])
     total_line = f"- Wiki concept count: {concept_count}"
 
+    if _DRY_RUN:
+        return
     with LOG_PATH.open("a", encoding="utf-8") as f:
         f.write(header + body + "\n" + total_line + "\n")
 
@@ -327,6 +339,9 @@ def _append_to_log(entries: list[str]) -> None:
 
 
 def main() -> int:
+    global _DRY_RUN
+    if "--dry-run" in sys.argv:
+        _DRY_RUN = True
     new_pages: list[dict] = []
     log_entries: list[str] = []
 
@@ -352,7 +367,8 @@ def main() -> int:
         # Write wiki page
         wp = CONCEPTS_DIR / f"{wiki_slug}.md"
         existed = wp.is_file()
-        wp.write_text(content, encoding="utf-8")
+        if not _DRY_RUN:
+            wp.write_text(content, encoding="utf-8")
         action = "Updated" if existed else "Created"
         log_entries.append(f"{action} concepts/{wiki_slug}.md ({brain_slug} → wiki, {brain_mode})")
         new_pages.append({"slug": wiki_slug, "title": title, "type": "concept",
@@ -364,7 +380,8 @@ def main() -> int:
         comp_path = COMPARISONS_DIR / f"{slug}.md"
         existed = comp_path.is_file()
         content = _build_comparison_page(cfg)
-        comp_path.write_text(content, encoding="utf-8")
+        if not _DRY_RUN:
+            comp_path.write_text(content, encoding="utf-8")
         action = "Updated" if existed else "Created"
         log_entries.append(f"{action} comparisons/{slug}.md")
         new_pages.append({

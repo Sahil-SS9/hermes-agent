@@ -25,12 +25,19 @@ import yaml
 from datetime import datetime, timezone
 from pathlib import Path
 
-BASE = Path(os.environ.get("HOME", str(Path.home()))) / ".hermes"
+BASE = Path(os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes")))
 SKILLS_DIR = BASE / "skills"
 PROFILES_DIR = BASE / "profiles"
 STATE_FILE = SKILLS_DIR / ".curator_state"
 GOVERNANCE_LOG = BASE / "governance" / "logboard"
 LOCK_FILE = BASE / ".curator_governance_hook.lock"
+
+# P13 isolation: when --dry-run is passed, every write path (re-pin
+# subprocess calls, add_skill_to_enabled, set_adoption_status,
+# log_event, lockfile create/unlink) is suppressed. Read paths
+# (load_profile_skills, read_curator_report, classify_skill) run
+# unchanged so the governance decisions are still computed and printed.
+_DRY_RUN = False
 
 # ── Classification rules: category path → lead profile ──
 CATEGORY_TO_LEAD = {
@@ -69,6 +76,8 @@ def warn(msg: str) -> None:
 
 def acquire_lock() -> bool:
     """Prevent concurrent hook runs via PID lockfile."""
+    if _DRY_RUN:
+        return True  # dry-run: never touch the lockfile
     if LOCK_FILE.exists():
         try:
             old_pid = int(LOCK_FILE.read_text().strip())
@@ -84,6 +93,8 @@ def acquire_lock() -> bool:
 
 
 def release_lock() -> None:
+    if _DRY_RUN:
+        return
     LOCK_FILE.unlink(missing_ok=True)
 
 
@@ -206,6 +217,8 @@ def add_skill_to_enabled(skill_name: str, profile_name: str):
     """Add skill to profile's enabled_skills. Uses atomic write."""
     if not _valid_skill_name(skill_name):
         return False, "invalid skill name"
+    if _DRY_RUN:
+        return True, "dry-run: would add"
 
     if profile_name == "root":
         cfg_path = BASE / "config.yaml"
@@ -255,6 +268,8 @@ def set_adoption_status(skill_name: str, status: str):
     """Set adoption_status in skill's SKILL.md frontmatter. Atomic write."""
     if not _valid_skill_name(skill_name):
         return False, "invalid skill name"
+    if _DRY_RUN:
+        return True, "dry-run: would update"
 
     matches = [
         p for p in SKILLS_DIR.glob(f"**/{skill_name}/SKILL.md")
@@ -311,6 +326,8 @@ def set_adoption_status(skill_name: str, status: str):
 
 def log_event(event_type: str, payload: dict) -> None:
     """Log governance event to the logboard. Best-effort - never crashes."""
+    if _DRY_RUN:
+        return
     try:
         today = datetime.now(timezone.utc).strftime("%Y%m%d")
         log_path = GOVERNANCE_LOG / f"curator-governance-{today}.mdl"
@@ -329,6 +346,9 @@ def log_event(event_type: str, payload: dict) -> None:
 
 
 def main():
+    global _DRY_RUN
+    if "--dry-run" in sys.argv:
+        _DRY_RUN = True
     # Routine status goes to stderr (not delivered). Only genuinely actionable
     # findings (blocked archivals, skills needing manual review) reach Discord
     # stdout; an uneventful run is [SILENT].
@@ -360,11 +380,14 @@ def main():
             archival_overrides.append((skill_name, profile_skills[skill_name]))
             # Re-pin with exit code checking
             if _valid_skill_name(skill_name):
-                result = subprocess.run(
-                    ["hermes", "curator", "pin", skill_name],
-                    capture_output=True, text=True
-                )
-                if result.returncode != 0:
+                if _DRY_RUN:
+                    result = None
+                else:
+                    result = subprocess.run(
+                        ["hermes", "curator", "pin", skill_name],
+                        capture_output=True, text=True
+                    )
+                if result is not None and result.returncode != 0:
                     warn(f"Re-pin failed for '{skill_name}' (exit {result.returncode}): "
                          f"{result.stderr.strip() if result.stderr else result.stdout.strip()}")
                     log_event("curator.repin_failed", {
@@ -431,6 +454,8 @@ def main():
 
 
 if __name__ == "__main__":
+    if "--dry-run" in sys.argv:
+        _DRY_RUN = True
     if not acquire_lock():
         sys.exit(1)
     try:

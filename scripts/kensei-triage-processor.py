@@ -28,8 +28,15 @@ except ImportError:
 # the legacy slugs for CLI routing; _get_board_db resolves to the live DB.
 import _board_compat
 BOARDS = ['ops', 'research', 'apps', 'content-lead', 'default']
-STATE_FILE = '/home/kensei/.hermes/data/triage-state.json'
-PENDING_FILE = '/home/kensei/.hermes/data/pending-investigation.json'
+_HERMES_HOME = os.environ.get('HERMES_HOME', os.path.expanduser('~/.hermes'))
+STATE_FILE = os.path.join(_HERMES_HOME, 'data', 'triage-state.json')
+PENDING_FILE = os.path.join(_HERMES_HOME, 'data', 'pending-investigation.json')
+
+# P13 isolation: when --dry-run is passed, every write path (task UPDATE,
+# block_task, promote_task, save_json, _set_task_tier, _set_task_assignee,
+# _promote_to_pipeline) is suppressed. Read paths run unchanged so the
+# classification and routing decisions are still computed and printed.
+_DRY_RUN = False
 
 # WS-2 board routing: keyword → board + assignee mapping derived
 # from governance/routing/goal-subgoal-routing-map.md
@@ -100,6 +107,8 @@ def _set_task_tier(board, task_id, tier):
 
 def run_hermes_list(board, status):
     """Run hermes kanban list --status <status> --json for a board."""
+    if _DRY_RUN:
+        return []
     cmd = ['hermes', 'kanban', '--board', board, 'list', '--status', status, '--json']
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
@@ -137,6 +146,8 @@ def load_json(path, default):
         return default
 
 def save_json(path, data):
+    if _DRY_RUN:
+        return
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, 'w') as f:
@@ -243,6 +254,9 @@ def classify_task(title, body):
     return 'NEEDS HUMAN', tier
 
 def main():
+    global _DRY_RUN
+    if '--dry-run' in sys.argv:
+        _DRY_RUN = True
     all_triage = []
     for board in BOARDS:
         tasks = run_hermes_list(board, 'triage')
@@ -363,8 +377,9 @@ def main():
             else:
                 blocked_ok = False
             # Add comment via CLI (works on any status)
-            comment_cmd = ['hermes', 'kanban', '--board', board, 'comment', task_id, reason]
-            subprocess.run(comment_cmd, capture_output=True, text=True, timeout=30)
+            if not _DRY_RUN:
+                comment_cmd = ['hermes', 'kanban', '--board', board, 'comment', task_id, reason]
+                subprocess.run(comment_cmd, capture_output=True, text=True, timeout=30)
             if blocked_ok:
                 _set_task_tier(board, task_id, tier)
                 pending_tasks.append({
