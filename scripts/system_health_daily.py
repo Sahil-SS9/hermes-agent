@@ -27,7 +27,7 @@ from collections import Counter
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-HERMES = Path("/home/kensei/.hermes")
+HERMES = Path(os.environ.get("HERMES_HOME", "/home/kensei/.hermes"))
 STATE_FILE = HERMES / "governance" / "system-health-state.json"
 LOG_DIR = HERMES / "governance" / "logboard"
 JOBS_FILE = HERMES / "cron" / "jobs.json"
@@ -48,6 +48,12 @@ SAFE_FAILURE_STATUSES = {"blocked", "failed", "triage"}
 FAILED_ONLY_OUTCOMES = {"crashed", "reclaimed", "blocked", "timed_out", "spawn_failed", "gave_up"}
 SUCCESSFUL_RUN_MARKERS = {"completed", "success", "succeeded", "ok"}
 
+# P13 isolation: --dry-run skips every network/subprocess probe (sudo docker
+# inspect, curl, systemctl, free, df) and suppresses every write path
+# (create_task kanban filing, save_state, LOG_DIR json write). Read-only
+# sqlite scans still run so drift is detected, but nothing is filed.
+_DRY_RUN = "--dry-run" in sys.argv
+
 
 def now() -> dt.datetime:
     return dt.datetime.now(TZ)
@@ -62,6 +68,8 @@ def run(cmd: list[str], timeout: int = 20) -> tuple[int, str, str]:
 
 
 def create_task(title: str, body: str, assignee: str, priority: str, key: str) -> str | None:
+    if _DRY_RUN:
+        return None  # dry-run: never file a kanban task
     # Priority: P1=1, P2=2, P3=3
     pnum = {"P1": "1", "P2": "2", "P3": "3"}.get(priority, "2")
     cmd = [
@@ -95,6 +103,8 @@ def load_state() -> dict:
 
 
 def save_state(state: dict) -> None:
+    if _DRY_RUN:
+        return  # dry-run: never write the state file
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
     with open(STATE_FILE, "w") as f:
         json.dump(state, f, indent=2)
@@ -131,6 +141,8 @@ def file_finding(title: str, body: str, priority: str, slug: str) -> tuple[str |
 
 
 def check_memory() -> dict | None:
+    if _DRY_RUN:
+        return None  # dry-run: skip free probe
     code, out, _ = run(["free", "-m"], timeout=10)
     if code != 0:
         return {"title": "Memory check failed", "body": f"`free -m` exited {code}.", "priority": "P2", "slug": "memory-check-failed"}
@@ -152,6 +164,8 @@ def check_memory() -> dict | None:
 
 
 def check_disk() -> dict | None:
+    if _DRY_RUN:
+        return None  # dry-run: skip df probe
     code, out, _ = run(["df", "-h", "/"], timeout=10)
     if code != 0:
         return {"title": "Disk check failed", "body": f"`df -h /` exited {code}.", "priority": "P2", "slug": "disk-check-failed"}
@@ -171,6 +185,8 @@ def check_disk() -> dict | None:
 
 
 def check_swap() -> dict | None:
+    if _DRY_RUN:
+        return None  # dry-run: skip free probe
     code, out, _ = run(["free", "-m"], timeout=10)
     if code != 0:
         return None
@@ -361,6 +377,8 @@ def check_stale_crons() -> dict | None:
 
 
 def check_gateway() -> dict | None:
+    if _DRY_RUN:
+        return None  # dry-run: skip systemctl/pgrep probes
     code, out, _ = run(["systemctl", "is-active", "hermes-gateway"], timeout=10)
     if code != 0 or "active" not in out:
         return {
@@ -384,6 +402,8 @@ def check_gateway() -> dict | None:
 
 
 def check_kanban() -> dict | None:
+    if _DRY_RUN:
+        return None  # dry-run: skip _board_compat (hermes_cli import chain)
     # W1-G (Batch 1): board DB identities resolved via _board_compat.
     import _board_compat
     boards = {slug: str(p) for slug, p in _board_compat.build_board_db_map([
@@ -440,6 +460,8 @@ def check_kanban() -> dict | None:
 
 def check_wfa_live() -> dict | None:
     """Worker Failure Analysis — live tasks only. Historical drift ignored."""
+    if _DRY_RUN:
+        return None  # dry-run: skip _board_compat (hermes_cli import chain)
     # W1-G (Batch 1): board DB identities resolved via _board_compat.
     import _board_compat
     _wfa_slugs = ["default", "ops", "research", "apps", "content-lead"]
@@ -516,6 +538,8 @@ def check_wfa_live() -> dict | None:
 
 def check_discord_bots() -> dict | None:
     """Check all Discord gateway bot services are active."""
+    if _DRY_RUN:
+        return None  # dry-run: skip systemctl probes
     SERVICES = [
         ("kensei", "hermes-gateway.service"),
         ("ceecee", "hermes-gateway-ceecee.service"),
@@ -546,6 +570,8 @@ def check_discord_bots() -> dict | None:
 
 def check_web_backends() -> dict | None:
     """Check SearXNG + GroktoCrawl + DDGS health."""
+    if _DRY_RUN:
+        return None  # dry-run: skip docker/curl/DDGS probes
     import json as _json
 
     failures = []
@@ -661,16 +687,18 @@ def main() -> int:
         tid = task_id or "(failed to file)"
         print(f"• `{tid}` {title} · {priority}")
 
-    # JSON log
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
-    logfile = LOG_DIR / f"system-health-{n.strftime('%Y%m%d-%H%M%S')}.json"
-    payload = {
-        "timestamp": n.isoformat(),
-        "findings": findings,
-        "filed": [{"task_id": t, "title": tt, "priority": p} for t, tt, p in filed],
-    }
-    logfile.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    print(f"JSON: {logfile}")
+    # JSON log (suppressed under --dry-run to avoid touching the live
+    # governance logboard in a disposable run)
+    if not _DRY_RUN:
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        logfile = LOG_DIR / f"system-health-{n.strftime('%Y%m%d-%H%M%S')}.json"
+        payload = {
+            "timestamp": n.isoformat(),
+            "findings": findings,
+            "filed": [{"task_id": t, "title": tt, "priority": p} for t, tt, p in filed],
+        }
+        logfile.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        print(f"JSON: {logfile}")
 
     return 0
 
