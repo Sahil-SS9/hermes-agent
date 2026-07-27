@@ -44,6 +44,12 @@ if not logger.handlers:
     logger.addHandler(_h)
     logger.setLevel(logging.INFO)
 
+# Set by main() from the --dry-run CLI flag. When True, every write path
+# (task UPDATE, save_state, corrupt-DB quarantine/rename/copy/unlink, and
+# quarantine-sentinel touch/unlink) is suppressed. Read paths run exactly as
+# in live mode so the proposed completions are still computed and printed.
+_DRY_RUN = False
+
 
 def _is_db_corrupt(db_path: Path) -> bool:
     """Return True if the SQLite file cannot serve the queries we need.
@@ -94,6 +100,8 @@ def _quarantine_recent(db_path: Path) -> bool:
 
 
 def _mark_quarantined(db_path: Path) -> None:
+    if _DRY_RUN:
+        return
     try:
         sentinel = _quarantine_sentinel_path(db_path)
         sentinel.touch(exist_ok=True)
@@ -103,6 +111,8 @@ def _mark_quarantined(db_path: Path) -> None:
 
 def _clear_quarantine_sentinel(db_path: Path) -> None:
     """Clear the sentinel once we confirm a fresh DB is healthy (e.g. ops was rebuilt)."""
+    if _DRY_RUN:
+        return
     try:
         _quarantine_sentinel_path(db_path).unlink(missing_ok=True)
     except OSError:
@@ -113,8 +123,12 @@ def _quarantine_corrupt_db(db_path: Path) -> Optional[str]:
     """Move a corrupt DB out of the boards dir so subsequent runs skip it.
 
     Returns the quarantine path on success, None on failure. Never raises —
-    a failed quarantine should not crash the cron.
+    a failed quarantine should not crash the cron. Suppressed entirely in
+    --dry-run (the corrupt DB is left in place for inspection).
     """
+    if _DRY_RUN:
+        logger.info("dry-run: would quarantine corrupt DB %s (left in place)", db_path)
+        return None
     try:
         date_dir = db_path.parent / f"quarantine-{datetime.now().strftime('%Y-%m-%d')}"
         date_dir.mkdir(exist_ok=True)
@@ -252,27 +266,30 @@ def process_board(board_dir: Path, state: dict) -> list[str]:
         if parent_id in state:
             continue
 
-        # Auto-complete (under cross-process write lock)
+        # Auto-complete (under cross-process write lock). Suppressed in
+        # --dry-run: the parent is reported as a proposal without mutating
+        # the DB.
         title = get_task_title(db_path, parent_id) or parent_id
-        conn = sqlite3.connect(str(db_path), timeout=5.0)
-        try:
-            if write_lock is not None:
-                with write_lock(conn):
+        if not _DRY_RUN:
+            conn = sqlite3.connect(str(db_path), timeout=5.0)
+            try:
+                if write_lock is not None:
+                    with write_lock(conn):
+                        now_ts = int(datetime.now(timezone.utc).timestamp())
+                        conn.execute(
+                            "UPDATE tasks SET status='done', completed_at=? WHERE id=?",
+                            (now_ts, parent_id)
+                        )
+                        conn.commit()
+                else:
                     now_ts = int(datetime.now(timezone.utc).timestamp())
                     conn.execute(
                         "UPDATE tasks SET status='done', completed_at=? WHERE id=?",
                         (now_ts, parent_id)
                     )
                     conn.commit()
-            else:
-                now_ts = int(datetime.now(timezone.utc).timestamp())
-                conn.execute(
-                    "UPDATE tasks SET status='done', completed_at=? WHERE id=?",
-                    (now_ts, parent_id)
-                )
-                conn.commit()
-        finally:
-            conn.close()
+            finally:
+                conn.close()
 
         state[parent_id] = {
             "completed_at": datetime.now(timezone.utc).isoformat(),
@@ -301,7 +318,22 @@ def _process_root_board(db_path: Path, state: dict) -> list[str]:
         return process_board(tmp, state)
 
 
-def main():
+def _parse_args(argv: list[str] | None = None):
+    import argparse
+    parser = argparse.ArgumentParser(description="Feature-completion auto-close + notify")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Report proposed parent completions to stdout without mutating "
+             "boards, state, quarantine, or sentinels.",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None):
+    global _DRY_RUN
+    args = _parse_args(argv)
+    _DRY_RUN = bool(args.dry_run)
     state = load_state()
     new_completions: list[str] = []
 
@@ -327,11 +359,13 @@ def main():
         except Exception as exc:
             logger.warning("Error processing default board: %s", exc)
 
-    save_state(state)
+    if not _DRY_RUN:
+        save_state(state)
 
     if new_completions:
+        verb = "would auto-close" if _DRY_RUN else "auto-closed"
         summary = "\n".join(f"  - {c}" for c in new_completions)
-        print(f"Feature-completion: {len(new_completions)} parent(s) auto-closed:\n{summary}")
+        print(f"Feature-completion: {len(new_completions)} parent(s) {verb}:\n{summary}")
     # Silent when nothing to report.
 
 if __name__ == "__main__":
