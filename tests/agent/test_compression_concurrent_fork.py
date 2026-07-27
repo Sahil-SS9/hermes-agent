@@ -269,14 +269,36 @@ def test_lock_refresh_keeps_owner_live_past_initial_ttl(tmp_path: Path, monkeypa
 
     t_a = threading.Thread(target=run, args=(agent_a,), name="refresh_owner")
     t_a.start()
-    deadline = time.time() + 2.0
+    # Wait for the compression thread to acquire the lock.  Under parallel
+    # runner load (many pytest subprocesses competing for CPU), the thread
+    # may take several seconds to get scheduled, run the feasibility check,
+    # and acquire the lock.  10s is generous but still bounded — the
+    # _slow_compress sleep is only 2.0s, so if the lock isn't acquired in
+    # 10s something is genuinely wrong, not just slow.
+    deadline = time.time() + 10.0
     while db.get_compression_lock_holder(parent_sid) is None and time.time() < deadline:
         time.sleep(0.05)
-    assert db.get_compression_lock_holder(parent_sid) is not None
-    time.sleep(1.2)
-    assert db.try_acquire_compression_lock(
-        parent_sid, "refresh_probe", ttl_seconds=1.0
-    ) is False, "live owner lease expired and was reclaimable before compression finished"
+    assert db.get_compression_lock_holder(parent_sid) is not None, (
+        "Compression thread did not acquire the lock within 10s — "
+        "thread scheduling may be starved under parallel load, but the "
+        "lock acquisition itself should be fast once the thread runs."
+    )
+    # Wait past the initial 1.0s TTL to verify the refresher is keeping
+    # the lease alive.  Use a polling loop instead of a fixed sleep so the
+    # test is robust against scheduling delays: we check that the lease
+    # remains non-reclaimable for at least 1.2s of wall time (past the
+    # TTL + margin), which proves the refresher extended it at least once.
+    # The compress() side_effect sleeps 2.0s, so the owner is still mid-
+    # compression throughout this window.
+    poll_start = time.time()
+    while time.time() - poll_start < 1.2:
+        assert db.try_acquire_compression_lock(
+            parent_sid, "refresh_probe", ttl_seconds=1.0
+        ) is False, (
+            "live owner lease expired and was reclaimable before "
+            "compression finished"
+        )
+        time.sleep(0.1)
     t_a.join(timeout=10)
 
     assert not t_a.is_alive()

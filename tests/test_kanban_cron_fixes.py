@@ -100,19 +100,42 @@ def test_triage_prompt_forbids_leaks():
 
 
 def test_media_roots_include_runbooks():
-    """FIX 4: runbooks must be in MEDIA_DELIVERY_SAFE_ROOTS in all available gateway copies.
+    """FIX 4: runbooks must be in MEDIA_DELIVERY_SAFE_ROOTS in the runtime gateway.
 
-    The test checks every gateway base.py that exists on this system. The old
-    VPS layout (/home/kensei/hermes-agent/) and the upstream clone may not be
-    present on the rig — only the KenseiAgent repo is guaranteed.
+    The contract is on the *runtime* source — the gateway/platforms/base.py
+    that this KenseiAgent installation actually imports and executes.  A
+    separate upstream PR checkout (hermes-agent-upstream) is NOT runtime
+    code; asserting patch content there ties this test to a different branch's
+    merge state and fails when the upstream checkout lags or diverges.  Use
+    the imported module as the authority, falling back to the repo-local
+    file when the import path is unavailable (hermetic test environments).
     """
-    candidates = [
-        "/home/kensei/hermes-agent/gateway/platforms/base.py",
-        "/home/kensei/repos/hermes-agent-upstream/gateway/platforms/base.py",
-        "/home/kensei/repos/KenseiAgent/gateway/platforms/base.py",
-    ]
-    found = [f for f in candidates if os.path.isfile(f)]
-    if not found:
-        pytest.skip("no gateway base.py found on this system")
-    for f in found:
-        assert '_HERMES_HOME / "runbooks",' in open(f).read(), f"runbooks missing in {f}"
+    # Prefer the live imported module — this is what the gateway actually runs.
+    try:
+        import gateway.platforms.base as _base
+        safe_roots = getattr(_base, "MEDIA_DELIVERY_SAFE_ROOTS", None)
+        if safe_roots is not None:
+            from pathlib import Path
+            runbooks_path = Path(_base._HERMES_HOME) / "runbooks"
+            assert runbooks_path in [Path(r) for r in safe_roots], (
+                f"runbooks not in MEDIA_DELIVERY_SAFE_ROOTS (runtime import): {safe_roots}"
+            )
+            return
+    except Exception:
+        pass  # import path not available — fall through to file check
+
+    # Fallback: check the repo-local runtime source file only.  This is the
+    # gateway base.py shipped with this KenseiAgent checkout — the one the
+    # gateway imports when running.  Do NOT check upstream/VPS clones: they
+    # are separate branches/checkouts whose merge state is irrelevant to
+    # this installation's runtime contract.
+    runtime_source = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "gateway", "platforms", "base.py",
+    )
+    if not os.path.isfile(runtime_source):
+        pytest.skip("no runtime gateway base.py found in this checkout")
+    source_text = open(runtime_source).read()
+    assert '_HERMES_HOME / "runbooks",' in source_text, (
+        f"runbooks missing in runtime source {runtime_source}"
+    )
