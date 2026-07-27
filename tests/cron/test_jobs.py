@@ -953,6 +953,30 @@ class TestGetDueJobs:
         due = get_due_jobs()
         assert len(due) == 0
 
+    def test_disabled_past_due_job_is_not_executed_by_tick(self, tmp_cron_dir, monkeypatch):
+        """The real scheduler tick must not run a past-due disabled job."""
+        import cron.scheduler as scheduler
+
+        job = create_job(prompt="must never run", schedule="every 1h", deliver="local")
+        jobs = load_jobs()
+        jobs[0]["enabled"] = False
+        jobs[0]["state"] = "paused"
+        jobs[0]["next_run_at"] = (datetime.now() - timedelta(minutes=5)).isoformat()
+        save_jobs(jobs)
+
+        lock_dir = tmp_cron_dir / "tick-lock"
+        lock_dir.mkdir()
+        monkeypatch.setattr(
+            scheduler, "_get_lock_paths", lambda: (lock_dir, lock_dir / ".tick.lock")
+        )
+
+        assert scheduler.tick(verbose=False) == 0
+        stored = get_job(job["id"])
+        assert stored is not None
+        assert stored["enabled"] is False
+        assert stored["state"] == "paused"
+        assert stored["last_run_at"] is None
+
     def test_broken_recent_one_shot_without_next_run_is_recovered(self, tmp_cron_dir, monkeypatch):
         now = datetime(2026, 3, 18, 4, 22, 30, tzinfo=timezone.utc)
         monkeypatch.setattr("cron.jobs._hermes_now", lambda: now)
