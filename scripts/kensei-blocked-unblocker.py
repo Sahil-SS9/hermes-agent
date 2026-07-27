@@ -33,6 +33,11 @@ DEDUP_HOURS = float(os.environ.get("KENSEI_UNBLOCKER_DEDUP_HOURS", "12"))
 STATE_TTL_DAYS = 7
 STATE_FILE = HERMES / "state" / "blocked-unblocker-dedup.json"
 
+# P13 isolation: when --dry-run is passed, the dedup state file is never
+# written. Read paths (state load, board scans, classification) run
+# unchanged so the structured output is still computed and emitted.
+_DRY_RUN = False
+
 
 def discover_boards() -> dict[str, Path]:
     """Dynamically discover all kanban DBs with board identity."""
@@ -173,6 +178,8 @@ def _load_state() -> dict:
 
 
 def _save_state(state: dict) -> None:
+    if _DRY_RUN:
+        return
     # Atomic write so two overlapping runs cannot leave a truncated file.
     try:
         STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -184,6 +191,9 @@ def _save_state(state: dict) -> None:
 
 
 def main() -> int:
+    global _DRY_RUN
+    if "--dry-run" in sys.argv:
+        _DRY_RUN = True
     now = int(time.time())
     blocked_tasks, errors, boards_scanned, boards_skipped = _collect_blocked_tasks(
         discover_boards(), now
