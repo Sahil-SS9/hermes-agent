@@ -4,12 +4,38 @@
 Silent when healthy (exit 0, empty stdout).
 Outputs alert text when a bot is down or unreachable.
 """
+import os
 import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
 
-HERMES = Path("/home/kensei/.hermes")
+# P13 isolation: HERMES derives from HERMES_HOME (env-overridable) so
+# local disposable runs never touch /home/kensei/.hermes.
+HERMES = Path(os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes")))
+
+# Known gateway service inventory. discover_services() prefers live
+# systemctl discovery, but when systemd is unavailable or a unit file is
+# not yet installed, this fallback list ensures every gateway bot is
+# still checked. kensei-review and quan were previously missed because
+# the glob only returns installed unit files and these gateways may not
+# have unit files present in every deployment. Keep this list in sync
+# with the agent fleet in agents/.
+KNOWN_GATEWAY_SERVICES = [
+    ("kensei", "hermes-gateway.service"),
+    ("kensei-review", "hermes-gateway-kensei-review.service"),
+    ("octacon", "hermes-gateway-octacon.service"),
+    ("wesker", "hermes-gateway-wesker.service"),
+    ("denji", "hermes-gateway-denji.service"),
+    ("ceecee", "hermes-gateway-ceecee.service"),
+    ("dezzy", "hermes-gateway-dezzy.service"),
+    ("gojo", "hermes-gateway-gojo.service"),
+    ("remii", "hermes-gateway-remii.service"),
+    ("light", "hermes-gateway-light.service"),
+    ("misa-misa", "hermes-gateway-misa-misa.service"),
+    ("mrhermagi", "hermes-gateway-mrhermagi.service"),
+    ("quan", "hermes-gateway-quan.service"),
+]
 
 
 def discover_services():
@@ -28,7 +54,7 @@ def discover_services():
             timeout=10,
         )
     except Exception:
-        return []
+        return sorted(KNOWN_GATEWAY_SERVICES)
 
     services = []
     for line in result.stdout.splitlines():
@@ -43,6 +69,14 @@ def discover_services():
         else:
             continue
         services.append((name, service))
+
+    # Merge with the fallback inventory so bots without installed unit
+    # files (kensei-review, quan, etc.) are still checked. systemd
+    # discovery takes precedence; the inventory fills any gaps.
+    discovered = {name: svc for name, svc in services}
+    for name, svc in KNOWN_GATEWAY_SERVICES:
+        if name not in discovered:
+            services.append((name, svc))
     return sorted(services)
 
 def check_service(name, service):
@@ -86,7 +120,7 @@ def check_gateway_log_errors(name):
                 errors.append(line.strip()[:200])
         return errors[-3:]  # Last 3 errors max
     except Exception:
-        return []
+        return sorted(KNOWN_GATEWAY_SERVICES)
 
 def main():
     alerts = []
