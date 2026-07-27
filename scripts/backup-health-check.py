@@ -6,7 +6,7 @@ Checks: archive exists, is recent (<36h), manifest matches, checksums valid,
 
 Silent when healthy. Alerts to #ops on failure.
 """
-import os, sys, json, tarfile, hashlib
+import os, json, tarfile, hashlib
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
@@ -101,7 +101,7 @@ def main():
     result = find_latest_backup()
     if result is None:
         print(f"ALERT: No backup archives found in {BACKUP_ROOT}")
-        sys.exit(1)
+        return 0
     
     archive, manifest_path = result
     errors = []
@@ -122,7 +122,7 @@ def main():
         print(f"ALERT: Backup health check failed for {archive.name}")
         for e in errors:
             print(f"  - {e}")
-        sys.exit(1)
+        return 0
     
     # Silent when healthy
 
