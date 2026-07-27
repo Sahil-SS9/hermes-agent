@@ -11,15 +11,32 @@ Problem-only report for cron/manual checks:
 """
 from __future__ import annotations
 
+import argparse
 import json
+import os
 import re
 import subprocess
 from collections import defaultdict
 from difflib import SequenceMatcher
 from pathlib import Path
 
-ENGINE = Path(__file__).resolve().parent.parent
-BLOG = Path.home() / "repos" / "SahilBlog"
+# Roots resolve with override precedence (CLI > env > production default):
+#   --engine-root / BLOG_AUDIT_ENGINE_ROOT  → content_engine parent (the repo)
+#   --blog-root   / BLOG_AUDIT_BLOG_ROOT    → SahilBlog checkout
+# The production defaults are preserved so live cron behaviour is unchanged.
+_DEFAULT_ENGINE = Path(__file__).resolve().parent.parent
+_DEFAULT_BLOG = Path.home() / "repos" / "SahilBlog"
+
+
+def _resolve_roots() -> tuple[Path, Path]:
+    eng_env = os.environ.get("BLOG_AUDIT_ENGINE_ROOT", "").strip()
+    blog_env = os.environ.get("BLOG_AUDIT_BLOG_ROOT", "").strip()
+    engine = Path(eng_env).expanduser() if eng_env else _DEFAULT_ENGINE
+    blog = Path(blog_env).expanduser() if blog_env else _DEFAULT_BLOG
+    return engine, blog
+
+
+ENGINE, BLOG = _resolve_roots()
 TRACKER = ENGINE / "blog_topics" / "pending_approvals.jsonl"
 FAILED_IMAGES = ENGINE / "blog_topics" / "failed_images.jsonl"
 EXEMPT = ENGINE / "blog_topics" / "published_exempt.jsonl"
@@ -214,7 +231,35 @@ def render_report(problems: list[str]) -> str:
     return "\n".join(lines)
 
 
+def _parse_args(argv: list[str] | None = None):
+    parser = argparse.ArgumentParser(description="SahilBlog pipeline audit")
+    parser.add_argument("--engine-root", type=Path, default=None,
+                        help="content_engine parent dir (env BLOG_AUDIT_ENGINE_ROOT)")
+    parser.add_argument("--blog-root", type=Path, default=None,
+                        help="SahilBlog checkout dir (env BLOG_AUDIT_BLOG_ROOT)")
+    return parser.parse_args(argv)
+
+
 if __name__ == "__main__":
+    args = _parse_args()
+    if args.engine_root or args.blog_root:
+        if args.engine_root:
+            os.environ["BLOG_AUDIT_ENGINE_ROOT"] = str(args.engine_root)
+        if args.blog_root:
+            os.environ["BLOG_AUDIT_BLOG_ROOT"] = str(args.blog_root)
+        # Re-resolve module-level roots for this run. As __main__ the module
+        # globals are this scope, so globals().update() reaches the
+        # audit()/_git_dirty() functions which read these names at call time.
+        _eng, _blog = _resolve_roots()
+        globals().update({
+            "ENGINE": _eng,
+            "BLOG": _blog,
+            "TRACKER": _eng / "blog_topics" / "pending_approvals.jsonl",
+            "FAILED_IMAGES": _eng / "blog_topics" / "failed_images.jsonl",
+            "EXEMPT": _eng / "blog_topics" / "published_exempt.jsonl",
+            "POSTS": _blog / "src/content/blog",
+            "RETRY_STATUS": _eng / "output" / "logs" / "blog-failed-retry-status.json",
+        })
     report = render_report(audit())
     if report:
         print(report)
