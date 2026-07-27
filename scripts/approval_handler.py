@@ -3,19 +3,30 @@
 Discord Approval Handler — polls #research-digest for "Approve" replies
 and auto-files kanban tasks. Token loaded from /home/kensei/.hermes/.env.
 """
-import json, os, re, time, urllib.request, urllib.error
+import json, os, re, sys, time, urllib.request, urllib.error
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 
 TZ = timezone(timedelta(hours=1))
 KENSEI_ID = "1506024421104812274"
 CHANNEL_ID = "1506021736536215813"
-WIKI_REPOS = Path("/home/kensei/wiki/repos")
-STATE = Path("/home/kensei/.hermes/state/approval-handler-state.json")
+
+# P13 isolation: paths derive from HERMES_HOME / WIKI_DIR (env-overridable)
+# so local disposable runs never touch /home/kensei/.hermes or the
+# production wiki repos checkout.
+_HERMES_HOME = Path(os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes")))
+WIKI_REPOS = Path(os.environ.get("WIKI_DIR", os.path.expanduser("~/wiki"))) / "repos"
+STATE = _HERMES_HOME / "state" / "approval-handler-state.json"
+
+# P13 isolation: when --dry-run is passed, every write path (Discord API
+# POST, wiki page rewrite, kanban task creation, state file save) is
+# suppressed. Read paths (load_state, discord_api GET, find_wiki) run
+# unchanged so the approval detection is still exercised.
+_DRY_RUN = False
 
 def get_token():
     """Read token from dotenv."""
-    dotenv = Path("/home/kensei/.hermes/.env")
+    dotenv = _HERMES_HOME / ".env"
     if dotenv.exists():
         for line in dotenv.read_text(encoding="utf-8").splitlines():
             line = line.strip()
@@ -25,6 +36,8 @@ def get_token():
     return os.environ.get("DISCORD_BOT_TOKEN", "")
 
 def discord_api(endpoint, data=None):
+    if _DRY_RUN and data is not None:
+        return None  # dry-run: suppress write (POST) calls; reads (GET) run
     token = get_token()
     if not token:
         print("err: no token")
@@ -52,6 +65,8 @@ def load_state():
     return {"processed": [], "last": 0}
 
 def save_state(st):
+    if _DRY_RUN:
+        return
     STATE.parent.mkdir(parents=True, exist_ok=True)
     STATE.write_text(json.dumps(st), encoding="utf-8")
 
@@ -81,11 +96,15 @@ def update_wiki(page):
         c = re.sub(r'updated:\s*\S+', f'updated: {today}', c)
     else:
         c = c.replace("---\n", f"---\nupdated: {today}\n", 1)
+    if _DRY_RUN:
+        return True
     page.write_text(c)
     return True
 
 def kanban_task(repo_name):
     import subprocess
+    if _DRY_RUN:
+        return None
     title = f"GitRadar Approval: {repo_name}"
     key = f"approval-{repo_name.lower().replace('/','-')}-{datetime.now(TZ).strftime('%Y-%m-%d')}"
     body = f"Approved via Discord reply. Auto-created.\n\nRepo: {repo_name}\n\nInclude `repo:{repo_name}` in completion result for auto-tagging."
@@ -105,6 +124,9 @@ def kanban_task(repo_name):
     return None
 
 def main():
+    global _DRY_RUN
+    if "--dry-run" in sys.argv:
+        _DRY_RUN = True
     h = datetime.now(TZ).hour
     if h < 7 or h >= 22:
         return
