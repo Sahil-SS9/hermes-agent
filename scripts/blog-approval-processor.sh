@@ -1,5 +1,13 @@
 #!/bin/bash
+# P13 isolation: BLOG_APPROVAL_DRY_RUN=1 short-circuits before any Python
+# invocation that flips MDX, builds, or pushes.
 set -euo pipefail
+
+if [[ ${BLOG_APPROVAL_DRY_RUN:-0} == "1" ]]; then
+    echo "dry-run: would process approvals"
+    exit 0
+fi
+
 cd /home/kensei/repos/KenseiAgent/content_engine
 export PYTHONPATH=.
 
