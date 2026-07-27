@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -155,6 +157,50 @@ def test_mutating_actions_require_exact_go_authority() -> None:
         with pytest.raises(PermissionError):
             module.require_go_authority(value)
     module.require_go_authority("!go")
+
+
+def test_stage_does_not_require_go_authority_when_matrix_is_stage_approved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _module()
+    path, digest = _catalogue(tmp_path)
+    matrix = {
+        "catalogue_sha256": digest,
+        "entries": [
+            {"source_instance": "VPS:cron/jobs.json:source-a", "audit_no_stage_state": "STAGE_APPROVED"},
+            {"source_instance": "VPS:cron/jobs.json:source-b", "audit_no_stage_state": "STAGE_APPROVED"},
+        ],
+    }
+    matrix_path = tmp_path / "matrix.json"
+    matrix_path.write_text(json.dumps(matrix))
+    staged: list[dict] = []
+    jobs_module = types.ModuleType("cron.jobs")
+    for name, implementation in {
+        "create_job": lambda **kwargs: kwargs,
+        "list_jobs": lambda **kwargs: [],
+        "pause_job": lambda *args, **kwargs: None,
+        "remove_job": lambda *args, **kwargs: True,
+        "resume_job": lambda *args, **kwargs: None,
+        "update_job": lambda *args, **kwargs: None,
+    }.items():
+        setattr(jobs_module, name, implementation)
+    cron_module = types.ModuleType("cron")
+    cron_module.__path__ = []
+    monkeypatch.setitem(sys.modules, "cron", cron_module)
+    monkeypatch.setitem(sys.modules, "cron.jobs", jobs_module)
+    monkeypatch.setattr(
+        module,
+        "stage_wave",
+        lambda entries, **kwargs: staged.append({"entries": entries, **kwargs}) or {"created": 2},
+    )
+    monkeypatch.delenv("KENSEI_MIGRATION_AUTHORITY", raising=False)
+
+    assert module.main([
+        "stage", "--catalogue", str(path), "--sha256", digest,
+        "--disposition", str(matrix_path), "--wave", "WAVE_1_BOUNDED_SCRIPTS",
+        "--receipt", str(tmp_path / "receipt.json"),
+    ]) == 0
+    assert len(staged) == 1
 
 
 def test_select_authorised_wave_rejects_entries_not_explicitly_stage_approved(

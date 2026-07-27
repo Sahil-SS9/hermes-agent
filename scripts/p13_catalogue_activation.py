@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Fail-closed P13 cron catalogue staging and activation utility.
 
-Planning is read-only. Staging always creates jobs disabled. Mutating actions
-require the exact KENSEI_MIGRATION_AUTHORITY=!go environment value.
+Planning is read-only. Staging always creates jobs disabled and requires a
+checksum-bound, complete `STAGE_APPROVED` disposition matrix. Enablement
+requires the exact KENSEI_MIGRATION_AUTHORITY=!go value.
 """
 from __future__ import annotations
 
@@ -366,7 +367,8 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(pause_receipt(receipt, pause_job_fn=pause_job), indent=2))
         return 0
 
-    require_go_authority(os.environ.get("KENSEI_MIGRATION_AUTHORITY"))
+    if args.action == "enable":
+        require_go_authority(os.environ.get("KENSEI_MIGRATION_AUTHORITY"))
     if args.action == "stage":
         result = stage_wave(
             entries,
