@@ -1,5 +1,9 @@
 """Check enabled_skills count vs expected. Silent when healthy."""
-import yaml, sys
+import os
+import sys
+from pathlib import Path
+
+import yaml
 
 MIN_SKILLS = 45
 expected = {
@@ -21,7 +25,8 @@ expected = {
 }
 
 try:
-    with open('/home/kensei/.hermes/config.yaml') as f:
+    config_path = Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes"))) / "config.yaml"
+    with open(config_path) as f:
         cfg = yaml.safe_load(f)
     skills = set(cfg.get('skills', {}).get('enabled_skills', []))
     if len(skills) < MIN_SKILLS:
