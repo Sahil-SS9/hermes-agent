@@ -13,8 +13,17 @@ import sqlite3, json, re, os, sys, time
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 
-KANBAN_DB = Path("/home/kensei/.hermes/kanban.db")
-WIKI_REPOS = Path("/home/kensei/wiki/repos")
+# P13 isolation: paths derive from HERMES_HOME / WIKI_DIR (env-overridable)
+# so local disposable runs never touch /home/kensei/.hermes or the
+# production wiki repos checkout.
+_HERMES_HOME = Path(os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes")))
+KANBAN_DB = _HERMES_HOME / "kanban.db"
+WIKI_REPOS = Path(os.environ.get("WIKI_DIR", os.path.expanduser("~/wiki"))) / "repos"
+
+# P13 isolation: when --dry-run is passed, the wiki page rewrite is
+# suppressed. Read paths (kanban DB query, find_wiki_reference) run
+# unchanged so the task scan is still exercised.
+_DRY_RUN = False
 
 TZ = timezone(timedelta(hours=1))
 now = datetime.now(TZ)
@@ -85,6 +94,8 @@ def update_wiki_page(repo_name):
             f'what_we_did: "Built and deployed via kanban pipeline. Completed {now.strftime("%Y-%m-%d")}."'
         )
 
+    if _DRY_RUN:
+        return "would-update"
     try:
         page_path.write_text(updated, encoding='utf-8')
     except OSError as e:
@@ -94,6 +105,9 @@ def update_wiki_page(repo_name):
     return "updated"
 
 def main():
+    global _DRY_RUN
+    if "--dry-run" in sys.argv:
+        _DRY_RUN = True
     if not KANBAN_DB.exists():
         print("SKIP: kanban DB not found")
         return
