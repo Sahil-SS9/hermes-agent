@@ -16,11 +16,19 @@ import sys
 from pathlib import Path
 
 # ── Paths ──────────────────────────────────────────────────────────────────
-KANBAN_BASE = Path.home() / '.hermes' / 'kanban'
+# P13 isolation: HERMES_HOME parameterises the hermes root.
+_HERMES_HOME = Path(os.environ.get('HERMES_HOME', str(Path.home() / '.hermes')))
+KANBAN_BASE = _HERMES_HOME / 'kanban'
 BOARDS_DIR = KANBAN_BASE / 'boards'
 DEFAULT_DB = KANBAN_BASE / 'kanban.db'  # back-compat: default board lives here
-STATE_FILE = Path.home() / '.hermes' / 'data' / 'kanban-notifier-state.json'
+STATE_FILE = _HERMES_HOME / 'data' / 'kanban-notifier-state.json'
 WRITE_LOCK = KANBAN_BASE / 'kanban-write.lock'
+
+# P13 dry-run: --dry-run suppresses Discord delivery (no state save, no
+# stdout message). Read paths (board scan, fetch_ready_tasks) run so the
+# notifier still reports what it WOULD post, but nothing is persisted or
+# printed for Discord delivery.
+_DRY_RUN = '--dry-run' in sys.argv
 
 # ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -81,6 +89,8 @@ def load_state() -> dict[str, list[str]]:
 
 def save_state(state: dict[str, list[str]]) -> None:
     """Persist dedup state atomically."""
+    if _DRY_RUN:
+        return  # dry-run: never persist dedup state
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
     tmp = STATE_FILE.with_suffix('.tmp')
     tmp.write_text(json.dumps(state, sort_keys=True), encoding='utf-8')
@@ -192,6 +202,10 @@ def main() -> None:
         state[board] = sorted(known)
 
     if new_messages:
+        if _DRY_RUN:
+            # dry-run: report what WOULD be posted but do not deliver.
+            print(f"[kanban-task-notifier] DRY-RUN: would post {len(new_messages)} message(s); state not saved")
+            return
         save_state(state)
         print('\n---\n'.join(new_messages))
     # else: silent — no output
