@@ -33,8 +33,9 @@ try:
 except ImportError:
     write_lock = None
 
-BOARDS_ROOT = Path(os.path.expanduser("~/.hermes/kanban/boards"))
-STATE_FILE = Path(os.path.expanduser("~/.hermes/data/feature-completion-state.json"))
+HERMES_HOME = Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes"))).expanduser()
+BOARDS_ROOT = HERMES_HOME / "kanban" / "boards"
+STATE_FILE = HERMES_HOME / "data" / "feature-completion-state.json"
 
 logger = logging.getLogger("feature-completion-notify")
 if not logger.handlers:
@@ -318,7 +319,7 @@ def main():
         logger.info("Boards root %s does not exist", BOARDS_ROOT)
 
     # Scan the default board (root kanban.db, not under boards/)
-    _default_db = Path(os.path.expanduser("~/.hermes/kanban.db"))
+    _default_db = HERMES_HOME / "kanban.db"
     if _default_db.exists() and not _is_db_corrupt(_default_db):
         try:
             _default_board = _default_db.parent  # ~/.hermes/kanban/
