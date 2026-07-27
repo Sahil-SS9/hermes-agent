@@ -191,11 +191,30 @@ def audit() -> list[str]:
     return issues
 
 
-if __name__ == "__main__":
-    problems = audit()
+MAX_REPORT_CHARS = 1600
+
+
+def render_report(problems: list[str]) -> str:
+    """Return a Discord-safe, zero-noise summary of audit problems."""
     if not problems:
-        print("[SILENT]")
-    else:
-        print("[Blog Pipeline Audit]")
-        for item in problems:
-            print(f"- {item}")
+        return ""
+
+    lines = ["[Blog Pipeline Audit]"]
+    for index, problem in enumerate(problems):
+        remaining = len(problems) - index - 1
+        summary = f"- … {remaining} more issue(s); inspect manually."
+        candidate = "\n".join([*lines, f"- {problem}"])
+        if remaining and len(candidate) + 1 + len(summary) > MAX_REPORT_CHARS:
+            lines.append(summary)
+            return "\n".join(lines)
+        if not remaining and len(candidate) > MAX_REPORT_CHARS:
+            lines.append("- … 1 more issue(s); inspect manually.")
+            return "\n".join(lines)
+        lines.append(f"- {problem}")
+    return "\n".join(lines)
+
+
+if __name__ == "__main__":
+    report = render_report(audit())
+    if report:
+        print(report)

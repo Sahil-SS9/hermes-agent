@@ -11,7 +11,7 @@ from pathlib import Path
 CONTENT_ENGINE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(CONTENT_ENGINE))
 
-from tools.blog_pipeline_audit import audit, _read_exempt  # noqa: E402
+from tools.blog_pipeline_audit import audit, _read_exempt, render_report  # noqa: E402
 from scripts.build_pending_digest import build  # noqa: E402
 
 
@@ -97,3 +97,13 @@ def test_digest_is_status_index(tmp_path, monkeypatch):
     assert "body content here" not in html, "index must NOT inline article bodies"
     assert "data:image" not in html, "index must not embed images (per-article previews do)"
     assert Path(out).stat().st_size < 8 * 1024 * 1024, "index must stay under Discord's 8MB cap"
+
+
+def test_audit_report_is_silent_when_healthy_and_capped_when_noisy():
+    assert render_report([]) == ""
+
+    report = render_report([f"problem {index}: " + "x" * 200 for index in range(20)])
+    assert report.startswith("[Blog Pipeline Audit]")
+    assert len(report) <= 1600
+    assert "more issue(s)" in report
+    assert "problem 19" not in report
