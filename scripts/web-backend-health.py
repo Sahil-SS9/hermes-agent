@@ -20,8 +20,22 @@ import sys
 import os
 from datetime import datetime
 
+# P13 isolation: HERMES_HOME is env-overridable so a disposable run never
+# touches /home/kensei/.hermes (this script is read-only but honours the
+# convention for consistency with the Wave 2 pattern).
+HERMES_HOME = os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes"))
+
+# P13 dry-run: when --dry-run is passed, every network probe (sudo docker
+# inspect, curl to SearXNG/GroktoCrawl, live DDGS search) is skipped. The
+# script reports a synthetic "dry-run: probes skipped" healthy result and
+# exits 0 so a disposable run never hits docker, the network, or DDGS.
+_DRY_RUN = "--dry-run" in sys.argv
+
+
 def check_searxng():
     """Check SearXNG container + API."""
+    if _DRY_RUN:
+        return True, "dry-run: probes skipped"
     # Container status
     r = subprocess.run(
         ['sudo', 'docker', 'inspect', 'searxng', '--format', '{{.State.Status}}'],
@@ -50,6 +64,8 @@ def check_searxng():
 
 def check_groktoCrawl():
     """Check GroktoCrawl agent container + scrape endpoint."""
+    if _DRY_RUN:
+        return True, "dry-run: probes skipped"
     # Container status
     r = subprocess.run(
         ['sudo', 'docker', 'inspect', 'groktocrawl-agent-svc-1', '--format', '{{.State.Status}}'],
@@ -83,6 +99,8 @@ def check_groktoCrawl():
 
 def check_ddgs():
     """Check DDGS is importable and functional."""
+    if _DRY_RUN:
+        return True, "dry-run: probes skipped"
     r = subprocess.run(
         ['python3', '-c',
          'from ddgs import DDGS; ddgs=DDGS(); r=list(ddgs.text("test", max_results=1)); exit(0 if len(r)>0 else 1)'],

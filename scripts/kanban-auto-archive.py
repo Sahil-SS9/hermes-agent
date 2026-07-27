@@ -25,12 +25,14 @@ from pathlib import Path
 ARCHIVE_AFTER_DAYS = 14
 
 # Output directory for HTML report
-REPORT_DIR = Path(os.path.expanduser("~/.hermes/kanban/reports"))
+# P13 isolation: HERMES_HOME parameterises the kanban root.
+_HERMES_HOME = os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes"))
+REPORT_DIR = Path(os.path.join(_HERMES_HOME, "kanban/reports"))
 
 
 def find_all_board_dbs() -> list[tuple[str, str]]:
-    dbs = [("default", os.path.expanduser("~/.hermes/kanban.db"))]
-    boards_dir = os.path.expanduser("~/.hermes/kanban/boards")
+    dbs = [("default", os.path.join(_HERMES_HOME, "kanban.db"))]
+    boards_dir = os.path.join(_HERMES_HOME, "kanban/boards")
     if os.path.isdir(boards_dir):
         for child in sorted(os.listdir(boards_dir)):
             child_path = os.path.join(boards_dir, child, "kanban.db")

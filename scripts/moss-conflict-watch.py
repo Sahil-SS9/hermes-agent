@@ -19,13 +19,20 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 
-STATE_FILE = os.path.expanduser("~/.hermes/data/moss-conflict-queue.json")
+# P13 isolation: HERMES_HOME parameterises the hermes root.
+_HERMES_HOME = os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes"))
+STATE_FILE = os.path.join(_HERMES_HOME, "data/moss-conflict-queue.json")
 TARGET_REPOS = [
     "NousResearch/hermes-agent",
 ]
 TRACKED_AUTHORS = [
     "Sahil-SS9",
 ]
+
+# P13 dry-run: --dry-run prevents GitHub calls (gh pr list) and state
+# writes. The script reports what it WOULD do but never touches the
+# network or the state file.
+_DRY_RUN = "--dry-run" in sys.argv
 
 def load_state():
     if os.path.exists(STATE_FILE):
@@ -34,11 +41,15 @@ def load_state():
     return {"updated_at": None, "tracked": []}
 
 def save_state(state):
+    if _DRY_RUN:
+        return  # dry-run: never write the state file
     os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
     with open(STATE_FILE, "w") as f:
         json.dump(state, f, indent=2)
 
 def get_open_prs(repo, author):
+    if _DRY_RUN:
+        return []  # dry-run: no GitHub API call
     result = subprocess.run(
         ["gh", "pr", "list", "--repo", repo, "--author", author, "--state", "open",
          "--json", "number,title,headRefName,mergeable,url,updatedAt", "--limit", "100"],

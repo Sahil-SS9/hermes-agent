@@ -38,8 +38,16 @@ logging.basicConfig(
 )
 logger = logging.getLogger("denji-canary-observe")
 
-EVAL_DIR = os.path.expanduser("~/.hermes/kensei/eval")
-PROFILE_EDITOR = os.path.expanduser("~/.hermes/scripts/profile_editor.py")
+# P13 isolation: HERMES_HOME parameterises the hermes root.
+_HERMES_HOME = os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes"))
+EVAL_DIR = os.path.join(_HERMES_HOME, "kensei/eval")
+PROFILE_EDITOR = os.path.join(_HERMES_HOME, "scripts/profile_editor.py")
+
+# P13 dry-run: --dry-run prevents git operations. The canary observation
+# loop (eval + observe_canary) still runs so pass-rate is computed, but
+# no REVERTED canary is git-reverted (no subprocess call to
+# profile_editor.py --rollback) and no fleet_health mutation.
+_DRY_RUN = "--dry-run" in sys.argv
 
 
 def _load_eval_domains() -> dict:
@@ -56,6 +64,9 @@ def _golden_set_for_domain(domain: str) -> str | None:
 
 def _revert_commit(commit: str) -> bool:
     """Revert an edit's commit via profile_editor.py --rollback."""
+    if _DRY_RUN:
+        logger.info("DRY-RUN: would revert commit %s (git operation skipped)", commit)
+        return False  # dry-run: never run the git rollback
     try:
         r = subprocess.run(
             [sys.executable, PROFILE_EDITOR, "--rollback", commit],
@@ -142,7 +153,9 @@ def main() -> int:
                 )
 
     # Refresh the fleet-health tripwire from this tick's evals.
-    if pass_rates:
+    # Under --dry-run we skip this: check_fleet_health persists the
+    # tripwire state (a write), so a disposable run must not call it.
+    if pass_rates and not _DRY_RUN:
         mean_pass = sum(pass_rates) / len(pass_rates)
         health = guard.check_fleet_health(
             eval_pass_rate=mean_pass,

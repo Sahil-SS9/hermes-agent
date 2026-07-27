@@ -22,8 +22,12 @@ import sys
 import glob
 import sqlite3
 
-CANONICAL_DBS = ["/home/kensei/.hermes/kanban.db"] + sorted(
-    glob.glob("/home/kensei/.hermes/kanban/boards/*/kanban.db")
+# P13 isolation: HERMES_HOME parameterises the kanban root so a
+# disposable run never touches /home/kensei/.hermes. When --db is passed
+# the explicit path wins regardless.
+_HERMES_HOME = os.environ.get("HERMES_HOME", "/home/kensei/.hermes")
+CANONICAL_DBS = [os.path.join(_HERMES_HOME, "kanban.db")] + sorted(
+    glob.glob(os.path.join(_HERMES_HOME, "kanban/boards/*/kanban.db"))
 )
 
 TERMINAL = ("done", "archived", "completed")

@@ -10,7 +10,11 @@ import os, json, tarfile, hashlib
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-BACKUP_ROOT = Path(os.path.expanduser("~/backups/daily"))
+BACKUP_ROOT = Path(os.environ.get("BACKUP_ROOT", os.path.expanduser("~/backups/daily")))
+# P13 dry-run: when BACKUP_HEALTH_DRY_RUN=1, skip archive verification
+# (opening tarfiles, sha256 computation, manifest parsing) so a disposable
+# run never opens a live backup archive. Only the path resolution runs.
+_DRY_RUN = os.environ.get("BACKUP_HEALTH_DRY_RUN", "") not in ("", "0", "false")
 MAX_AGE_HOURS = 36  # Alert if newest backup is older than this
 # Files that must be present — auth.json excluded (secrets need separate encrypted backup)
 CRITICAL_FILES = ["config.yaml", "kanban.db"]
@@ -100,10 +104,18 @@ def check_extractable(archive: Path) -> str | None:
 def main():
     result = find_latest_backup()
     if result is None:
-        print(f"ALERT: No backup archives found in {BACKUP_ROOT}")
+        if _DRY_RUN:
+            print(f"DRY-RUN: no backup archives found in {BACKUP_ROOT} (verification skipped)")
+        else:
+            print(f"ALERT: No backup archives found in {BACKUP_ROOT}")
         return 0
-    
+
     archive, manifest_path = result
+
+    if _DRY_RUN:
+        print(f"DRY-RUN: would verify {archive.name} (age, manifest, checksum, extractable — all skipped)")
+        return 0
+
     errors = []
     
     err = check_age(archive)
@@ -123,8 +135,9 @@ def main():
         for e in errors:
             print(f"  - {e}")
         return 0
-    
+
     # Silent when healthy
+    return 0
 
 if __name__ == "__main__":
     main()
