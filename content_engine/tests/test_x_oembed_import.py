@@ -9,7 +9,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
-from content_engine import x_oembed_import as importer
+import x_oembed_import as importer
 
 
 @pytest.fixture
