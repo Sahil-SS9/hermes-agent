@@ -18,12 +18,16 @@ from collections import defaultdict
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-REPORT_DIR = Path(os.path.expanduser("~/.hermes/kanban/reports"))
+def _hermes_home() -> str:
+    return os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes"))
+
+REPORT_DIR = Path(_hermes_home()) / "kanban" / "reports"
 
 
 def find_all_board_dbs() -> list[tuple[str, str]]:
-    dbs = [("default", os.path.expanduser("~/.hermes/kanban.db"))]
-    boards_dir = os.path.expanduser("~/.hermes/kanban/boards")
+    home = _hermes_home()
+    dbs = [("default", os.path.join(home, "kanban.db"))]
+    boards_dir = os.path.join(home, "kanban", "boards")
     if os.path.isdir(boards_dir):
         for child in sorted(os.listdir(boards_dir)):
             child_path = os.path.join(boards_dir, child, "kanban.db")
