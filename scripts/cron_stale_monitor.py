@@ -37,6 +37,7 @@ Output contract (per cron-output-contract v2.6.0):
 """
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import sys
@@ -125,7 +126,23 @@ def _format_uk(dt: datetime) -> str:
     return dt.strftime("%d/%m/%Y %H:%M:%S")
 
 
-def main() -> int:
+def _receipt_job_ids(receipt_path: Path) -> set[str]:
+    """Return the staged target IDs from a P13 receipt, failing closed on bad rows."""
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    jobs = receipt.get("jobs")
+    if not isinstance(jobs, list):
+        raise ValueError("receipt jobs must be a list")
+    ids: set[str] = set()
+    for item in jobs:
+        target_id = item.get("target_id") if isinstance(item, dict) else None
+        if not isinstance(target_id, str) or not target_id:
+            raise ValueError("receipt contains an invalid target_id")
+        ids.add(target_id)
+    return ids
+
+
+def main(receipt_path: Path | None = None) -> int:
+    monitored_ids = _receipt_job_ids(receipt_path) if receipt_path is not None else None
     if not JOBS_FILE.exists():
         # No jobs file → nothing to monitor. Silent.
         return 0
@@ -140,6 +157,8 @@ def main() -> int:
     now = datetime.now(timezone.utc)
     findings: list[dict] = []
     for job in data.get("jobs", []):
+        if monitored_ids is not None and job.get("id") not in monitored_ids:
+            continue
         if not job.get("enabled") or job.get("state") == "paused":
             continue
         cadence = _classify(job)
@@ -221,5 +240,15 @@ def main() -> int:
     return 0
 
 
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--receipt",
+        type=Path,
+        help="limit monitoring to target job IDs in this P13 staging receipt",
+    )
+    return parser.parse_args(argv)
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(_parse_args().receipt))
