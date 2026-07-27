@@ -19,11 +19,21 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-HERMES = Path.home() / ".hermes"
+def _hermes_home() -> Path:
+    return Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes")))
+
+HERMES = _hermes_home()
 DIGEST_DIR = HERMES / "runbooks" / "research-digest"
 SYNTH_DIR = HERMES / "runbooks" / "research-paper-synthesis"
-RADAR_DIR = Path("/home/kensei/repos/KenseiAgent/runbooks/github-radar")
-MASHUPS_FILE = Path("/home/kensei/wiki/_meta/paper-mashups.md")
+# Radar lives under the Kensei repo root; allow override via env or CLI.
+RADAR_DIR = Path(os.environ.get(
+    "KENSEI_RADAR_ROOT",
+    str(Path(os.environ.get("KENSEI_REPO_ROOT", "/home/kensei/repos/KenseiAgent"))
+        / "runbooks" / "github-radar"),
+))
+MASHUPS_FILE = Path(os.environ.get(
+    "KENSEI_WIKI_ROOT", "/home/kensei/wiki",
+)) / "_meta" / "paper-mashups.md"
 OUT_DIR = HERMES / "runbooks" / "kensei-review-daily"
 TODAY = datetime.now().strftime("%Y-%m-%d")
 TODAY_UK = datetime.now().strftime("%d/%m/%Y")
