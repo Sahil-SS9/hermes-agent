@@ -8,6 +8,13 @@
 
 set -euo pipefail
 
+# P13 isolation: GITOPS_DRY_RUN=1 short-circuits before any git add/commit
+# so the watcher can be exercised without mutating the repo.
+if [[ "${GITOPS_DRY_RUN:-0}" == "1" ]]; then
+    echo "dry-run: would commit config changes"
+    exit 0
+fi
+
 HERMES_HOME="${HERMES_HOME:-/home/kensei/.hermes}"
 STATE_DIR="$HERMES_HOME/scripts/gitops/state"
 STATE_FILE="$STATE_DIR/last-watch"

@@ -15,8 +15,13 @@
 
 set -euo pipefail
 
+# P13 isolation: MCP_ORPHAN_DRY_RUN=1 forces dry-run regardless of TTY.
+# This overrides the non-TTY default that would kill processes when cron
+# runs without a terminal.
 DRY_RUN=true
-if [[ "${1:-}" == "--apply" ]]; then
+if [[ "${MCP_ORPHAN_DRY_RUN:-0}" == "1" ]]; then
+    DRY_RUN=true
+elif [[ "${1:-}" == "--apply" ]]; then
     DRY_RUN=false
 elif [[ "${1:-}" == "--dry-run" ]]; then
     DRY_RUN=true

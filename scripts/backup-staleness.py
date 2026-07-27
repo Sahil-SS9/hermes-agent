@@ -14,20 +14,22 @@ from pathlib import Path
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-BACKUP_DIR = Path("/home/kensei/backups")
+BACKUP_DIR = Path(os.environ.get("BACKUP_STALENESS_DIR", "/home/kensei/backups"))
 DAILY_DIR = BACKUP_DIR / "daily"
-STATE_FILE = Path("/home/kensei/.hermes/scripts/.backup-staleness-state.json")
+_HERMES_HOME = Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes")))
+STATE_FILE = _HERMES_HOME / "scripts" / ".backup-staleness-state.json"
 MAX_AGE_HOURS = 48
 TZ = ZoneInfo("Europe/London")
 CLEANUP_DAILY_DAYS = 7
 CLEANUP_SNAPSHOT_DAYS = 30
 
 
-def get_latest_backup():
+def get_latest_backup(backup_dir=None):
     """Find the most recent file in the backup directory."""
-    if not BACKUP_DIR.exists():
+    backup_dir = backup_dir if backup_dir is not None else BACKUP_DIR
+    if not backup_dir.exists():
         return None, 0, []
-    files = sorted(BACKUP_DIR.iterdir(), key=lambda f: f.stat().st_mtime, reverse=True)
+    files = sorted(backup_dir.iterdir(), key=lambda f: f.stat().st_mtime, reverse=True)
     if not files:
         return None, 0, []
     latest = files[0]
@@ -36,68 +38,96 @@ def get_latest_backup():
     return latest, age_hours, files
 
 
-def load_state():
+def load_state(state_file=None):
     """Load previous state for size comparison."""
-    if STATE_FILE.exists():
+    state_file = state_file if state_file is not None else STATE_FILE
+    if state_file.exists():
         try:
-            return json.loads(STATE_FILE.read_text())
+            return json.loads(state_file.read_text())
         except Exception:
             pass
     return {"last_size": 0, "last_check": None}
 
 
-def save_state(state):
+def save_state(state, state_file=None):
     """Save current state."""
-    STATE_FILE.write_text(json.dumps(state))
+    state_file = state_file if state_file is not None else STATE_FILE
+    state_file.parent.mkdir(parents=True, exist_ok=True)
+    state_file.write_text(json.dumps(state))
 
 
-def cleanup_old_daily():
+def cleanup_old_daily(backup_dir=None, *, dry_run=False):
     """Remove tarballs in daily/ older than CLEANUP_DAILY_DAYS."""
     deleted = []
-    if not DAILY_DIR.exists():
+    backup_dir = backup_dir if backup_dir is not None else BACKUP_DIR
+    daily_dir = backup_dir / "daily"
+    if not daily_dir.exists():
         return deleted
     cutoff = datetime.now().timestamp() - (CLEANUP_DAILY_DAYS * 86400)
-    for item in DAILY_DIR.iterdir():
+    for item in daily_dir.iterdir():
         if item.is_file() and item.suffix == ".gz":
             if item.stat().st_mtime < cutoff:
                 try:
                     size = item.stat().st_size
-                    item.unlink()
+                    if not dry_run:
+                        item.unlink()
                     deleted.append((item.name, size))
                 except Exception as e:
                     print(f"Failed to delete {item}: {e}")
     return deleted
 
 
-def cleanup_old_snapshots():
+def cleanup_old_snapshots(backup_dir=None, *, dry_run=False):
     """Remove static snapshot directories older than CLEANUP_SNAPSHOT_DAYS."""
     deleted = []
-    if not BACKUP_DIR.exists():
+    backup_dir = backup_dir if backup_dir is not None else BACKUP_DIR
+    if not backup_dir.exists():
         return deleted
     cutoff = datetime.now().timestamp() - (CLEANUP_SNAPSHOT_DAYS * 86400)
     # Patterns for static snapshots we consider safe to clean
     patterns = ("kensei-phase0-*", "profiles-bak-voicewire-*")
     for pattern in patterns:
-        for item in BACKUP_DIR.glob(pattern):
+        for item in backup_dir.glob(pattern):
             if item.is_dir() and item.stat().st_mtime < cutoff:
                 try:
                     # Get size before deletion for logging
                     size = sum(f.stat().st_size for f in item.rglob("*") if f.is_file())
-                    shutil.rmtree(item)
+                    if not dry_run:
+                        shutil.rmtree(item)
                     deleted.append((item.name, size))
                 except Exception as e:
                     print(f"Failed to delete snapshot {item}: {e}")
     return deleted
 
 
-def main():
+def main(argv=None):
+    import argparse
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Plan cleanup only; never delete files")
+    parser.add_argument("--backup-dir", type=Path, default=None,
+                        help="Override backup directory (default: env BACKUP_STALENESS_DIR or /home/kensei/backups)")
+    parser.add_argument("--state-file", type=Path, default=None,
+                        help="Override state file path (default: HERMES_HOME/scripts/.backup-staleness-state.json)")
+    parser.add_argument("--hermes-home", type=Path, default=None,
+                        help="Override HERMES_HOME used to derive the default state file")
+    args = parser.parse_args(argv)
+    dry_run = args.dry_run
+    backup_dir = args.backup_dir if args.backup_dir is not None else BACKUP_DIR
+    if args.hermes_home is not None:
+        state_file = args.hermes_home / "scripts" / ".backup-staleness-state.json"
+    elif args.state_file is not None:
+        state_file = args.state_file
+    else:
+        state_file = STATE_FILE
+
     alerts = []
-    latest, age_hours, files = get_latest_backup()
-    state = load_state()
+    latest, age_hours, files = get_latest_backup(backup_dir)
+    state = load_state(state_file)
     now = datetime.now(TZ)
 
     if latest is None:
-        alerts.append("**No backups found** in /home/kensei/backups/")
+        alerts.append("**No backups found** in " + str(backup_dir) + "/")
     else:
         # Check age
         if age_hours > MAX_AGE_HOURS:
@@ -113,8 +143,8 @@ def main():
             alerts.append(f"**Only {len(files)} backup files** - expected multiple rotation copies")
 
     # Perform cleanup
-    deleted_daily = cleanup_old_daily()
-    deleted_snapshots = cleanup_old_snapshots()
+    deleted_daily = cleanup_old_daily(backup_dir, dry_run=dry_run)
+    deleted_snapshots = cleanup_old_snapshots(backup_dir, dry_run=dry_run)
     cleanup_msgs = []
     if deleted_daily:
         total_size = sum(sz for _, sz in deleted_daily)
@@ -123,11 +153,12 @@ def main():
         total_size = sum(sz for _, sz in deleted_snapshots)
         cleanup_msgs.append(f"Cleaned up {len(deleted_snapshots)} static snapshot directory(ies) (> {CLEANUP_SNAPSHOT_DAYS} days), freed {total_size/(1024**3):.2f} GB")
 
-    # Save state for next run
-    save_state({
-        "last_size": sum(f.stat().st_size for f in files if f.is_file()) if files else 0,
-        "last_check": now.isoformat()
-    })
+    # Save state for next run (skip in dry-run so state is untouched)
+    if not dry_run:
+        save_state({
+            "last_size": sum(f.stat().st_size for f in files if f.is_file()) if files else 0,
+            "last_check": now.isoformat()
+        }, state_file)
 
     if not alerts and not cleanup_msgs:
         sys.exit(0)  # Silent when healthy
