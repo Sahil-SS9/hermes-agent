@@ -8,13 +8,27 @@
 #     .hermes/scripts path that may not exist on fresh installs).
 #   - Explicit failure reporting: logs when the runner or gitnexus binary
 #     is missing instead of failing silently under set -e.
+# P13 isolation (2026-07-28):
+#   - GITNEXUS_DRY_RUN=1 short-circuits before starting the indexer so a
+#     disposable/local run never spawns a detached background rebuild or
+#     touches the gitnexus registry.
+#   - GITNEXUS_DIR env parameterises the gitnexus state dir (registry.json)
+#     so a dry-run can read a throwaway registry instead of the live one.
 set -euo pipefail
 
-REPO="/home/kensei/repos/KenseiAgent"
-GITNEXUS="/home/kensei/.hermes/node/bin/gitnexus"
+REPO="${KENSEI_REPO:-/home/kensei/repos/KenseiAgent}"
+GITNEXUS_DIR="${GITNEXUS_DIR:-/home/kensei/.gitnexus}"
+GITNEXUS="${GITNEXUS_BIN:-/home/kensei/.hermes/node/bin/gitnexus}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUNNER="${SCRIPT_DIR}/gitnexus-reindex-runner.sh"
-LOG_DIR="/home/kensei/.hermes/logs/gitnexus"
+LOG_DIR="${GITNEXUS_LOG_DIR:-/home/kensei/.hermes/logs/gitnexus}"
+
+# P13 dry-run: short-circuit before any indexer spawn or registry mutation.
+if [ "${GITNEXUS_DRY_RUN:-0}" = "1" ]; then
+    echo "[gitnexus-reindex-daily] DRY-RUN: would re-index $REPO (indexer not started, registry untouched)"
+    exit 0
+fi
+
 mkdir -p "$LOG_DIR"
 
 # Explicit pre-flight checks (fail with a message, not a silent set -e abort).
@@ -32,8 +46,8 @@ HEAD_COMMIT=$(cd "$REPO" && git rev-parse HEAD)
 
 # Check if index is stale — read from registry.json (has full SHA)
 INDEXED_COMMIT=$(python3 -c "
-import json
-d = json.load(open('/home/kensei/.gitnexus/registry.json'))
+import json,os
+d = json.load(open(os.environ.get('GITNEXUS_DIR','/home/kensei/.gitnexus')+'/registry.json'))
 for r in d:
     if r['name'] == 'KenseiAgent':
         print(r.get('lastCommit', ''))
