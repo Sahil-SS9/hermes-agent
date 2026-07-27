@@ -1,7 +1,7 @@
 """P13 prompt-isolation contract tests for agent-job prompts.
 
 For each agent job (kensei-triage-investigator, memory-promotion-daily,
-kensei-librarian-daily), verifies the prompt contract:
+kensei-librarian-daily, denji-skill-audit), verifies the prompt contract:
 - No hardcoded /home/kensei paths (must use ~ or $HERMES_HOME so a
   profile/checkout-relative run works).
 - Respects HERMES_HOME (references the home via $HERMES_HOME or ~/ so
@@ -33,7 +33,7 @@ def jobs():
 
 @pytest.mark.parametrize(
     "job_name",
-    ["kensei-triage-investigator", "memory-promotion-daily", "kensei-librarian-daily"],
+    ["kensei-triage-investigator", "memory-promotion-daily", "kensei-librarian-daily", "denji-skill-audit"],
 )
 def test_prompt_has_no_hardcoded_kensei_paths(jobs, job_name):
     """No prompt may reference /home/kensei/... — it must use ~ or
@@ -49,7 +49,7 @@ def test_prompt_has_no_hardcoded_kensei_paths(jobs, job_name):
 
 @pytest.mark.parametrize(
     "job_name",
-    ["kensei-triage-investigator", "memory-promotion-daily", "kensei-librarian-daily"],
+    ["kensei-triage-investigator", "memory-promotion-daily", "kensei-librarian-daily", "denji-skill-audit"],
 )
 def test_prompt_respects_hermes_home_or_tilde(jobs, job_name):
     """Any path reference must use ~ or $HERMES_HOME (not a hardcoded
@@ -72,7 +72,7 @@ def test_prompt_respects_hermes_home_or_tilde(jobs, job_name):
 
 @pytest.mark.parametrize(
     "job_name",
-    ["kensei-triage-investigator", "memory-promotion-daily", "kensei-librarian-daily"],
+    ["kensei-triage-investigator", "memory-promotion-daily", "kensei-librarian-daily", "denji-skill-audit"],
 )
 def test_prompt_has_explicit_output_contract(jobs, job_name):
     """Each prompt must specify an explicit output contract: [SILENT]
