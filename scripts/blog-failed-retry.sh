@@ -7,49 +7,49 @@
 # Writes a status JSON (blog-failed-retry-status.json) on completion so the
 # pipeline-audit cron can report the outcome to #blog-management. Previously
 # this cron ran silent — retries happened with zero visibility.
-set -euo pipefail
+#
+# Env overrides (P13 isolation / local disposable-tree runs):
+#   BLOG_RETRY_ENGINE_ROOT  — content_engine dir (default: production path)
+#   BLOG_RETRY_PIPELINE_CMD — full command to run instead of the default
+#                             blog.blog_pipeline --retry invocation
+#
+# Runs SYNCHRONOUSLY (the previous detached-background design made the cron
+# return before the retry finished, so the audit cron could not rely on the
+# status file). The pipeline exit code is captured without errexit aborting
+# the wrapper and propagated as the wrapper exit code.
+set -uo pipefail
+# NOTE: errexit (set -e) is intentionally OFF for the wrapper so a non-zero
+# pipeline exit is captured and written to the status file rather than
+# aborting the wrapper before the status is persisted.
 
-ROOT=/home/kensei/repos/KenseiAgent/content_engine
-LOG_DIR="$ROOT/output/logs"
-mkdir -p "$LOG_DIR"
-LOG="$LOG_DIR/blog-failed-retry-$(date +%Y%m%d-%H%M%S).log"
-STATUS="$LOG_DIR/blog-failed-retry-status.json"
+ROOT=${BLOG_RETRY_ENGINE_ROOT:-/home/kensei/repos/KenseiAgent/content_engine}
+LOG_DIR=$ROOT/output/logs
+STATUS=$LOG_DIR/blog-failed-retry-status.json
 
-if [[ "${BLOG_RETRY_NOOP:-}" == "1" ]]; then
-  echo "noop: would launch blog failed-image retry detached -> $LOG"
+# Noop guard BEFORE mkdir so a noop run touches nothing on disk.
+if [[ ${BLOG_RETRY_NOOP:-} == "1" ]]; then
+  echo "noop: would run blog failed-image retry -> $STATUS"
   exit 0
 fi
 
-(
-  cd "$ROOT"
-  set -a
-  . ~/.hermes/.env 2>/dev/null || true
-  set +a
+mkdir -p "$LOG_DIR"
+LOG="$LOG_DIR/blog-failed-retry-$(date +%Y%m%d-%H%M%S).log"
+
+PIPELINE_CMD=${BLOG_RETRY_PIPELINE_CMD:-PYTHONPATH=. ../.venv/bin/python -m blog.blog_pipeline --retry}
+
+# Run synchronously. Capture output + rc without errexit aborting the wrapper.
+OUT=$(cd "$ROOT" && eval "$PIPELINE_CMD" 2>&1)
+rc=$?
+{
   echo "[$(date -Is)] starting blog failed-image retry"
-  OUT=$(PYTHONPATH=. ../.venv/bin/python -m blog.blog_pipeline --retry 2>&1)
-  rc=$?
   echo "$OUT"
   echo "[$(date -Is)] finished blog failed-image retry rc=$rc"
-  # Persist machine-readable status for the audit cron to surface.
-  python3 - "$rc" <<'PY'
-import sys, json, re, datetime
-rc = sys.argv[1]
-out = sys.stdin.read()
-status = {"rc": int(rc), "finished_at": datetime.datetime.now().isoformat(timespec="seconds"), "raw": out[-2000:]}
-m = re.search(r"retry_all_pending_images:\s*\{?(.*?)\}?", out, re.S)
-if m:
-    blob = m.group(1)
-    for key in ("recovered", "still_failed", "no_draft", "deferred", "idle"):
-        km = re.search(rf"'?{key}'?\s*:\s*(\[[^\]]*\]|\w+)", blob)
-        if km:
-            val = km.group(1)
-            status[key] = json.loads(val) if val.startswith("[") else val
-with open("$STATUS", "w") as f:
-    json.dump(status, f, indent=2)
-PY
-  exit "$rc"
-) >>"$LOG" 2>&1 < /dev/null &
+} >> "$LOG"
 
-pid=$!
-# Detached process started — status written on completion for the audit cron.
-exit 0
+# Persist machine-readable status for the audit cron to surface. The rc,
+# status path, and captured output are passed as explicit env vars to a
+# separate Python helper to avoid shell escaping issues with inline Python.
+BLOG_STATUS_RC="$rc" BLOG_STATUS_PATH="$STATUS" BLOG_STATUS_RAW="$OUT" \
+  python3 "$(dirname "$0")/blog_retry_status_writer.py"
+
+exit "$rc"
