@@ -21,8 +21,9 @@ import subprocess, json, sys, os, re
 from pathlib import Path
 from datetime import datetime, timedelta
 
-REPO = Path("/home/kensei/repos/hermes-agent-upstream")
+REPO = Path(os.environ.get("MOSS_BRANCH_REPO", "/home/kensei/repos/hermes-agent-upstream"))
 DAYS_STALE = 14
+DRY_RUN = os.environ.get("MOSS_BRANCH_DRY_RUN", "") == "1"
 
 def run(cmd, timeout=30):
     try:
@@ -78,6 +79,9 @@ def get_pr_status(branch):
 
 def delete_branch(branch):
     """Delete branch locally and on fork remote."""
+    if DRY_RUN:
+        print(f"[dry-run] would delete branch: {branch}")
+        return []
     errors = []
     # Delete local
     r1 = run(f"git branch -D {branch}", timeout=15)
