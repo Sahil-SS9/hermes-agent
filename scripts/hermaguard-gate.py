@@ -27,7 +27,9 @@ BOARDS = _board_compat.build_board_db_map([
 ])
 
 OUT_DIR = HERMES_HOME / "governance" / "logboard"
-OUT_DIR.mkdir(parents=True, exist_ok=True)
+# OUT_DIR.mkdir() is deferred until immediately before the live log write
+# (see main()). Importing the module must not create directories — tests
+# import the module under a temp HERMES_HOME and assert no side effects.
 
 TZ = timezone(timedelta(hours=1))
 now = datetime.now(TZ)
@@ -139,7 +141,19 @@ def _has_hermaguard_evidence(task_id: str, db_path: Path) -> bool:
     return False
 
 
-def main():
+def _parse_args(argv: list[str] | None = None):
+    import argparse
+    parser = argparse.ArgumentParser(description="Hermaguard Gate 0 monitor")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Report flagged task IDs to stdout without writing the audit logboard.",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _parse_args(argv)
     tasks = _scan_boards()
     flagged = []
     skipped_tier = []
@@ -158,48 +172,50 @@ def main():
         else:
             flagged.append({"task": task, "tier_tag": tier_tag})
 
-    # Always log to logboard for audit
-    log_entry = {
-        "gate_name": "hermaguard-gate",
-        "timestamp": now.isoformat(),
-        "window_hours": WINDOW_HOURS,
-        "scanned": len(tasks),
-        "compliant": len(compliant),
-        "flagged": len(flagged),
-        "skipped_tier": len(skipped_tier),
-        "flagged_tasks": [
-            {
-                "id": f["task"]["id"],
-                "board": f["task"]["_board_slug"],
-                "title": f["task"]["title"][:80],
-                "status": f["task"]["status"],
-                "tier_tag": f["tier_tag"],
-                "updated_at": datetime.fromtimestamp(
-                    f["task"]["updated_at"], tz=timezone(timedelta(hours=1))
-                ).isoformat(),
-            }
-            for f in flagged
-        ],
-        "compliant_tasks": [
-            {
-                "id": c["task"]["id"],
-                "board": c["task"]["_board_slug"],
-                "title": c["task"]["title"][:80],
-                "status": c["task"]["status"],
-                "tier_tag": c["tier_tag"],
-            }
-            for c in compliant[:10]  # Cap for brevity
-        ],
-    }
-    logfile = OUT_DIR / f"hermaguard-gate-{now.strftime('%Y%m%d-%H%M%S')}.json"
-    logfile.write_text(json.dumps(log_entry, indent=2, default=str))
+    # Live mode: always log to logboard for audit. Dry-run: never create files.
+    if not args.dry_run:
+        log_entry = {
+            "gate_name": "hermaguard-gate",
+            "timestamp": now.isoformat(),
+            "window_hours": WINDOW_HOURS,
+            "scanned": len(tasks),
+            "compliant": len(compliant),
+            "flagged": len(flagged),
+            "skipped_tier": len(skipped_tier),
+            "flagged_tasks": [
+                {
+                    "id": f["task"]["id"],
+                    "board": f["task"]["_board_slug"],
+                    "title": f["task"]["title"][:80],
+                    "status": f["task"]["status"],
+                    "tier_tag": f["tier_tag"],
+                    "updated_at": datetime.fromtimestamp(
+                        f["task"]["updated_at"], tz=timezone(timedelta(hours=1))
+                    ).isoformat(),
+                }
+                for f in flagged
+            ],
+            "compliant_tasks": [
+                {
+                    "id": c["task"]["id"],
+                    "board": c["task"]["_board_slug"],
+                    "title": c["task"]["title"][:80],
+                    "status": c["task"]["status"],
+                    "tier_tag": c["tier_tag"],
+                }
+                for c in compliant[:10]  # Cap for brevity
+            ],
+        }
+        OUT_DIR.mkdir(parents=True, exist_ok=True)
+        logfile = OUT_DIR / f"hermaguard-gate-{now.strftime('%Y%m%d-%H%M%S')}.json"
+        logfile.write_text(json.dumps(log_entry, indent=2, default=str))
 
     # Silent when nothing flagged
     if not flagged:
-        sys.exit(0)
+        return 0
 
     # Deliver report. Only reached when tasks are missing Gate 0, so this is
-    # always an action item (silent exit above when all compliant).
+    # always an action item (silent return above when all compliant).
     print(f"🔴 **Gate 0 (Adversarial Review) Compliance Report**")
     print(f"Window: last {WINDOW_HOURS}h  |  {now.strftime('%d/%m/%Y %H:%M:%S')}")
     print()
