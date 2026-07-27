@@ -8,6 +8,7 @@ import json
 import os
 import re
 import sqlite3
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -15,9 +16,23 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 CHANNEL_ID = "1507448580649123900"
-DB_PATH = Path("/home/kensei/repos/KenseiAgent/content_engine/db/content_engine.db")
-STATE_PATH = Path("/home/kensei/.hermes/state/ceecee-approval-state.json")
-DOTENV_PATH = Path("/home/kensei/.hermes/.env")
+
+# P13 isolation: paths derive from HERMES_HOME (env-overridable) so local
+# disposable runs never touch /home/kensei/.hermes or the production
+# content_engine DB. REPO_ROOT lets the DB default resolve to the active
+# checkout rather than a hardcoded absolute path.
+_HERMES_HOME = Path(os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes")))
+_REPO_ROOT = Path(os.environ.get("KENSEI_REPO_ROOT", "/home/kensei/repos/KenseiAgent"))
+DB_PATH = Path(os.environ.get("CEECEE_DB_PATH", str(_REPO_ROOT / "content_engine" / "db" / "content_engine.db")))
+STATE_PATH = _HERMES_HOME / "state" / "ceecee-approval-state.json"
+DOTENV_PATH = _HERMES_HOME / ".env"
+
+# P13 isolation: when --dry-run is passed, every write path (Discord API
+# POST/PUT, SQLite UPDATE/commit, state file save, reaction add) is
+# suppressed. Read paths (load_state, parse_command, Discord GET for
+# message polling) run unchanged so the classification/decision logic is
+# still exercised.
+_DRY_RUN = False
 
 
 def get_token() -> str:
@@ -32,6 +47,8 @@ def get_token() -> str:
 
 def discord_api(endpoint: str, data: dict | None = None) -> dict | list | None:
     """Call the Discord REST API. Returns parsed JSON or None on error."""
+    if _DRY_RUN and data is not None:
+        return None  # dry-run: suppress write (POST) calls; reads (GET) still run
     token = get_token()
     if not token:
         return None
@@ -64,6 +81,8 @@ def load_state() -> dict:
 
 def save_state(st: dict) -> None:
     """Persist processed message IDs to state file."""
+    if _DRY_RUN:
+        return
     STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
     STATE_PATH.write_text(json.dumps(st), encoding="utf-8")
 
@@ -103,6 +122,17 @@ def update_draft_status(draft_id: str, command: str, args: str) -> str | None:
         if not row:
             return None
 
+        # P13 dry-run: compute the result message but skip the UPDATE + commit.
+        if _DRY_RUN:
+            now = datetime.now(timezone.utc).isoformat()
+            if command == "approve":
+                return f"Approved {draft_id} (dry-run)"
+            elif command == "reject":
+                return f"Rejected {draft_id} (dry-run)" + (f" — {args}" if args else "")
+            elif command == "amend":
+                return f"Amended {draft_id} (dry-run)" + (f" — {args}" if args else "")
+            return f"Unknown command: {command}"
+
         now = datetime.now(timezone.utc).isoformat()
 
         if command == "approve":
@@ -141,6 +171,8 @@ def update_draft_status(draft_id: str, command: str, args: str) -> str | None:
 
 def add_reaction(message_id: str, emoji: str = "✅") -> bool:
     """Add a reaction emoji to a Discord message (PUT endpoint)."""
+    if _DRY_RUN:
+        return False
     token = get_token()
     if not token:
         return False
@@ -160,6 +192,9 @@ def add_reaction(message_id: str, emoji: str = "✅") -> bool:
 
 
 def main() -> None:
+    global _DRY_RUN
+    if "--dry-run" in sys.argv:
+        _DRY_RUN = True
     st = load_state()
     processed = set(st.get("processed", []))
 
