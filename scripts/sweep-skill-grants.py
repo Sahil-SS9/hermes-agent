@@ -4,6 +4,11 @@
 Thin wrapper over tools.skill_grants.sweep_expired_grants (repo is source of
 truth). Portable: sys.path is derived from __file__ so the wrapper runs from
 any checkout location, not a hardcoded absolute path.
+
+P13 isolation: pass --dry-run to suppress the sweep (no revoke events are
+appended to the profile activity ledger). The wrapper prints what would run
+and exits 0 without touching the ledger. HERMES_HOME (read by the ledger via
+the config layer) selects the active home for any read path.
 """
 import json
 import sys
@@ -11,6 +16,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from tools.skill_grants import sweep_expired_grants
+
+if "--dry-run" in sys.argv:
+    print(json.dumps({"dry_run": True, "ttl_hours": 24, "action": "sweep_expired_grants"}))
+    sys.exit(0)
 
 n = sweep_expired_grants(ttl_hours=24)
 if n:
