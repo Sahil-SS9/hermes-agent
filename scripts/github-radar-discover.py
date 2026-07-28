@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
 """
+
+# P13: disabled-staging guard — exit early when cron is disabled
+import os as _os, sys as _sys
+if _os.environ.get("DRY_RUN") == "1":
+    print(f"[DRY_RUN] {_os.path.basename(__file__)}")
+    _sys.exit(0)
 GitHub Radar — Automated Repo Discovery Pipeline (v4.1.0)
 Dual-mode: daily (lightweight new finds) + weekly (full re-evaluation).
 

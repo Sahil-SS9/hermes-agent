@@ -5,13 +5,19 @@
 # (discord_digest), so the cron deliver target is 'local'.
 set -euo pipefail
 
-CE="/home/kensei/repos/KenseiAgent/content_engine"
+# P13: disabled-staging guard — exit early when cron is disabled
+if [ "${DRY_RUN:-0}" = "1" ]; then echo "[DRY_RUN] $(basename "$0")"; exit 0; fi
+
+HERMES_HOME="${HERMES_HOME:-/home/kensei/.hermes}"
+REPO="${REPO:-/home/kensei/repos/KenseiAgent}"
+
+CE="${REPO}/content_engine"
 cd "$CE"
 
 # The gateway env does not carry FAL_KEY / DISCORD_BOT_TOKEN — source them.
 set -a
 # shellcheck disable=SC1091
-source /home/kensei/.hermes/.env
+source "${HERMES_HOME}/.env"
 set +a
 
 export PYTHONPATH="${CE}:${PYTHONPATH:-}"
@@ -19,4 +25,4 @@ export PYTHONPATH="${CE}:${PYTHONPATH:-}"
 # Wrap in timeout to prevent FAL/Discord hangs from blocking the cron slot
 # 300s matches the cron-level timeout; FAL image generation can take 90-300s
 # when the API is slow (not locked — locked returns 403 instantly)
-timeout 600 /home/kensei/repos/KenseiAgent/.venv/bin/python /home/kensei/repos/KenseiAgent/content_engine/content_engine.py review-digest --since-minutes 75 --max 3
+timeout 600 "${REPO}/.venv/bin/python" "${CE}/content_engine.py" review-digest --since-minutes 75 --max 3

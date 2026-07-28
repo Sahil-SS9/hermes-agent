@@ -20,6 +20,12 @@ P0/P1 patterns observed:
 - Stale lock eviction
 """
 
+# P13: disabled-staging guard — exit early when cron is disabled
+import os as _os, sys as _sys
+if _os.environ.get("DRY_RUN") == "1":
+    print(f"[DRY_RUN] {_os.path.basename(__file__)}")
+    _sys.exit(0)
+
 import hashlib
 import json
 import os

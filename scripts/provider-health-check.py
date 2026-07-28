@@ -4,13 +4,20 @@
 Silent when healthy (exit 0, empty stdout).
 Outputs alert text when a provider is unreachable or responding slowly.
 """
+
+# P13: disabled-staging guard — exit early when cron is disabled
+import os as _os, sys as _sys
+if _os.environ.get("DRY_RUN") == "1":
+    print(f"[DRY_RUN] {_os.path.basename(__file__)}")
+    _sys.exit(0)
+
 import subprocess
 import sys
 import json
 import time
 from pathlib import Path
 
-HERMES = Path("/home/kensei/.hermes")
+HERMES = Path(os.environ.get("HERMES_HOME", "/home/kensei/.hermes"))
 
 # Providers to check (name, base_url, endpoint) - only actively configured providers
 PROVIDERS = [

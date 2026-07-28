@@ -2,6 +2,9 @@
 # swap-watchdog.sh — silent when healthy, alerts if swap exceeds threshold
 # Used by: swap-watchdog cron (no_agent mode)
 set -euo pipefail
+# P13: disabled-staging guard — exit early when cron is disabled
+if [ "${DRY_RUN:-0}" = "1" ]; then echo "[DRY_RUN] $(basename "$0")"; exit 0; fi
+
 
 THRESHOLD=75  # alert if swap usage % exceeds this
 

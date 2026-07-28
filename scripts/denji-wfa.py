@@ -8,7 +8,14 @@ and emits:
 - concise stdout for Discord cron delivery
 - machine-readable JSON under the governance logboard
 """
+
 from __future__ import annotations
+
+# P13: disabled-staging guard — exit early when cron is disabled
+import os as _os, sys as _sys
+if _os.environ.get("DRY_RUN") == "1":
+    print(f"[DRY_RUN] {_os.path.basename(__file__)}")
+    _sys.exit(0)
 
 import os
 import datetime as dt

@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# P13: disabled-staging guard — exit early when cron is disabled
+if [ "${DRY_RUN:-0}" = "1" ]; then echo "[DRY_RUN] $(basename "$0")"; exit 0; fi
+
 # governance-crossref-wrapper.sh
 # Wrapper for governance-crossref.py - checks if Denji review exists, runs cross-reference.
 # Silent when no review file found (cron-output-contract).

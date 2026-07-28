@@ -12,6 +12,12 @@ Sources (early signal first):
 
 Focus: UI/UX quality, reliability, trending/hot, new tools, patterns, NOT stack introspection.
 """
+
+# P13: disabled-staging guard — exit early when cron is disabled
+import os as _os, sys as _sys
+if _os.environ.get("DRY_RUN") == "1":
+    print(f"[DRY_RUN] {_os.path.basename(__file__)}")
+    _sys.exit(0)
 import json, os, sys, re, subprocess
 from datetime import datetime, timedelta
 from pathlib import Path
