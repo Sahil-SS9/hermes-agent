@@ -21,6 +21,7 @@ import threading
 import time
 import uuid
 from datetime import datetime
+from pathlib import Path
 from urllib.parse import urlparse
 
 from rich import box as rich_box
@@ -3189,3 +3190,214 @@ class CLICommandsMixin:
         else:
             _cprint(f"Unknown voice subcommand: {subcommand}")
             _cprint("Usage: /voice [on|off|tts|status]")
+
+    # ------------------------------------------------------------------
+    # /generate-image — interactive native-Codex image generation
+    # ------------------------------------------------------------------
+
+    def _handle_generate_image_command(self, cmd: str):
+        """Handle /generate-image — generate one private native-Codex image job.
+
+        Runs an interactive question flow collecting prompt, style, backend
+        (default codex), repeatable references, private stage root, safe job
+        id, and aspect ratio. Style and aspect-ratio are presented as numbered
+        text menus that also accept a typed value for custom entry. Displays
+        the final config and exact command, then requires confirmation before
+        executing. Invokes the shared in-process runner
+        (``tools.generate_image_runner.run_generate_image``) which drives the
+        existing content-engine image execution service directly — never
+        shells out and never duplicates generation logic.
+        """
+        import re as _re
+        from cli import _DIM, _RST, _cprint
+
+        # Canonical style ids offered in the numbered menu.  Sourced from the
+        # content engine's STYLE_LIBRARY so the picker stays in sync without a
+        # hard import (the CLI must not depend on content_engine at import
+        # time).  The user may always type a custom style id instead.
+        _STYLE_CHOICES: tuple[str, ...] = (
+            "data-atlas",
+            "mythic-tech-codex",
+            "ninth-observatory",
+            "chromatic-institute",
+            "signal-hud",
+            "technical-diorama",
+            "typographic-poster-design",
+            "vintage-print-atelier",
+            "photographic-realism",
+            "cosmic-postcard",
+            "ink-ember-studio",
+            "saga-noir",
+            "pixel-art",
+        )
+        _ASPECT_CHOICES: tuple[str, ...] = ("landscape", "square", "portrait")
+        # Mirrors content_engine.image_reference_staging._JOB_ID_RE — validated
+        # locally before spawning so a bad id is rejected without a subprocess.
+        _JOB_ID_RE = _re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}\Z")
+
+        # Parse inline args if provided: key=value pairs separated by '|'.
+        # This lets users pre-fill any field: /generate-image prompt=...|style=...
+        inline: dict[str, str] = {}
+        raw_args = (cmd.split(None, 1)[1].strip() if " " in cmd else "")
+        if raw_args:
+            for pair in raw_args.split("|"):
+                pair = pair.strip()
+                if "=" in pair:
+                    k, v = pair.split("=", 1)
+                    inline[k.strip().lower().replace("-", "_")] = v.strip()
+
+        def _ask(field: str, label: str, default: str = "") -> str:
+            if field in inline:
+                return inline[field]
+            hint = f" [{default}]" if default else ""
+            try:
+                value = input(f"{label}{hint}: ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                return ""
+            return value or default
+
+        def _menu(field: str, label: str, choices: tuple[str, ...], default: str = "") -> str:
+            """Numbered menu that also accepts a typed value (custom entry).
+
+            Accepts a number (1-based index) selecting one of *choices*, an
+            exact choice label, or any other text as a custom value.  An empty
+            reply returns *default*.  Inline pre-filled values bypass the menu.
+            """
+            if field in inline:
+                return inline[field]
+            _cprint(f"  {_DIM}{label}:{_RST}")
+            for idx, choice in enumerate(choices, start=1):
+                marker = " (default)" if choice == default and default else ""
+                _cprint(f"    {_DIM}{idx}.{_RST} {choice}{marker}")
+            _cprint(f"    {_DIM}(or type a custom value){_RST}")
+            try:
+                raw = input(f"  Choice [1-{len(choices)} / custom]: ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                return ""
+            if not raw:
+                return default
+            # Numeric selection.
+            if raw.isdigit():
+                idx = int(raw)
+                if 1 <= idx <= len(choices):
+                    return choices[idx - 1]
+            # Exact label match (case-insensitive).
+            for choice in choices:
+                if raw.casefold() == choice.casefold():
+                    return choice
+            # Custom entry.
+            return raw
+
+        # 1. Prompt (required)
+        prompt = _ask("prompt", "Prompt")
+        if not prompt:
+            _cprint("  {_DIM}(._.) A prompt is required. Cancelled.{_RST}")
+            return
+
+        # 2. Style (required) — numbered menu + custom entry
+        style = _menu("style", "Style", _STYLE_CHOICES)
+        if not style:
+            _cprint("  {_DIM}(._.) A style is required. Cancelled.{_RST}")
+            return
+
+        # 3. Backend — default codex
+        backend = _ask("backend", "Backend (codex|local)", default="codex")
+        if backend not in ("codex", "local"):
+            _cprint(f"  {_DIM}(._.) Invalid backend '{backend}'. Must be codex or local. Cancelled.{_RST}")
+            return
+
+        # 4. References — repeatable, comma-separated URLs
+        refs_raw = _ask("references", "Reference URLs (comma-separated, or empty for none)")
+        references: list[str] = []
+        if refs_raw:
+            references = [r.strip() for r in refs_raw.split(",") if r.strip()]
+
+        # 5. Stage root (required)
+        stage_root = _ask("stage_root", "Private stage root (absolute path)")
+        if not stage_root:
+            _cprint("  {_DIM}(._.) A stage root is required. Cancelled.{_RST}")
+            return
+
+        # 6. Job ID (required) — validated locally before spawning
+        job_id = _ask("job_id", "Safe job ID (e.g. gen-20260101-abc)")
+        if not job_id:
+            _cprint("  {_DIM}(._.) A job ID is required. Cancelled.{_RST}")
+            return
+        if not _JOB_ID_RE.fullmatch(job_id):
+            _cprint(
+                f"  {_DIM}(._.) Invalid job ID '{job_id}'. "
+                f"Must be 1-64 chars, start with a letter/digit, and contain "
+                f"only letters, digits, underscores or hyphens. Cancelled.{_RST}"
+            )
+            return
+
+        # 7. Aspect ratio — numbered menu + custom entry, default landscape
+        aspect_ratio = _menu(
+            "aspect_ratio", "Aspect ratio", _ASPECT_CHOICES, default="landscape",
+        )
+        if aspect_ratio not in ("landscape", "square", "portrait"):
+            _cprint(f"  {_DIM}(._.) Invalid aspect ratio '{aspect_ratio}'. Cancelled.{_RST}")
+            return
+
+        # Display final config, require confirmation.
+        _cprint("")
+        _cprint(f"  {_DIM}── generate-image config ──{_RST}")
+        _cprint(f"  {_DIM}prompt:{_RST}       {prompt}")
+        _cprint(f"  {_DIM}style:{_RST}        {style}")
+        _cprint(f"  {_DIM}backend:{_RST}      {backend}")
+        _cprint(f"  {_DIM}references:{_RST}   {', '.join(references) if references else '(none)'}")
+        _cprint(f"  {_DIM}stage-root:{_RST}   {stage_root}")
+        _cprint(f"  {_DIM}job-id:{_RST}       {job_id}")
+        _cprint(f"  {_DIM}aspect-ratio:{_RST} {aspect_ratio}")
+
+        # Render the exact canonical content_engine.py generate-image command
+        # so the user can verify what will actually run before approving.
+        from tools.generate_image_runner import render_generate_image_command
+
+        exact_cmd = render_generate_image_command(
+            prompt=prompt,
+            style=style,
+            backend=backend,
+            references=references,
+            stage_root=stage_root,
+            job_id=job_id,
+            aspect_ratio=aspect_ratio,
+        )
+        _cprint(f"  {_DIM}── exact command ──{_RST}")
+        _cprint(f"  {exact_cmd}")
+        _cprint("")
+
+        try:
+            confirm = input("Execute this command? [y/N]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            confirm = ""
+
+        if confirm != "y":
+            _cprint(f"  {_DIM}🟡 Cancelled. No image generated.{_RST}")
+            return
+
+        _cprint(f"  {_DIM}Generating…{_RST}")
+        from tools.generate_image_runner import run_generate_image
+
+        try:
+            payload = run_generate_image(
+                prompt=prompt,
+                style=style,
+                backend=backend,
+                references=references,
+                stage_root=stage_root,
+                job_id=job_id,
+                aspect_ratio=aspect_ratio,
+            )
+        except Exception as exc:
+            _cprint(f"  {_DIM}(x_x) Image generation failed: {exc}{_RST}")
+            return
+
+        _cprint(f"  ✅ Image generated successfully.")
+        _cprint(f"  {_DIM}backend:{_RST}       {payload.get('backend', {})}")
+        _cprint(f"  {_DIM}job-id:{_RST}       {payload.get('job_id', '')}")
+        _cprint(f"  {_DIM}output-path:{_RST}  {payload.get('output_path', '')}")
+        _cprint(f"  {_DIM}sha256:{_RST}       {payload.get('sha256', '')}")

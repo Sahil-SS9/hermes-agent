@@ -11202,6 +11202,39 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # clearly moved on.
             _slash_confirm_mod.clear_if_stale(_quick_key)
 
+        # Intercept replies for a pending /generate-image multi-step
+        # interaction.  When the gateway handler couldn't collect all fields
+        # inline, it registered a per-session state machine
+        # (tools.generate_image_interaction) and sent the first missing-field
+        # question.  Each non-slash user reply feeds into the state machine
+        # until all fields are collected, then the final confirmation routes
+        # through _request_slash_confirm.  Slash commands bypass so /stop,
+        # /cancel, etc. keep working.
+        try:
+            from tools import generate_image_interaction as _gi_mod
+            _pending_gi = _gi_mod.get_pending(_quick_key)
+        except Exception:
+            _pending_gi = None
+        if _pending_gi is not None:
+            _gi_reply = (event.text or "").strip()
+            if _gi_reply and not _gi_reply.startswith("/"):
+                _gi_stale = _gi_mod.clear_if_stale(_quick_key)
+                if not _gi_stale:
+                    _gi_result = await self._gi_resolve_step(event)
+                    # A successful interactive step commonly returns None:
+                    # the handler already sent the next prompt through the
+                    # adapter.  It is still consumed and must never fall
+                    # through into ordinary agent dispatch.
+                    return _gi_result or ""
+            else:
+                # Slash command while a generate-image interaction is
+                # pending — unconditionally drop the interaction so it
+                # doesn't block the new command.  A fresh (non-stale)
+                # pending wizard must also be cleared: the user has moved
+                # on to a different slash command and the wizard should not
+                # swallow it or linger to intercept later normal replies.
+                _gi_mod.clear(_quick_key)
+
         # PRIORITY handling when an agent is already running for this session.
         # Default behavior is to interrupt immediately so user text/stop messages
         # are handled with minimal latency.
@@ -11953,6 +11986,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         if canonical == "kanban":
             return await self._handle_kanban_command(event)
+
+        if canonical == "generate-image":
+            return await self._handle_generate_image_command(event)
 
         if canonical == "suggestions":
             return await self._handle_suggestions_command(event)

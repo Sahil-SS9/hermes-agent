@@ -268,6 +268,8 @@ COMMAND_REGISTRY: list[CommandDef] = [
                cli_only=True),
     CommandDef("image", "Attach a local image file for your next prompt", "Info",
                cli_only=True, args_hint="<path>"),
+    CommandDef("generate-image", "Generate one private native-Codex image via the content engine", "Tools & Skills",
+               args_hint="[prompt|style|backend|stage-root|job-id|aspect-ratio]"),
     CommandDef("update", "Update Hermes Agent to the latest version", "Info"),
     CommandDef("version", "Show Hermes Agent version", "Info", aliases=("v",)),
     CommandDef("debug", "Upload debug report (system info + logs) and get shareable links", "Info",
@@ -1195,6 +1197,7 @@ _SLACK_PRIORITY_ALIASES = ("btw", "bg")
 #     cwd-/maintenance-oriented commands deliberately routed through /hermes.
 _SLACK_VIA_HERMES_ONLY = frozenset({
     "topup", "insights", "moa", "debug", "egress", "init", "version", "diff", "update",
+    "generate-image",
 })
 
 

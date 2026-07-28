@@ -142,4 +142,11 @@ def build_relay_command_manifest() -> List[Dict[str, Any]]:
             "description": "Run a prompt in the background",
             "options": [_opt("text", "The prompt to run")],
         },
+        {
+            "name": "generate-image",
+            "description": "Generate one private native-Codex image via the content engine",
+            "options": [
+                _opt("args", "prompt=...|style=...|stage-root=...|job-id=...|backend=codex|aspect-ratio=landscape"),
+            ],
+        },
     ]

@@ -6126,6 +6126,78 @@ class DiscordAdapter(BasePlatformAdapter):
         async def slash_background(interaction: discord.Interaction, prompt: str):
             await self._run_simple_slash(interaction, f"/background {prompt}", "Background task started~")
 
+        @tree.command(name="generate-image", description="Generate one private native-Codex image via the content engine")
+        @discord.app_commands.describe(
+            prompt="Image prompt (required, or leave empty for interactive flow)",
+            style="Style preset (leave empty for interactive menu)",
+            style_custom="Custom style ID (overrides the selected style preset)",
+            backend="Generation backend (default: codex)",
+            aspect_ratio="Aspect ratio (default: landscape)",
+            stage_root="Private stage-root path (required, or empty for interactive)",
+            job_id="Safe job ID (required, or empty for interactive)",
+            references="Comma-separated reference URLs (optional)",
+        )
+        @discord.app_commands.choices(
+            style=[
+                discord.app_commands.Choice(name="data-atlas", value="data-atlas"),
+                discord.app_commands.Choice(name="mythic-tech-codex", value="mythic-tech-codex"),
+                discord.app_commands.Choice(name="ninth-observatory", value="ninth-observatory"),
+                discord.app_commands.Choice(name="chromatic-institute", value="chromatic-institute"),
+                discord.app_commands.Choice(name="signal-hud", value="signal-hud"),
+                discord.app_commands.Choice(name="technical-diorama", value="technical-diorama"),
+                discord.app_commands.Choice(name="typographic-poster-design", value="typographic-poster-design"),
+                discord.app_commands.Choice(name="vintage-print-atelier", value="vintage-print-atelier"),
+                discord.app_commands.Choice(name="photographic-realism", value="photographic-realism"),
+                discord.app_commands.Choice(name="cosmic-postcard", value="cosmic-postcard"),
+                discord.app_commands.Choice(name="ink-ember-studio", value="ink-ember-studio"),
+                discord.app_commands.Choice(name="saga-noir", value="saga-noir"),
+                discord.app_commands.Choice(name="pixel-art", value="pixel-art"),
+            ],
+            backend=[
+                discord.app_commands.Choice(name="codex", value="codex"),
+                discord.app_commands.Choice(name="local", value="local"),
+            ],
+            aspect_ratio=[
+                discord.app_commands.Choice(name="landscape", value="landscape"),
+                discord.app_commands.Choice(name="square", value="square"),
+                discord.app_commands.Choice(name="portrait", value="portrait"),
+            ],
+        )
+        async def slash_generate_image(
+            interaction: discord.Interaction,
+            prompt: str = "",
+            style: str = "",
+            style_custom: str = "",
+            backend: str = "codex",
+            aspect_ratio: str = "landscape",
+            stage_root: str = "",
+            job_id: str = "",
+            references: str = "",
+        ):
+            # Build the pipe-delimited args line the gateway handler parses.
+            # When fields are empty, the gateway handler's multi-step flow
+            # collects them interactively via clarify prompts.
+            parts: list[str] = []
+            if prompt.strip():
+                parts.append(f"prompt={prompt.strip()}")
+            # A custom style is deliberately separate from the choice field:
+            # Discord choices otherwise prevent manually typed style IDs.
+            selected_style = style_custom.strip() or style.strip()
+            if selected_style:
+                parts.append(f"style={selected_style}")
+            if backend.strip():
+                parts.append(f"backend={backend.strip()}")
+            if aspect_ratio.strip():
+                parts.append(f"aspect-ratio={aspect_ratio.strip()}")
+            if stage_root.strip():
+                parts.append(f"stage-root={stage_root.strip()}")
+            if job_id.strip():
+                parts.append(f"job-id={job_id.strip()}")
+            if references.strip():
+                parts.append(f"references={references.strip()}")
+            args_line = "|".join(parts)
+            await self._run_simple_slash(interaction, f"/generate-image {args_line}".strip())
+
         @tree.command(name="blog-topic", description="Capture a topic for the blog pipeline (next scheduled post or ad hoc)")
         @discord.app_commands.describe(
             topic="Free text topic, or leave empty to pull recent chat history",

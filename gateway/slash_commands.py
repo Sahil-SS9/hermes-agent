@@ -5637,3 +5637,457 @@ class GatewaySlashCommandsMixin:
 
         self._schedule_update_notification_watch()
         return t("gateway.update.starting")
+
+    # ------------------------------------------------------------------
+    # /generate-image — gateway-side native-Codex image generation
+    # ------------------------------------------------------------------
+
+    # Shared constants for /generate-image — used by the handler and the
+    # multi-step interaction intercept in _handle_message.
+    _GI_STYLE_CHOICES: tuple[str, ...] = (
+        "data-atlas",
+        "mythic-tech-codex",
+        "ninth-observatory",
+        "chromatic-institute",
+        "signal-hud",
+        "technical-diorama",
+        "typographic-poster-design",
+        "vintage-print-atelier",
+        "photographic-realism",
+        "cosmic-postcard",
+        "ink-ember-studio",
+        "saga-noir",
+        "pixel-art",
+    )
+    _GI_ASPECT_CHOICES: tuple[str, ...] = ("landscape", "square", "portrait")
+    _GI_BACKEND_CHOICES: tuple[str, ...] = ("codex", "local")
+
+    async def _handle_generate_image_command(self, event: "MessageEvent") -> Union[str, "EphemeralReply", None]:
+        """Handle /generate-image on the gateway.
+
+        Two paths:
+
+        1. **All fields inline** — when the user supplies every required
+           field via ``key=value`` pairs (``prompt=...|style=...|stage-root=...|job-id=...``),
+           the handler validates them, shows the final config + exact command,
+           and routes through ``_request_slash_confirm`` for a final
+           confirmation before invoking the shared in-process content-engine service.
+
+        2. **Multi-step interaction** — when required fields are missing, the
+           handler registers a per-session state machine
+           (``tools.generate_image_interaction``) and sends the first missing
+           field's question via the adapter's ``send_clarify``.  Each user
+           reply advances the state machine; when all fields are collected the
+           final confirmation is shown.  This works on every platform
+           (Telegram buttons, Discord slash command, Slack, text fallback).
+
+        The handler never blocks the event loop — it returns an ack and the
+        message intercept in ``_handle_message`` feeds subsequent replies
+        into the state machine.  Generation logic is never duplicated: the shared in-process
+        content-engine service is the single execution path.
+        """
+        import json as _json
+        import os as _os
+        import re as _re
+        import sys as _sys
+        import uuid as _uuid
+        from pathlib import Path as _Path
+
+        # Mirrors content_engine.image_reference_staging._JOB_ID_RE — validated
+        # locally before spawning so a bad id is rejected without a subprocess.
+        _GI_JOB_ID_RE = _re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}\Z")
+
+        raw_args = event.get_command_args().strip()
+        fields: dict[str, str] = {}
+        if raw_args:
+            for pair in raw_args.split("|"):
+                pair = pair.strip()
+                if "=" in pair:
+                    k, v = pair.split("=", 1)
+                    fields[k.strip().lower().replace("-", "_")] = v.strip()
+
+        # Keep omitted optional values absent until the interaction has offered
+        # them.  The confirmation seam applies codex/landscape defaults only
+        # after the user has had a chance to select or decline them.
+
+        # Validate enum fields early when supplied inline.
+        # because they have fixed choices (the multi-step flow offers choices
+        # for style/aspect/backend, but if the user passed a bad value inline
+        # we reject immediately rather than silently overriding).
+        backend = fields.get("backend", "codex").strip()
+        if backend not in self._GI_BACKEND_CHOICES:
+            return EphemeralReply(
+                f"Invalid backend '{backend}'. Must be one of: {', '.join(self._GI_BACKEND_CHOICES)}."
+            )
+        aspect_ratio = fields.get("aspect_ratio", "landscape").strip()
+        if aspect_ratio not in self._GI_ASPECT_CHOICES:
+            return EphemeralReply(
+                f"Invalid aspect-ratio '{aspect_ratio}'. Must be one of: {', '.join(self._GI_ASPECT_CHOICES)}."
+            )
+
+        # If the caller supplied the core required values inline, optional
+        # backend/references/aspect-ratio use their documented defaults.  When
+        # starting a guided flow, ask every field so the user can override
+        # those defaults explicitly.
+        _core_required = ("prompt", "style", "stage_root", "job_id")
+        _all_fields = (
+            "prompt", "style", "backend", "references", "stage_root", "job_id", "aspect_ratio",
+        )
+        if any(not fields.get(field, "").strip() for field in _core_required):
+            missing = [field for field in _all_fields if not fields.get(field, "").strip()]
+        else:
+            missing = []
+
+        if missing:
+            # Multi-step interaction: register the state machine and send the
+            # first question.  The message intercept feeds subsequent replies.
+            return await self._gi_start_multi_step(event, fields, missing)
+
+        # All fields present — validate job_id before showing confirmation.
+        job_id = fields.get("job_id", "").strip()
+        if not _GI_JOB_ID_RE.fullmatch(job_id):
+            return EphemeralReply(
+                f"Invalid job-id '{job_id}'. Must be 1-64 chars, start with a "
+                f"letter/digit, and contain only letters, digits, underscores "
+                f"or hyphens."
+            )
+
+        # Show final config + command, require confirmation.
+        return await self._gi_confirm_and_execute(event, fields)
+
+    async def _gi_start_multi_step(
+        self, event: "MessageEvent", fields: dict[str, str], missing: list[str],
+    ) -> Union[str, "EphemeralReply", None]:
+        """Register the multi-step state machine and send the first question."""
+        from tools import generate_image_interaction as _gi
+
+        source = event.source
+        session_key = self._session_key_for_source(source)
+        _gi.register(session_key, fields, missing)
+        return await self._gi_ask_next(event, session_key)
+
+    async def _gi_ask_next(
+        self, event: "MessageEvent", session_key: str,
+    ) -> Union[str, "EphemeralReply", None]:
+        """Send the next missing-field question, or trigger final confirmation.
+
+        Reads the pending state for ``session_key``.  If no fields remain
+        missing, validates job_id and routes to ``_gi_confirm_and_execute``.
+        Otherwise sends a question for the next field (with a numbered list
+        for choice-based fields) as a plain text message via the adapter and
+        returns.  The message intercept in ``_handle_message`` feeds the
+        user's next reply into ``_gi_resolve_step``.
+
+        We deliberately do NOT use the clarify_gateway primitive here: the
+        clarify text-intercept in ``_handle_message`` runs *before* our
+        generate-image intercept and would consume the reply, preventing the
+        state machine from advancing.  Using a plain send + our own intercept
+        keeps the flow self-contained and avoids that race.
+        """
+        from tools import generate_image_interaction as _gi
+
+        state = _gi.get_pending(session_key)
+        if state is None:
+            return EphemeralReply("Generate-image interaction expired. Please restart with /generate-image.")
+
+        missing = state.get("missing", [])
+        fields = dict(state.get("fields", {}))
+
+        if not missing:
+            # All fields collected — validate job_id and confirm.
+            job_id = fields.get("job_id", "").strip()
+            import re as _re
+            _GI_JOB_ID_RE = _re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}\Z")
+            if not _GI_JOB_ID_RE.fullmatch(job_id):
+                _gi.clear(session_key)
+                return EphemeralReply(
+                    f"Invalid job-id '{job_id}'. Must be 1-64 chars, start with a "
+                    f"letter/digit, and contain only letters, digits, underscores "
+                    f"or hyphens. Please restart with /generate-image."
+                )
+            return await self._gi_confirm_and_execute(event, fields)
+
+        field = missing[0]
+        question, choices = self._gi_question_for_field(field, fields)
+
+        # Build a numbered list for choice-based fields so users on text-only
+        # platforms (Telegram, Slack) get a selectable menu.
+        if choices:
+            lines = [f"❓ {question}", ""]
+            for i, choice in enumerate(choices, start=1):
+                lines.append(f"  {i}. {choice}")
+            lines.append("")
+            lines.append("Reply with the number, the option text, or your own value.")
+            message_text = "\n".join(lines)
+        else:
+            message_text = f"❓ {question}"
+
+        # Send via the adapter as a plain message.  The reply is caught by
+        # our generate-image intercept in _handle_message.
+        adapter = self._adapter_for_source(event.source)
+        metadata = self._thread_metadata_for_source(
+            event.source, self._reply_anchor_for_event(event),
+        )
+        if adapter is not None:
+            try:
+                await adapter.send(
+                    chat_id=str(event.source.chat_id),
+                    content=message_text,
+                    metadata=metadata,
+                )
+            except Exception as exc:
+                logger.debug("generate-image question send failed: %s", exc)
+                return message_text
+            return None
+
+        # No adapter — return the text so the caller can display it.
+        return message_text
+
+    def _gi_question_for_field(
+        self, field: str, fields: dict[str, str],
+    ) -> tuple[str, Optional[list[str]]]:
+        """Return (question, choices) for the next missing field."""
+        if field == "prompt":
+            return ("What prompt should the image use?", None)
+        if field == "style":
+            return (
+                "Which style?",
+                list(self._GI_STYLE_CHOICES),
+            )
+        if field == "backend":
+            return ("Which backend? Press Enter for codex.", list(self._GI_BACKEND_CHOICES))
+        if field == "references":
+            return ("Reference URLs, comma-separated (or press Enter for none)?", None)
+        if field == "stage_root":
+            return (
+                "What private stage-root path should the job use? (absolute path)",
+                None,
+            )
+        if field == "job_id":
+            return (
+                "What safe job ID should this image use? "
+                "(letters, digits, underscores, hyphens; e.g. gen-20260101-abc)",
+                None,
+            )
+        if field == "aspect_ratio":
+            return ("Which aspect ratio? Press Enter for landscape.", list(self._GI_ASPECT_CHOICES))
+        # Unknown field — open-ended.
+        return (f"Value for {field}?", None)
+
+    async def _gi_resolve_step(
+        self, event: "MessageEvent",
+    ) -> Optional[str]:
+        """Feed a user reply into a pending generate-image interaction.
+
+        Called from the message intercept when a pending interaction exists.
+        Returns a reply string if the step was resolved (possibly the next
+        question or the final confirmation), or None to fall through.
+        """
+        from tools import generate_image_interaction as _gi
+
+        source = event.source
+        session_key = self._session_key_for_source(source)
+        state = _gi.get_pending(session_key)
+        if state is None:
+            return None
+
+        raw_reply = (event.text or "").strip()
+        # Slash commands bypass — the user wanted to issue a command, not
+        # answer the prompt.
+        if not raw_reply or raw_reply.startswith("/"):
+            return None
+
+        missing = state.get("missing", [])
+        if not missing:
+            return None
+
+        field = missing[0]
+
+        # Choice fields accept a numbered or exact-label selection. Style may
+        # also be a custom typed value; empty backend/aspect replies take their
+        # documented defaults.
+        if field == "style":
+            value = self._gi_coerce_choice(raw_reply, self._GI_STYLE_CHOICES) or raw_reply
+        elif field == "backend":
+            value = self._gi_coerce_choice(raw_reply, self._GI_BACKEND_CHOICES) or ("codex" if not raw_reply else "")
+            if not value:
+                return "Invalid backend. Reply with codex or local."
+        elif field == "aspect_ratio":
+            value = self._gi_coerce_choice(raw_reply, self._GI_ASPECT_CHOICES) or ("landscape" if not raw_reply else "")
+            if not value:
+                return "Invalid aspect ratio. Reply with landscape, square, or portrait."
+        elif field == "references":
+            # Chat platforms cannot submit a meaningful empty reply; accept a
+            # natural explicit opt-out and preserve an empty reference list.
+            value = "" if raw_reply.casefold() in {"none", "no", "skip", "-"} else raw_reply
+        else:
+            value = raw_reply
+        updated = _gi.advance(session_key, value)
+        if updated is None:
+            return None
+
+        # Acknowledge the step, then ask the next question or confirm.
+        still_missing = updated.get("missing", [])
+        if still_missing:
+            return await self._gi_ask_next(event, session_key)
+
+        # All fields collected — validate job_id before confirming, mirroring
+        # the inline and _gi_ask_next paths.  A bad job_id must be rejected
+        # here too, not only when it was supplied inline.
+        fields = dict(updated.get("fields", {}))
+        import re as _re
+        _resolve_job_id_re = _re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}\Z")
+        job_id_val = fields.get("job_id", "").strip()
+        if not _resolve_job_id_re.fullmatch(job_id_val):
+            _gi.clear(session_key)
+            return EphemeralReply(
+                f"Invalid job-id '{job_id_val}'. Must be 1-64 chars, start with a "
+                f"letter/digit, and contain only letters, digits, underscores "
+                f"or hyphens. Please restart with /generate-image."
+            )
+        # Clear the interaction state before confirming so a /cancel in the
+        # confirm prompt doesn't leave a stale pending interaction.
+        _gi.clear(session_key)
+        return await self._gi_confirm_and_execute(event, fields)
+
+    @staticmethod
+    def _gi_coerce_choice(text: str, choices: tuple[str, ...]) -> Optional[str]:
+        """Map a typed reply to a choice label, or None if unrecognised."""
+        t = text.strip()
+        if not t:
+            return None
+        # Numeric selection (1-based).
+        if t.isdigit():
+            idx = int(t)
+            if 1 <= idx <= len(choices):
+                return choices[idx - 1]
+            return None
+        # Exact label match (case-insensitive).
+        for choice in choices:
+            if t.casefold() == choice.casefold():
+                return choice
+        return None
+
+    async def _gi_confirm_and_execute(
+        self, event: "MessageEvent", fields: dict[str, str],
+    ) -> Union[str, "EphemeralReply", None]:
+        """Show the final config, require confirmation, then execute.
+
+        Routes through ``_request_slash_confirm`` so the confirmation uses
+        the platform's button UI (Approve Once / Cancel) where supported,
+        with a text fallback.  The ``_on_confirm`` handler invokes the
+        shared in-process runner (``tools.generate_image_runner``) on
+        approval — never shells out to ``content_engine.py``.
+        """
+        prompt = fields.get("prompt", "").strip()
+        style = fields.get("style", "").strip()
+        backend = fields.get("backend", "codex").strip() or "codex"
+        stage_root = fields.get("stage_root", "").strip()
+        job_id = fields.get("job_id", "").strip()
+        aspect_ratio = fields.get("aspect_ratio", "landscape").strip() or "landscape"
+        refs_raw = fields.get("references", "").strip()
+        references: list[str] = []
+        if refs_raw:
+            references = [r.strip() for r in refs_raw.split(",") if r.strip()]
+
+        # Final configuration summary + exact canonical command shown to the
+        # user before confirmation.  The exact command lets the user verify
+        # what will actually run (safe quoting, repeated --reference flags).
+        from tools.generate_image_runner import render_generate_image_command
+
+        exact_cmd = render_generate_image_command(
+            prompt=prompt,
+            style=style,
+            backend=backend,
+            references=references,
+            stage_root=stage_root,
+            job_id=job_id,
+            aspect_ratio=aspect_ratio,
+        )
+        config_summary = (
+            f"**generate-image configuration**\n"
+            f"• prompt: `{prompt}`\n"
+            f"• style: `{style}`\n"
+            f"• backend: `{backend}`\n"
+            f"• references: {', '.join(references) if references else '(none)'}\n"
+            f"• stage-root: `{stage_root}`\n"
+            f"• job-id: `{job_id}`\n"
+            f"• aspect-ratio: `{aspect_ratio}`\n"
+            f"\n"
+            f"**exact command**\n"
+            f"`{exact_cmd}`"
+        )
+
+        async def _on_confirm(choice: str) -> Optional[str]:
+            if choice == "cancel":
+                return "🟡 generate-image cancelled. No image generated."
+            # once / always → execute via the shared in-process runner.
+            return await self._gi_execute(
+                prompt=prompt,
+                style=style,
+                backend=backend,
+                references=references,
+                stage_root=stage_root,
+                job_id=job_id,
+                aspect_ratio=aspect_ratio,
+            )
+
+        return await self._request_slash_confirm(
+            event=event,
+            command="generate-image",
+            title="/generate-image — confirm",
+            message=config_summary,
+            handler=_on_confirm,
+        )
+
+    async def _gi_execute(
+        self,
+        *,
+        prompt: str,
+        style: str,
+        backend: str,
+        references: list[str],
+        stage_root: str,
+        job_id: str,
+        aspect_ratio: str,
+    ) -> str:
+        """Run the shared in-process image runner and return a summary string.
+
+        The content-engine service is synchronous, so the call runs in a
+        thread executor to avoid blocking the gateway event loop.  No
+        subprocess is spawned.
+        """
+        import asyncio as _asyncio
+        import functools as _functools
+
+        from tools.generate_image_runner import run_generate_image
+
+        loop = _asyncio.get_running_loop()
+        try:
+            payload = await loop.run_in_executor(
+                None,
+                _functools.partial(
+                    run_generate_image,
+                    prompt=prompt,
+                    style=style,
+                    backend=backend,
+                    references=references,
+                    stage_root=stage_root,
+                    job_id=job_id,
+                    aspect_ratio=aspect_ratio,
+                ),
+            )
+        except Exception as exc:
+            return f"Image generation failed: {exc}"
+
+        provider = (payload.get("backend") or {}).get("provider", "?")
+        model = (payload.get("backend") or {}).get("model", "?")
+        output_path = payload.get("output_path", "")
+        sha = payload.get("sha256", "")
+
+        return (
+            f"✅ Image generated (job {payload.get('job_id', job_id)})\n"
+            f"backend: {provider}/{model}\n"
+            f"output: {output_path}\n"
+            f"sha256: {sha}"
+        )
