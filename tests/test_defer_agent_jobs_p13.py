@@ -54,6 +54,12 @@ def test_content_repurpose_g03_gate():
     # Must not instruct auto-posting to social without approval
     assert "auto-post" not in lower or "draft" in lower, \
         "content-repurpose may auto-post without approval gate"
+    # G03: must reference the content gate mechanism
+    assert "content gate" in lower or "register-for-approval" in lower or "gate" in lower, \
+        "content-repurpose prompt lacks content gate reference"
+    # Must NOT instruct direct deliver-discord as the final step
+    assert "deliver-discord" not in lower or "register-for-approval" in lower, \
+        "content-repurpose still uses deliver-discord instead of gate registration"
 
 
 def test_content_x_scout_no_auto_deliver():

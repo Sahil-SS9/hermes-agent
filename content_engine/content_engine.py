@@ -370,6 +370,10 @@ def main() -> int:
     rej = sub.add_parser("reject", help="Reject a draft")
     rej.add_argument("draft_id")
 
+    # Register a draft for approval via the G03 content gate
+    reg = sub.add_parser("register-for-approval", help="Stage a draft as pending approval via the G03 content gate")
+    reg.add_argument("draft_id")
+
     # List
     lst = sub.add_parser("list", help="List drafts")
     lst.add_argument("--status", "-s", default="draft")
@@ -684,6 +688,27 @@ def main() -> int:
     elif args.cmd == "reject":
         reject_draft(args.draft_id)
         print(f"Rejected {args.draft_id}")
+        return 0
+
+    elif args.cmd == "register-for-approval":
+        from content_gate import register_for_approval, gate_publish
+        d = get_draft(args.draft_id)
+        if not d:
+            print(f"Draft not found: {args.draft_id}")
+            return 1
+        if gate_publish(args.draft_id):
+            print(f"Draft {args.draft_id} is already approved; no need to register.")
+            return 0
+        pid = register_for_approval(
+            body_text=d["body_text"],
+            brand=d["brand"],
+            platform=d["platform"],
+            source="repurpose",
+            title=d.get("title"),
+            media_path=d.get("ai_image_path") or d.get("visual_path"),
+            send_card=True,
+        )
+        print(f"Registered {args.draft_id} as pending approval: {pid}")
         return 0
 
     elif args.cmd == "list":

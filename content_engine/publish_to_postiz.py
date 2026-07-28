@@ -7,6 +7,10 @@ into Postiz via the postiz_bridge. Postiz's Temporal workflow handles the actual
 posting to X and LinkedIn at the scheduled time.
 
 Runs as a no_agent cron job. Silent when nothing to publish.
+
+G03 content gate: every draft must pass content_gate.gate_publish() before it
+is allowed into Postiz. This is the code-level chokepoint that prevents
+auto-delivery of unapproved content.
 """
 import os
 import sys
@@ -24,6 +28,7 @@ sys.path.insert(0, str(CE_DIR))
 
 from postiz_bridge import queue_post
 from database import mark_published, get_draft, claim_for_enqueue, release_enqueue_claim
+from content_gate import gate_publish
 
 # Only publish personal accounts
 ACTIVE_BRANDS = {"sahil_twitter", "sahil_linkedin"}
@@ -110,6 +115,13 @@ def publish_approved_drafts() -> int:
         draft_id = draft["id"]
         brand = draft["brand"]
         platform = draft["platform"]
+
+        # G03 gate: block any draft that hasn't passed approval.
+        # The SQL above already filters status='approved', but gate_publish()
+        # is the code-level chokepoint that enforces the contract.
+        if not gate_publish(draft_id):
+            print(f"  Gate blocked: {draft_id} ({brand}/{platform}) — not approved")
+            continue
 
         # Idempotent claim: atomically mark this draft as "claiming" so
         # a concurrent cron run or retry cannot double-enqueue it.
