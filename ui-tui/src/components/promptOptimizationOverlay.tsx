@@ -65,8 +65,10 @@ export function PromptOptimizationOverlay({ onChoice, req, t }: PromptOptimizati
 
   const p = req.preview
   const maxLines = Math.max(3, Math.min(10, p.rewritten.split('\n').length))
+
   const originalShort =
     p.original.length > 120 ? `${p.original.slice(0, 120)}…` : p.original
+
   const rewrittenShort =
     p.rewritten.length > 200 ? `${p.rewritten.slice(0, 200)}…` : p.rewritten
 

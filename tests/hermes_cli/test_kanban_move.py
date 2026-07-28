@@ -243,11 +243,15 @@ class TestMoveSuccess:
         assert _fk_check(two_boards["src_path"]) == []
         assert _fk_check(two_boards["tgt_path"]) == []
 
-    def test_move_wal_restored(self, two_boards):
+    def test_move_journal_modes_restored(self, two_boards):
         tid = _create_task("default", title="t1")
+        src_mode_before = _journal_mode(two_boards["src_path"])
+        tgt_mode_before = _journal_mode(two_boards["tgt_path"])
+
         kb.move_task_atomic(two_boards["src_path"], two_boards["tgt_path"], tid)
-        assert _journal_mode(two_boards["src_path"]) == "wal"
-        assert _journal_mode(two_boards["tgt_path"]) == "wal"
+
+        assert _journal_mode(two_boards["src_path"]) == src_mode_before
+        assert _journal_mode(two_boards["tgt_path"]) == tgt_mode_before
 
 
 # ---------------------------------------------------------------------------

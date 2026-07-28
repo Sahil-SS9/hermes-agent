@@ -77,6 +77,31 @@ def test_get_codex_model_ids_adds_forward_compat_models_from_templates(monkeypat
     ]
 
 
+def test_get_codex_model_ids_carries_all_gpt_5_6_variants_from_gpt_5_5(monkeypatch):
+    """A stale live catalog must retain Kensei's forward-compat behaviour.
+
+    Upstream's curated fallback now includes the high-effort ``-pro`` variants;
+    when only gpt-5.5 is returned by the live endpoint, all six 5.6 variants
+    must remain selectable exactly once.
+    """
+    monkeypatch.setattr(
+        "hermes_cli.codex_models._fetch_models_from_api",
+        lambda access_token: ["gpt-5.5"],
+    )
+
+    models = get_codex_model_ids(access_token="codex-access-token")
+
+    assert {
+        "gpt-5.6-sol",
+        "gpt-5.6-sol-pro",
+        "gpt-5.6-terra",
+        "gpt-5.6-terra-pro",
+        "gpt-5.6-luna",
+        "gpt-5.6-luna-pro",
+    }.issubset(models)
+    assert len(models) == len(set(models))
+
+
 def test_fetch_from_api_keeps_supported_in_api_false_models(monkeypatch):
     """Regression: gpt-5.3-codex-spark is returned by the live Codex backend
     with ``supported_in_api: false`` because it isn't in the public OpenAI
@@ -111,6 +136,83 @@ def test_fetch_from_api_keeps_supported_in_api_false_models(monkeypatch):
     assert "gpt-5.5" in models
     assert "gpt-5.3-codex-spark" in models
     assert "gpt-5-internal" not in models
+
+
+def test_fetch_from_api_sends_chatgpt_account_id_header(monkeypatch):
+    """The Codex /models endpoint only returns the per-account catalog when
+    the ``ChatGPT-Account-Id`` header is present. Without it, the response
+    is ``{"models":[]}`` (HTTP 200), which makes the picker silently
+    degrade to the curated fallback list and send invalid slugs on later
+    requests. Regression test for the upstream bug behind slow first
+    responses and HTTP 520/120s SSE hangs.
+    """
+    import sys
+    from hermes_cli import codex_models
+
+    captured = {}
+
+    class _FakeResp:
+        status_code = 200
+
+        def json(self):
+            return {"models": [{"slug": "gpt-5.6-sol", "priority": 0}]}
+
+    class _FakeHttpx:
+        @staticmethod
+        def get(url, headers=None, timeout=None):
+            captured["url"] = url
+            captured["headers"] = dict(headers or {})
+            return _FakeResp()
+
+    monkeypatch.setitem(sys.modules, "httpx", _FakeHttpx)
+
+    # Hand-crafted JWT carrying the chatgpt_account_id claim.
+    import base64
+    import json
+
+    payload = base64.urlsafe_b64encode(
+        json.dumps(
+            {"https://api.openai.com/auth": {"chatgpt_account_id": "acct-test-123"}}
+        ).encode()
+    ).rstrip(b"=").decode()
+    fake_jwt = f"header.{payload}.sig"
+
+    models = codex_models._fetch_models_from_api(access_token=fake_jwt)
+
+    assert captured["headers"]["Authorization"] == f"Bearer {fake_jwt}"
+    assert captured["headers"].get("ChatGPT-Account-Id") == "acct-test-123"
+    assert "gpt-5.6-sol" in models
+
+
+def test_fetch_from_api_omits_account_id_header_when_jwt_unparseable(monkeypatch):
+    """A malformed token must not crash the probe — it should still send the
+    bearer header and let the upstream decide. We just verify the probe
+    returns ``[]`` cleanly without the optional header.
+    """
+    import sys
+    from hermes_cli import codex_models
+
+    captured = {}
+
+    class _FakeResp:
+        status_code = 200
+
+        def json(self):
+            return {"models": []}
+
+    class _FakeHttpx:
+        @staticmethod
+        def get(url, headers=None, timeout=None):
+            captured["headers"] = dict(headers or {})
+            return _FakeResp()
+
+    monkeypatch.setitem(sys.modules, "httpx", _FakeHttpx)
+
+    models = codex_models._fetch_models_from_api(access_token="not-a-jwt")
+
+    assert "ChatGPT-Account-Id" not in captured["headers"]
+    assert captured["headers"]["Authorization"] == "Bearer not-a-jwt"
+    assert models == []
 
 
 def test_model_command_uses_runtime_access_token_for_codex_list(monkeypatch):

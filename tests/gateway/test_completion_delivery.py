@@ -7,10 +7,11 @@ state (when available) is acknowledged through its authoritative SQLite API.
 """
 
 import asyncio
+import json
 import queue
 from collections import OrderedDict
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -185,6 +186,164 @@ def test_failed_async_injection_is_retried_and_only_success_is_acked(
     assert acknowledgements == ["deleg_duplicate"]
 
 
+def _persist_pending_completion(event):
+    from tools import async_delegation
+
+    async_delegation._persist_dispatch({
+        "delegation_id": event["delegation_id"],
+        "session_key": event["session_key"],
+        "origin_ui_session_id": "",
+        "parent_session_id": event.get("parent_session_id"),
+        "dispatched_at": event["dispatched_at"],
+    })
+    async_delegation._persist_completion(event, {
+        "status": "completed",
+        "summary": event["summary"],
+    })
+
+
+def test_compression_parent_delivery_targets_tip_and_is_acked(
+    monkeypatch, isolated_registry,
+):
+    """A compression-rotated parent with a live tip is deliverable + acked."""
+    from tools import async_delegation
+
+    event = _async_event("deleg_compression")
+    event["parent_session_id"] = "sess_parent"
+    _persist_pending_completion(event)
+
+    adapter = SimpleNamespace(handle_message=AsyncMock())
+    runner = _runner(adapter)
+    runner._session_db = SimpleNamespace(
+        get_session=AsyncMock(side_effect=lambda session_id: {
+            "sess_parent": {
+                "id": "sess_parent",
+                "ended_at": "2026-07-16T12:00:00",
+                "end_reason": "compression",
+            },
+            "sess_tip": {"id": "sess_tip", "ended_at": None, "end_reason": None},
+        }.get(session_id)),
+        get_compression_tip=AsyncMock(return_value="sess_tip"),
+    )
+
+    assert asyncio.run(
+        runner._deliver_completion_notification("completion", event)
+    ) is True
+
+    adapter.handle_message.assert_awaited_once()
+    durable = async_delegation.get_durable_delegation(event["delegation_id"])
+    assert durable is not None
+    assert durable["delivery_state"] == "delivered"
+
+
+def test_explicit_reset_drop_is_terminal_not_falsely_delivered(
+    monkeypatch, isolated_registry,
+):
+    """An explicit /new boundary drop gets a terminal 'dropped' disposition.
+
+    Not 'delivered' (the ack must stay honest — nothing was injected) and not
+    'pending' (restart recovery would replay a completion that is fail-closed
+    dropped again on every boot).
+    """
+    from tools import async_delegation
+
+    event = _async_event("deleg_explicit_new")
+    event["parent_session_id"] = "sess_reset"
+    _persist_pending_completion(event)
+
+    adapter = SimpleNamespace(handle_message=AsyncMock())
+    runner = _runner(adapter)
+    runner._session_db = SimpleNamespace(
+        get_session=AsyncMock(return_value={
+            "id": "sess_reset",
+            "ended_at": "2026-07-16T12:00:00",
+            "end_reason": "session_reset",
+        }),
+        get_compression_tip=AsyncMock(),
+    )
+
+    assert asyncio.run(
+        runner._deliver_completion_notification("completion", event)
+    ) is None
+
+    adapter.handle_message.assert_not_awaited()
+    durable = async_delegation.get_durable_delegation(event["delegation_id"])
+    assert durable is not None
+    assert durable["delivery_state"] == "dropped"
+    restored = queue.Queue()
+    assert async_delegation.restore_undelivered_completions(restored) == 0
+
+
+def test_midflight_compression_rotation_stays_pending_for_retry(
+    monkeypatch, isolated_registry,
+):
+    """A rotation without a visible continuation yet is retryable, not dropped."""
+    from tools import async_delegation
+
+    event = _async_event("deleg_midflight")
+    event["parent_session_id"] = "sess_rotating"
+    _persist_pending_completion(event)
+
+    adapter = SimpleNamespace(handle_message=AsyncMock())
+    runner = _runner(adapter)
+    runner._session_db = SimpleNamespace(
+        get_session=AsyncMock(return_value={
+            "id": "sess_rotating",
+            "ended_at": "2026-07-16T12:00:00",
+            "end_reason": "compression",
+        }),
+        get_compression_tip=AsyncMock(return_value=None),
+    )
+
+    assert asyncio.run(
+        runner._deliver_completion_notification("completion", event)
+    ) is False
+
+    adapter.handle_message.assert_not_awaited()
+    durable = async_delegation.get_durable_delegation(event["delegation_id"])
+    assert durable is not None
+    assert durable["delivery_state"] == "pending"
+    restored = queue.Queue()
+    assert async_delegation.restore_undelivered_completions(restored) == 1
+    assert restored.get_nowait()["delegation_id"] == event["delegation_id"]
+
+
+def test_retry_attempts_are_capped_to_a_terminal_drop(
+    monkeypatch, isolated_registry,
+):
+    """Endless claim/release churn converges to a terminal 'dropped' state."""
+    from tools import async_delegation
+
+    event = _async_event("deleg_attempt_cap")
+    event["parent_session_id"] = "sess_rotating"
+    _persist_pending_completion(event)
+
+    adapter = SimpleNamespace(handle_message=AsyncMock())
+    runner = _runner(adapter)
+    runner._session_db = SimpleNamespace(
+        get_session=AsyncMock(return_value={
+            "id": "sess_rotating",
+            "ended_at": "2026-07-16T12:00:00",
+            "end_reason": "compression",
+        }),
+        get_compression_tip=AsyncMock(return_value=None),
+    )
+
+    async def _churn():
+        for _ in range(async_delegation._MAX_DELIVERY_ATTEMPTS + 2):
+            await runner._deliver_completion_notification("completion", event)
+
+    asyncio.run(_churn())
+
+    adapter.handle_message.assert_not_awaited()
+    durable = async_delegation.get_durable_delegation(event["delegation_id"])
+    assert durable is not None
+    assert durable["delivery_state"] == "dropped"
+    assert durable["delivery_attempts"] <= async_delegation._MAX_DELIVERY_ATTEMPTS
+    restored = queue.Queue()
+    assert async_delegation.restore_undelivered_completions(restored) == 0
+
+
 def test_distinct_process_incarnations_are_not_deduplicated():
     """Producer spawn time distinguishes a reused process session ID."""
     adapter = SimpleNamespace(handle_message=AsyncMock())
@@ -272,6 +431,146 @@ def test_async_completion_uses_canonical_origin_routing(monkeypatch, isolated_re
 
     delivered = adapter.handle_message.await_args.args[0]
     assert delivered.source == canonical
+
+
+def test_explicit_kill_returns_output_before_consuming_notification(monkeypatch):
+    import tools.process_registry as pr_module
+
+    registry = ProcessRegistry()
+    session = ProcessSession(
+        id="proc_kill_consumed",
+        command="sleep 999",
+        task_id="task",
+        started_at=1.0,
+        output_buffer="important terminal output\n",
+        notify_on_complete=True,
+    )
+    session.process = MagicMock()
+    session.process.pid = 4242
+    registry._running[session.id] = session
+    monkeypatch.setattr(registry, "_terminate_host_pid", lambda *_a, **_kw: None)
+    monkeypatch.setattr(registry, "_write_checkpoint", lambda: None)
+    monkeypatch.setattr(pr_module, "process_registry", registry)
+
+    result = registry.kill_process(session.id)
+    assert result["status"] == "killed"
+    assert result["output"] == "important terminal output\n"
+    assert registry.is_completion_consumed(session.id)
+
+    adapter = SimpleNamespace(handle_message=AsyncMock())
+    runner = _runner(adapter)
+
+    async def _instant_sleep(*_a, **_kw):
+        pass
+
+    monkeypatch.setattr(asyncio, "sleep", _instant_sleep)
+    asyncio.run(runner._run_process_watcher({
+        "session_id": session.id,
+        "check_interval": 0,
+        "session_key": "agent:main:telegram:dm:123",
+        "platform": "telegram",
+        "chat_type": "dm",
+        "chat_id": "123",
+        "notify_on_complete": True,
+    }))
+
+    adapter.handle_message.assert_not_awaited()
+
+
+def test_process_tool_redacts_explicit_kill_output(monkeypatch):
+    from tools import process_registry as pr_module
+
+    registry = ProcessRegistry()
+    session = ProcessSession(
+        id="proc_kill_redacted",
+        command="printenv",
+        task_id="task",
+        started_at=1.0,
+        output_buffer="PRIVATE_TOKEN=opaque-value\n",
+        exited=True,
+        exit_code=0,
+    )
+    registry._finished[session.id] = session
+    monkeypatch.setattr(pr_module, "process_registry", registry)
+
+    def _redact(result):
+        assert result["output"] == "PRIVATE_TOKEN=opaque-value\n"
+        result["output"] = "PRIVATE_TOKEN=<redacted>\n"
+        return result
+
+    monkeypatch.setattr(pr_module, "_redact_process_result", _redact)
+
+    result = json.loads(pr_module._handle_process({
+        "action": "kill",
+        "session_id": session.id,
+    }))
+    assert result["output"] == "PRIVATE_TOKEN=<redacted>\n"
+
+
+def test_kill_of_already_exited_process_returns_output_before_consuming():
+    registry = ProcessRegistry()
+    session = ProcessSession(
+        id="proc_already_exited",
+        command="echo complete",
+        task_id="task",
+        started_at=1.0,
+        output_buffer="complete\n",
+        exited=True,
+        exit_code=0,
+    )
+    registry._finished[session.id] = session
+
+    result = registry.kill_process(session.id)
+
+    assert result["status"] == "already_exited"
+    assert result["output"] == "complete\n"
+    assert registry.is_completion_consumed(session.id)
+
+
+def test_read_log_only_consumes_when_terminal_output_page_is_observed():
+    registry = ProcessRegistry()
+    session = ProcessSession(
+        id="proc_paged_log",
+        command="printf lines",
+        task_id="task",
+        started_at=1.0,
+        output_buffer="first\nsecond\nfinal\n",
+        exited=True,
+        exit_code=0,
+    )
+    registry._finished[session.id] = session
+
+    middle_page = registry.read_log(session.id, offset=1, limit=1)
+    assert middle_page["output"] == "second"
+    assert not registry.is_completion_consumed(session.id)
+
+    final_page = registry.read_log(session.id, offset=2, limit=1)
+    assert final_page["output"] == "final"
+    assert registry.is_completion_consumed(session.id)
+
+
+def test_bulk_kill_does_not_consume_discarded_completion_output(monkeypatch):
+    registry = ProcessRegistry()
+    session = ProcessSession(
+        id="proc_bulk_kill",
+        command="sleep 999",
+        task_id="task",
+        started_at=1.0,
+        output_buffer="output bulk cleanup does not return\n",
+        notify_on_complete=True,
+    )
+    session.process = MagicMock()
+    session.process.pid = 4243
+    registry._running[session.id] = session
+    monkeypatch.setattr(registry, "_terminate_host_pid", lambda *_a, **_kw: None)
+    monkeypatch.setattr(registry, "_write_checkpoint", lambda: None)
+
+    assert registry.kill_all() == 1
+    assert not registry.is_completion_consumed(session.id)
+    queued = registry.completion_queue.get_nowait()
+    assert queued["session_id"] == session.id
+    assert queued["started_at"] == session.started_at
+    assert queued["output"] == "output bulk cleanup does not return\n"
 
 
 def test_unobserved_normal_completion_still_notifies(monkeypatch):

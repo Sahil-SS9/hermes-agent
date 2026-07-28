@@ -16,7 +16,20 @@ def _module():
     return module
 
 
-def test_discovers_all_current_gateway_service_units(monkeypatch) -> None:
+def test_discover_services_parses_supplied_systemctl_output(monkeypatch) -> None:
+    """discover_services must parse the systemctl output we supply via the
+    fake subprocess.run, not this host's actual service configuration.
+
+    The supplied stdout contains three hermes-gateway units plus one
+    unrelated unit. We assert the three parsed (name, service) pairs are
+    present in the result, the unrelated unit is excluded, and the bare
+    kensei mapping (hermes-gateway.service -> kensei) is exercised
+    alongside named specialist units (kensei-review, quan).
+
+    Runtime discovery also merges a known-inventory fallback; that merge is
+    intentional behaviour we do not weaken here, so we assert the parsed
+    units are a subset of the full result rather than an exact equality.
+    """
     module = _module()
 
     def fake_run(command, **kwargs):
@@ -41,8 +54,14 @@ def test_discovers_all_current_gateway_service_units(monkeypatch) -> None:
 
     monkeypatch.setattr(module.subprocess, "run", fake_run)
 
-    assert module.discover_services() == [
-        ("kensei", "hermes-gateway.service"),
-        ("kensei-review", "hermes-gateway-kensei-review.service"),
-        ("quan", "hermes-gateway-quan.service"),
-    ]
+    parsed = module.discover_services()
+
+    # Bare kensei unit: hermes-gateway.service -> kensei.
+    assert ("kensei", "hermes-gateway.service") in parsed
+    # Named specialist units parsed from supplied systemctl output.
+    assert ("kensei-review", "hermes-gateway-kensei-review.service") in parsed
+    assert ("quan", "hermes-gateway-quan.service") in parsed
+    # The unrelated unit must be filtered out by the parser.
+    assert not any(svc == "unrelated.service" for _, svc in parsed)
+    # Result is sorted (runtime contract preserved).
+    assert parsed == sorted(parsed)

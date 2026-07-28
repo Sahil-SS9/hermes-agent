@@ -1,10 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { submitPrompt, type SubmitPromptDeps } from '../app/submissionCore.js'
-import { resolvePromptOptimizationChoice } from '../app/useMainApp.js'
-import { resetUiState, patchUiState } from '../app/uiStore.js'
-import type { GatewayClient } from '../gatewayClient.js'
 import type { SubmissionOptions } from '../app/interfaces.js'
+import { submitPrompt, type SubmitPromptDeps } from '../app/submissionCore.js'
+import { patchUiState, resetUiState } from '../app/uiStore.js'
+import { resolvePromptOptimizationChoice } from '../app/useMainApp.js'
+import type { GatewayClient } from '../gatewayClient.js'
 import type { PromptOptimizationPreview } from '../types.js'
 
 const PREVIEW: PromptOptimizationPreview = {
@@ -55,15 +55,19 @@ describe('resolvePromptOptimizationChoice — flag contract', () => {
 // ── Contract B: options reach the REAL optimisation gate (submitPrompt) ───────
 function makeGateway() {
   const calls: string[] = []
+
   const gw = {
     request: vi.fn((method: string) => {
       calls.push(method)
+
       if (method === 'input.detect_drop') {
         return Promise.resolve({ matched: false })
       }
+
       return Promise.resolve({ status: 'streaming' })
     })
   } as unknown as GatewayClient
+
   return { calls, gw }
 }
 
@@ -92,7 +96,13 @@ describe('accept flow reaches submitPrompt with skipOptimization=true (no second
     // Wire the resolver's submit to the REAL submitPrompt (the actual gate),
     // exactly as the hook does: options → (showUserMessage, skipOptimization).
     const submit = (value: string, options?: SubmissionOptions) =>
-      submitPrompt(value, deps, options?.showUserMessage ?? true, options?.skipOptimization ?? false)
+      submitPrompt(
+        value,
+        deps,
+        options?.showUserMessage ?? true,
+        undefined,
+        options?.skipOptimization ?? false
+      )
 
     resolvePromptOptimizationChoice('accept', PREVIEW, { setInput: vi.fn(), submit, sys: vi.fn() })
 

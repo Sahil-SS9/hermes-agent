@@ -125,15 +125,35 @@ def _fake_aux_response(content):
     return resp
 
 
-def _patch_aux_client_obj(client, model="gpt-4o-mini"):
+def _patch_call_llm(content_or_side_effect):
+    """Mock the call_llm production seam (task='kanban_decomposer').
+
+    decompose_task routes through agent.auxiliary_client.call_llm; the
+    structured-output response_format is carried inside its extra_body kwarg.
+    """
+    if isinstance(content_or_side_effect, list):
+        return patch(
+            "agent.auxiliary_client.call_llm",
+            side_effect=content_or_side_effect,
+        )
     return patch(
-        "agent.auxiliary_client.get_text_auxiliary_client",
-        return_value=(client, model),
+        "agent.auxiliary_client.call_llm",
+        return_value=content_or_side_effect,
     )
 
 
-def _patch_extra_body():
-    return patch("agent.auxiliary_client.get_auxiliary_extra_body", return_value={})
+def _patch_resolve_model(model: str):
+    """Make the decomposer's capability probe see ``model``.
+
+    decompose_task imports _resolve_task_provider_model from
+    agent.auxiliary_client and reads index 1 (the model) to gate
+    _aux_supports_json_schema. Stubbing it lets each test control whether the
+    structured-output path is taken without any real provider config.
+    """
+    return patch(
+        "agent.auxiliary_client._resolve_task_provider_model",
+        return_value=("openrouter", model, None, None, None),
+    )
 
 
 def _patch_list_profiles(names):
@@ -149,52 +169,50 @@ def _patch_list_profiles(names):
 
 
 def test_decomposer_default_sends_no_response_format(kanban_home):
-    """Default OFF: the aux call must NOT carry response_format (no 400 risk)."""
+    """Default OFF: the call_llm extra_body must NOT carry response_format."""
     with kb.connect() as conn:
         tid = kb.create_task(conn, title="x", triage=True)
     good = jsonlib.dumps({"fanout": False, "rationale": "one", "title": "T", "body": "B", "assignee": "researcher"})
-    client = MagicMock()
-    client.chat.completions.create = MagicMock(return_value=_fake_aux_response(good))
     patches = _patch_list_profiles(["orchestrator", "researcher"])
     for p in patches:
         p.start()
     try:
-        with _patch_aux_client_obj(client, "some-free-model"), _patch_extra_body(), patch(
-            "hermes_cli.kanban_decompose._load_config",
-            return_value={"kanban": {"default_assignee": "researcher"}},
-        ):
+        with _patch_call_llm(_fake_aux_response(good)) as call_llm_mock,              _patch_resolve_model("some-free-model"),              patch(
+                 "hermes_cli.kanban_decompose._load_config",
+                 return_value={"kanban": {"default_assignee": "researcher"}},
+             ):
             outcome = decomp.decompose_task(tid, author="me")
     finally:
         for p in patches:
             p.stop()
     assert outcome.ok, outcome.reason
-    # No response_format kwarg sent.
-    _, kwargs = client.chat.completions.create.call_args
-    assert "response_format" not in kwargs
+    # No response_format kwarg reaches call_llm's extra_body.
+    _, kwargs = call_llm_mock.call_args
+    extra_body = kwargs.get("extra_body") or {}
+    assert "response_format" not in extra_body
 
 
 def test_decomposer_enabled_proven_sends_response_format(kanban_home):
-    """Enabled + proven model => response_format=json_schema IS sent."""
+    """Enabled + proven model => response_format=json_schema IS sent in extra_body."""
     with kb.connect() as conn:
         tid = kb.create_task(conn, title="x", triage=True)
     good = jsonlib.dumps({"fanout": False, "rationale": "one", "title": "T", "body": "B", "assignee": "researcher"})
-    client = MagicMock()
-    client.chat.completions.create = MagicMock(return_value=_fake_aux_response(good))
     patches = _patch_list_profiles(["orchestrator", "researcher"])
     for p in patches:
         p.start()
     try:
-        with _patch_aux_client_obj(client, "gpt-4o-mini"), _patch_extra_body(), patch(
-            "hermes_cli.kanban_decompose._load_config",
-            return_value={"kanban": {"structured_output": True, "default_assignee": "researcher"}},
-        ):
+        with _patch_call_llm(_fake_aux_response(good)) as call_llm_mock,              _patch_resolve_model("gpt-4o-mini"),              patch(
+                 "hermes_cli.kanban_decompose._load_config",
+                 return_value={"kanban": {"structured_output": True, "default_assignee": "researcher"}},
+             ):
             outcome = decomp.decompose_task(tid, author="me")
     finally:
         for p in patches:
             p.stop()
     assert outcome.ok, outcome.reason
-    _, kwargs = client.chat.completions.create.call_args
-    assert kwargs.get("response_format", {}).get("type") == "json_schema"
+    _, kwargs = call_llm_mock.call_args
+    extra_body = kwargs.get("extra_body") or {}
+    assert extra_body.get("response_format", {}).get("type") == "json_schema"
 
 
 def test_decomposer_enabled_but_unproven_sends_no_response_format(kanban_home):
@@ -202,23 +220,22 @@ def test_decomposer_enabled_but_unproven_sends_no_response_format(kanban_home):
     with kb.connect() as conn:
         tid = kb.create_task(conn, title="x", triage=True)
     good = jsonlib.dumps({"fanout": False, "rationale": "one", "title": "T", "body": "B", "assignee": "researcher"})
-    client = MagicMock()
-    client.chat.completions.create = MagicMock(return_value=_fake_aux_response(good))
     patches = _patch_list_profiles(["orchestrator", "researcher"])
     for p in patches:
         p.start()
     try:
-        with _patch_aux_client_obj(client, "some-free-model-7b"), _patch_extra_body(), patch(
-            "hermes_cli.kanban_decompose._load_config",
-            return_value={"kanban": {"structured_output": True, "default_assignee": "researcher"}},
-        ):
+        with _patch_call_llm(_fake_aux_response(good)) as call_llm_mock,              _patch_resolve_model("some-free-model-7b"),              patch(
+                 "hermes_cli.kanban_decompose._load_config",
+                 return_value={"kanban": {"structured_output": True, "default_assignee": "researcher"}},
+             ):
             outcome = decomp.decompose_task(tid, author="me")
     finally:
         for p in patches:
             p.stop()
     assert outcome.ok, outcome.reason
-    _, kwargs = client.chat.completions.create.call_args
-    assert "response_format" not in kwargs
+    _, kwargs = call_llm_mock.call_args
+    extra_body = kwargs.get("extra_body") or {}
+    assert "response_format" not in extra_body
 
 
 # ── Integration: telemetry emitted on decomposer parse failure ──
@@ -226,17 +243,15 @@ def test_decomposer_enabled_but_unproven_sends_no_response_format(kanban_home):
 def test_decomposer_emits_telemetry_on_exhausted_parse(kanban_home):
     with kb.connect() as conn:
         tid = kb.create_task(conn, title="x", triage=True)
-    client = MagicMock()
-    client.chat.completions.create = MagicMock(side_effect=[
-        _fake_aux_response("not json 1"),
-        _fake_aux_response("not json 2"),
-        _fake_aux_response("not json 3"),
-    ])
     patches = _patch_list_profiles(["orchestrator"])
     for p in patches:
         p.start()
     try:
-        with _patch_aux_client_obj(client), _patch_extra_body():
+        with _patch_call_llm([
+            _fake_aux_response("not json 1"),
+            _fake_aux_response("not json 2"),
+            _fake_aux_response("not json 3"),
+        ]), _patch_resolve_model("some-free-model"):
             outcome = decomp.decompose_task(tid, author="me")
     finally:
         for p in patches:

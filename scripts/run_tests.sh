@@ -39,26 +39,44 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # ── Locate Python launcher ─────────────────────────────────────────────────
-# Precedence: .venv > venv > hardcoded path > uv run fallback
-PY_LAUNCHER=()
-for candidate in "$REPO_ROOT/.venv" "$REPO_ROOT/venv" "$HOME/repos/KenseiAgent/.venv"; do
+# Prefer a worktree-local dev venv, but never select a release venv that lacks
+# pytest. The canonical checkout venv is deliberately included for isolated
+# worktrees; HERMES_PYTHON remains the Nix-devShell fallback.
+VENV=""
+SKIPPED_VENVS=""
+for candidate in "$REPO_ROOT/.venv" "$REPO_ROOT/venv" "$HOME/repos/KenseiAgent/.venv" "$HOME/.hermes/hermes-agent/venv"; do
   if [ -f "$candidate/bin/activate" ]; then
-    PY_LAUNCHER=("$candidate/bin/python")
-    break
+    if "$candidate/bin/python" -c 'import pytest' 2>/dev/null; then
+      VENV="$candidate"
+      break
+    fi
+    SKIPPED_VENVS="$SKIPPED_VENVS $candidate"
   fi
 done
 
-if [ ${#PY_LAUNCHER[@]} -eq 0 ]; then
-  if command -v uv &>/dev/null; then
-    PY_LAUNCHER=(uv run -- python3)
-  else
-    echo "error: no virtualenv found in $REPO_ROOT/.venv or $REPO_ROOT/venv" >&2
-    echo "  Install one: python3 -m venv .venv && source .venv/bin/activate && pip install -e '.[dev]'" >&2
-    echo "  Or install uv: curl -LsSf https://astral.sh/uv/install.sh | sh" >&2
-    exit 1
-  fi
+if [ -n "$SKIPPED_VENVS" ]; then
+  for skipped in $SKIPPED_VENVS; do
+    echo "▶ skipping venv without pytest: $skipped" >&2
+  done
 fi
 
+if [ -n "$VENV" ]; then
+  PYTHON="$VENV/bin/python"
+elif [ -n "${HERMES_PYTHON:-}" ] && [ -x "$HERMES_PYTHON" ] \
+    && "$HERMES_PYTHON" -c 'import pytest' 2>/dev/null; then
+  PYTHON="$HERMES_PYTHON"
+  echo "▶ no local dev venv — using HERMES_PYTHON: $PYTHON"
+else
+  echo "error: no virtualenv with pytest found in $REPO_ROOT/.venv, $REPO_ROOT/venv," >&2
+  echo "       $HOME/repos/KenseiAgent/.venv, or $HOME/.hermes/hermes-agent/venv," >&2
+  echo "       and HERMES_PYTHON is not a Python with pytest." >&2
+  if [ -n "$SKIPPED_VENVS" ]; then
+    echo "       (skipped for missing pytest:$SKIPPED_VENVS)" >&2
+  fi
+  exit 1
+fi
+
+PY_LAUNCHER=("$PYTHON")
 
 # ── Live-gateway plugin (computed before we drop env) ───────────────────────
 EXTRA_PYTHONPATH=""
@@ -77,6 +95,15 @@ echo "  (TZ=UTC LANG=C.UTF-8 PYTHONHASHSEED=0; clean env)"
 
 cd "$REPO_ROOT"
 
+# ── Pre-compile .pyc bytecode cache ─────────────────────────────────────────
+# Each test file runs in its own subprocess via run_tests_parallel.py.
+# Pre-building the bytecode cache once here (instead of each subprocess
+# compiling on first import) avoids redundant work across ~2000 processes.
+# Uses git to list tracked .py files (skips venv, node_modules, etc).
+echo "▶ pre-compiling bytecode cache"
+"$PYTHON" -m compileall -q -j 0 -- $(git ls-files '*.py') >/dev/null 2>&1 || true
+
+echo "▶ launching test runner"
 exec env -i \
   PATH="$PATH" \
   HOME="$HOME" \
@@ -84,7 +111,6 @@ exec env -i \
   LANG=C.UTF-8 \
   LC_ALL=C.UTF-8 \
   PYTHONHASHSEED=0 \
-  PYTHONDONTWRITEBYTECODE=1 \
   ${HERMES_RUN_SLOW_PET_TESTS:+HERMES_RUN_SLOW_PET_TESTS="$HERMES_RUN_SLOW_PET_TESTS"} \
   ${EXTRA_PYTHONPATH:+PYTHONPATH="$EXTRA_PYTHONPATH"} \
   ${EXTRA_PYTEST_PLUGINS:+PYTEST_PLUGINS="$EXTRA_PYTEST_PLUGINS"} \

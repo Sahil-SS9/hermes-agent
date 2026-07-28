@@ -521,6 +521,33 @@ def test_redeem_forwards_explicit_api_key_and_base_url(monkeypatch):
     assert calls[0]["url"] == "https://chatgpt.com/backend-api/wham/usage"
 
 
+def test_redeem_clears_codex_pool_cooldowns(monkeypatch):
+    """A redeemed reset must unfreeze the same account's stale pool cooldown."""
+    calls = []
+    monkeypatch.setattr(
+        account_usage.httpx,
+        "Client",
+        lambda timeout: _FakeResetClient(
+            calls,
+            _usage_payload_with_resets(100, 100, 1),
+            consume_payload={"code": "reset", "windows_reset": 2},
+        ),
+    )
+    cooldown_clears = []
+    monkeypatch.setattr(
+        "hermes_cli.auth.clear_codex_pool_quota_cooldowns",
+        lambda: cooldown_clears.append(True),
+    )
+
+    result = account_usage.redeem_codex_reset_credit(
+        base_url="https://chatgpt.com/backend-api/codex",
+        api_key="explicit-session-token",
+    )
+
+    assert result.redeemed
+    assert cooldown_clears == [True]
+
+
 def test_redeem_request_id_is_fresh_per_call_not_durable(monkeypatch):
     """Clarify: redeem_request_id is a fresh UUID per request (request identity
     for the backend's idempotency check), NOT a durable cross-command

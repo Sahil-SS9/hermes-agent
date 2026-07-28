@@ -16,7 +16,6 @@ export interface SubmitPromptDeps {
   enqueue: (text: string) => void
   expand: (text: string) => string
   gw: GatewayClient
-  maybeGoodVibes: (text: string) => void
   setLastUserMsg: (value: string) => void
   sys: (text: string) => void
 }
@@ -44,7 +43,16 @@ export function markSubmitting(): void {
 // Submit a ready prompt (already resolved to be neither a slash command nor a
 // shell escape, with a live session). Pulled out of useSubmission so the
 // synchronous-busy invariant above is unit-testable without React test infra.
-export function submitPrompt(text: string, deps: SubmitPromptDeps, showUserMessage = true, skipOptimization = false): void {
+// `displayOverride` is what the transcript shows when it differs from what the
+// agent receives — a `/skill` invocation expands into the whole skill body, and
+// that scaffolding is model-facing only.
+export function submitPrompt(
+  text: string,
+  deps: SubmitPromptDeps,
+  showUserMessage = true,
+  displayOverride?: string,
+  skipOptimization = false
+): void {
   const sid = getUiState().sid
 
   if (!sid) {
@@ -62,32 +70,33 @@ export function submitPrompt(text: string, deps: SubmitPromptDeps, showUserMessa
     }
 
     turnController.clearStatusTimer()
-    deps.maybeGoodVibes(submitText)
     deps.setLastUserMsg(text)
 
     if (show) {
-      deps.appendMessage({ role: 'user', text: displayText })
+      deps.appendMessage({ role: 'user', text: displayOverride || displayText })
     }
 
     patchUiState({ busy: true, status: 'running…' })
     turnController.bufRef = ''
     turnController.interrupted = false
 
-    deps.gw.request<PromptSubmitResponse>('prompt.submit', { session_id: liveSid, text: submitText }).catch((e: Error) => {
-      // Defensive: prompt.submit no longer rejects a mid-turn send with
-      // "session busy" (the gateway queues it and returns success), but keep
-      // the re-queue path as a safety net for any future/legacy gateway that
-      // still errors, so a message is never silently dropped.
-      if (isSessionBusyError(e)) {
-        deps.enqueue(submitText)
-        patchUiState({ busy: true, status: 'queued for next turn' })
+    deps.gw
+      .request<PromptSubmitResponse>('prompt.submit', { session_id: liveSid, text: submitText })
+      .catch((e: Error) => {
+        // Defensive: prompt.submit no longer rejects a mid-turn send with
+        // "session busy" (the gateway queues it and returns success), but keep
+        // the re-queue path as a safety net for any future/legacy gateway that
+        // still errors, so a message is never silently dropped.
+        if (isSessionBusyError(e)) {
+          deps.enqueue(submitText)
+          patchUiState({ busy: true, status: 'queued for next turn' })
 
-        return deps.sys(`queued: "${submitText.slice(0, 50)}${submitText.length > 50 ? '…' : ''}"`)
-      }
+          return deps.sys(`queued: "${submitText.slice(0, 50)}${submitText.length > 50 ? '…' : ''}"`)
+        }
 
-      deps.sys(`error: ${e.message}`)
-      patchUiState({ busy: false, status: 'ready' })
-    })
+        deps.sys(`error: ${e.message}`)
+        patchUiState({ busy: false, status: 'ready' })
+      })
   }
 
   // Skip both the file-drop check and the optimisation preview when
@@ -95,6 +104,7 @@ export function submitPrompt(text: string, deps: SubmitPromptDeps, showUserMessa
   // otherwise the rewritten text gets re-optimised in a loop.
   if (skipOptimization) {
     startSubmit(text, deps.expand(text), showUserMessage)
+
     return
   }
 
@@ -106,6 +116,7 @@ export function submitPrompt(text: string, deps: SubmitPromptDeps, showUserMessa
     .then(r => {
       if (!r?.matched) {
         patchUiState({ busy: true, status: 'optimising…' })
+
         return deps.gw
           .request<PromptOptimizePreviewResponse>('prompt.optimize.preview', {
             session_id: sid,
@@ -113,6 +124,7 @@ export function submitPrompt(text: string, deps: SubmitPromptDeps, showUserMessa
           })
           .then(preview => {
             patchUiState({ busy: false, status: 'ready' })
+
             if (preview?.status === 'preview' && preview.preview) {
               patchOverlayState({
                 promptOptimization: {
@@ -121,8 +133,10 @@ export function submitPrompt(text: string, deps: SubmitPromptDeps, showUserMessa
                   status: 'preview'
                 }
               })
+
               return
             }
+
             startSubmit(text, deps.expand(text), showUserMessage)
           })
           .catch(() => {

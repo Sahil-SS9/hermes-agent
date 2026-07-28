@@ -9,8 +9,8 @@
 import { Box, Text, useInput } from '@hermes/ink'
 import { useState } from 'react'
 
-import type { AskUserQuestion as Question, AskUserQuestionsReq } from '../types.js'
 import type { Theme } from '../theme.js'
+import type { AskUserQuestionsReq, AskUserQuestion as Question } from '../types.js'
 
 const ARROW = '▸ '
 const SPACER = '  '
@@ -22,16 +22,19 @@ function initialSelections(qs: Question[]): number[] {
   // Pre-select the recommended option (or 0 if none marked).  The UI
   // always opens with a sensible default so Enter confirms something.
   return qs.map(q => {
-    if (!q.options.length) return OTHER_INDEX_OFFSET // "Other" by default when no options
+    if (!q.options.length) {return OTHER_INDEX_OFFSET} // "Other" by default when no options
     const recIdx = q.options.findIndex(o => o.recommended)
+
     return recIdx >= 0 ? recIdx : 0
   })
 }
 
 function selectionLabel(q: Question, sel: number): string {
-  if (sel === q.options.length) return '__other__' // sentinel for "Other" handoff
+  if (sel === q.options.length) {return '__other__'} // sentinel for "Other" handoff
   const opt = q.options[sel]
-  if (!opt) return '__other__'
+
+  if (!opt) {return '__other__'}
+
   return opt.label
 }
 
@@ -83,6 +86,7 @@ function QuestionPanel({
         {opts.map((opt, i) => {
           const isSel = selected === i
           const isRec = opt.recommended
+
           return (
             <Text key={i}>
               <Text bold={isSel} color={isSel ? t.color.accent : t.color.text} inverse={isSel}>
@@ -141,9 +145,10 @@ export function AskUserQuestionsTool({
       return onCancel()
     }
 
-    if (!total) return
+    if (!total) {return}
     const currentQ = qs[activeIdx]
-    if (!currentQ) return
+
+    if (!currentQ) {return}
 
     const choicesLen = currentQ.options.length + OTHER_INDEX_OFFSET
 
@@ -151,8 +156,10 @@ export function AskUserQuestionsTool({
       setSelections(prev => {
         const next = prev.slice()
         next[activeIdx] = Math.max(0, (next[activeIdx] ?? 0) - 1)
+
         return next
       })
+
       return
     }
 
@@ -160,20 +167,23 @@ export function AskUserQuestionsTool({
       setSelections(prev => {
         const next = prev.slice()
         next[activeIdx] = Math.min(choicesLen - 1, (next[activeIdx] ?? 0) + 1)
+
         return next
       })
+
       return
     }
 
     if (key.tab) {
       if (key.shift) {
-        if (activeIdx > 0) setActiveIdx(i => i - 1)
+        if (activeIdx > 0) {setActiveIdx(i => i - 1)}
       } else if (activeIdx === total - 1) {
         // Tab on the last question submits.
         finalize()
       } else {
         setActiveIdx(i => i + 1)
       }
+
       return
     }
 
@@ -181,18 +191,22 @@ export function AskUserQuestionsTool({
     // past the last real option).  This commits the current question
     // and either advances to the next or finalises on the last one.
     const n = parseInt(ch, 10)
+
     if (n >= 1 && n <= choicesLen) {
       const idx = n - 1
       setSelections(prev => {
         const next = prev.slice()
         next[activeIdx] = idx
+
         return next
       })
+
       if (activeIdx === total - 1) {
         finalize()
       } else {
         setActiveIdx(i => i + 1)
       }
+
       return
     }
 
@@ -228,7 +242,7 @@ export function AskUserQuestionsTool({
         {total} question{total === 1 ? '' : 's'} · ↑/↓/Tab to navigate · Enter to confirm · Esc to cancel
       </Text>
       {qs.map((q, i) => (
-        <Box key={i} flexDirection="column" marginTop={i === 0 ? 1 : 1}>
+        <Box flexDirection="column" key={i} marginTop={i === 0 ? 1 : 1}>
           <QuestionPanel
             active={i === activeIdx}
             idx={i}

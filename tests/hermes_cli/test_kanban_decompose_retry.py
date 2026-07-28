@@ -29,14 +29,26 @@ def _fake_aux_response(content: str):
     return resp
 
 
-def _fake_client_returns(sequence):
-    """Return a client whose create() yields `sequence` items in order."""
-    client = MagicMock()
-    client.chat.completions.create = MagicMock(side_effect=sequence)
-    return client, "test-model"
+def _patch_call_llm(sequence):
+    """Mock ``agent.auxiliary_client.call_llm`` to yield `sequence` responses.
+
+    Each item is either a fake aux response (success) or an Exception instance
+    (raised as a side-effect). This is the production primitive the decomposer
+    now routes through (see #35566) — mocking it at the source keeps task
+    config, extra_body, and retries out of unit-test scope.
+    """
+    side_effect = []
+    for item in sequence:
+        if isinstance(item, Exception):
+            side_effect.append(item)
+        else:
+            side_effect.append(item)
+    return patch("agent.auxiliary_client.call_llm", side_effect=side_effect)
 
 
 def _patch_aux_client_obj(client, model="test-model"):
+    # Retained for call-site compatibility with tests that still build a client
+    # object; decompose_task no longer touches get_text_auxiliary_client.
     return patch(
         "agent.auxiliary_client.get_text_auxiliary_client",
         return_value=(client, model),
@@ -44,6 +56,8 @@ def _patch_aux_client_obj(client, model="test-model"):
 
 
 def _patch_extra_body():
+    # No-op shim: extra_body plumbing now lives inside call_llm, which
+    # _patch_call_llm already mocks. Kept for call-site compatibility.
     return patch(
         "agent.auxiliary_client.get_auxiliary_extra_body",
         return_value={},
@@ -78,16 +92,14 @@ def test_retries_on_malformed_json_then_succeeds(kanban_home):
         "rationale": "split",
         "tasks": [{"title": "research", "body": "look", "assignee": "researcher", "parents": []}],
     })
-    client, _ = _fake_client_returns([
-        _fake_aux_response("sorry, I forgot the JSON"),  # attempt 1 fails
-        _fake_aux_response(good),                          # attempt 2 succeeds
-    ])
-
     patches = _patch_list_profiles(["orchestrator", "researcher"])
     for p in patches:
         p.start()
     try:
-        with _patch_aux_client_obj(client), _patch_extra_body():
+        with _patch_call_llm([
+            _fake_aux_response("sorry, I forgot the JSON"),  # attempt 1 fails
+            _fake_aux_response(good),                          # attempt 2 succeeds
+        ]), _patch_extra_body():
             outcome = decomp.decompose_task(tid, author="me")
     finally:
         for p in patches:
@@ -106,15 +118,14 @@ def test_retries_on_empty_content_then_succeeds(kanban_home):
     good = jsonlib.dumps({
         "fanout": False, "rationale": "one", "title": "T", "body": "B", "assignee": "researcher",
     })
-    client, _ = _fake_client_returns([
-        _fake_aux_response(""),        # attempt 1: empty
-        _fake_aux_response(good),      # attempt 2: valid
-    ])
     patches = _patch_list_profiles(["orchestrator", "researcher"])
     for p in patches:
         p.start()
     try:
-        with _patch_aux_client_obj(client), _patch_extra_body(), patch(
+        with _patch_call_llm([
+            _fake_aux_response(""),        # attempt 1: empty
+            _fake_aux_response(good),      # attempt 2: valid
+        ]), _patch_extra_body(), patch(
             "hermes_cli.kanban_decompose._load_config",
             return_value={"kanban": {"default_assignee": "researcher"}},
         ):
@@ -130,16 +141,15 @@ def test_gives_up_structured_after_all_attempts(kanban_home):
     with kb.connect() as conn:
         tid = kb.create_task(conn, title="x", triage=True)
 
-    client, _ = _fake_client_returns([
-        _fake_aux_response("not json 1"),
-        _fake_aux_response("not json 2"),
-        _fake_aux_response("not json 3"),
-    ])
     patches = _patch_list_profiles(["orchestrator"])
     for p in patches:
         p.start()
     try:
-        with _patch_aux_client_obj(client), _patch_extra_body():
+        with _patch_call_llm([
+            _fake_aux_response("not json 1"),
+            _fake_aux_response("not json 2"),
+            _fake_aux_response("not json 3"),
+        ]), _patch_extra_body():
             outcome = decomp.decompose_task(tid, author="me")
     finally:
         for p in patches:
@@ -162,15 +172,13 @@ def test_no_raw_output_leaks_on_api_error(kanban_home):
     with kb.connect() as conn:
         tid = kb.create_task(conn, title="x", triage=True)
 
-    client = MagicMock()
-    client.chat.completions.create = MagicMock(
-        side_effect=[RuntimeError("SECRET-RAW-TOKEN-12345") for _ in range(3)]
-    )
     patches = _patch_list_profiles(["orchestrator"])
     for p in patches:
         p.start()
     try:
-        with _patch_aux_client_obj(client), _patch_extra_body():
+        with _patch_call_llm(
+            [RuntimeError("SECRET-RAW-TOKEN-12345") for _ in range(3)]
+        ), _patch_extra_body():
             outcome = decomp.decompose_task(tid, author="me")
     finally:
         for p in patches:
@@ -189,18 +197,18 @@ def test_single_success_first_try_is_not_wasteful(kanban_home):
     good = jsonlib.dumps({
         "fanout": False, "rationale": "one", "title": "T", "body": "B", "assignee": "researcher",
     })
-    client, _ = _fake_client_returns([_fake_aux_response(good)])
     patches = _patch_list_profiles(["orchestrator", "researcher"])
     for p in patches:
         p.start()
     try:
-        with _patch_aux_client_obj(client), _patch_extra_body(), patch(
+        with patch(
             "hermes_cli.kanban_decompose._load_config",
             return_value={"kanban": {"default_assignee": "researcher"}},
-        ):
+        ), patch("agent.auxiliary_client.call_llm") as mock_llm:
+            mock_llm.side_effect = [_fake_aux_response(good)]
             outcome = decomp.decompose_task(tid, author="me")
     finally:
         for p in patches:
             p.stop()
     assert outcome.ok, outcome.reason
-    assert client.chat.completions.create.call_count == 1
+    assert mock_llm.call_count == 1
