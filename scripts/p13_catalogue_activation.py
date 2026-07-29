@@ -19,6 +19,8 @@ from typing import Any, Callable
 GO_AUTHORITY = "!go"
 CATALOGUE_STATUS = "PRE_GO_PRIVATE_DISABLED_CATALOGUE"
 MIGRATION_MARKER = "P13_DISABLED_CATALOGUE"
+RECEIPT_KIND_STAGE = "p13_wave_stage_v1"
+RECEIPT_KIND_REGISTRATION = "p13_registration_v1"
 
 
 def _canonical(value: Any) -> str:
@@ -191,6 +193,7 @@ def stage_wave(
     entries: list[dict[str, Any]],
     *,
     catalogue_sha256: str,
+    disposition_sha256: str,
     receipt_path: Path,
     create_job_fn: Callable[..., dict[str, Any]],
     list_jobs_fn: Callable[..., list[dict[str, Any]]],
@@ -265,8 +268,10 @@ def stage_wave(
 
     receipt = {
         "schema_version": 1,
+        "receipt_kind": RECEIPT_KIND_STAGE,
         "migration": MIGRATION_MARKER,
         "catalogue_sha256": catalogue_sha256,
+        "disposition_sha256": disposition_sha256,
         "wave": entries[0]["activation_wave"] if entries else None,
         "jobs": [
             {
@@ -287,12 +292,53 @@ def stage_wave(
     }
 
 
-def _read_receipt(path: Path, catalogue_sha256: str) -> dict[str, Any]:
+def _read_receipt(
+    path: Path,
+    catalogue_sha256: str,
+    *,
+    expected_kind: str | None = None,
+    expected_wave: str | None = None,
+) -> dict[str, Any]:
+    """Load and optionally strictly validate a migration receipt.
+
+    When *expected_kind* is given the receipt is fail-closed validated: the
+    receipt_kind must match, the jobs list must be non-empty, every job must
+    carry a target_id, and the receipt wave must be present.  If
+    *expected_wave* is also given it must match the receipt wave.  Any
+    deviation — registration receipt, legacy receipt (no kind), malformed
+    payload, empty jobs, or out-of-wave binding — raises ValueError so the
+    caller never reaches resume_job / pause_job.
+    """
     receipt = json.loads(path.read_text(encoding="utf-8"))
     if receipt.get("migration") != MIGRATION_MARKER:
         raise ValueError("invalid migration receipt")
     if receipt.get("catalogue_sha256") != catalogue_sha256:
         raise ValueError("receipt catalogue checksum mismatch")
+    if expected_kind is not None:
+        kind = receipt.get("receipt_kind")
+        if kind != expected_kind:
+            raise ValueError(
+                f"receipt kind {kind!r} is not a valid {expected_kind} receipt; "
+                f"refusing to proceed"
+            )
+        jobs = receipt.get("jobs")
+        if not isinstance(jobs, list) or not jobs:
+            raise ValueError("receipt has no staged jobs; refusing to proceed")
+        wave = receipt.get("wave")
+        if not wave:
+            raise ValueError("receipt is missing wave binding; refusing to proceed")
+        for item in jobs:
+            if not isinstance(item, dict):
+                raise ValueError("receipt job is malformed; refusing to proceed")
+            for required in ("source_instance", "source_id", "target_id"):
+                if not item.get(required):
+                    raise ValueError(
+                        f"receipt job missing {required}; refusing to proceed"
+                    )
+        if expected_wave is not None and wave != expected_wave:
+            raise ValueError(
+                f"receipt wave {wave!r} does not match expected wave {expected_wave!r}"
+            )
     return receipt
 
 
@@ -363,16 +409,21 @@ def main(argv: list[str] | None = None) -> int:
     from cron.jobs import create_job, list_jobs, pause_job, remove_job, resume_job, update_job
 
     if args.action == "pause":
-        receipt = _read_receipt(args.receipt, args.sha256)
+        receipt = _read_receipt(
+            args.receipt, args.sha256, expected_kind=RECEIPT_KIND_STAGE
+        )
         print(json.dumps(pause_receipt(receipt, pause_job_fn=pause_job), indent=2))
         return 0
 
     if args.action == "enable":
+        if not args.wave:
+            raise SystemExit("--wave is required for enable")
         require_go_authority(os.environ.get("KENSEI_MIGRATION_AUTHORITY"))
     if args.action == "stage":
         result = stage_wave(
             entries,
             catalogue_sha256=args.sha256,
+            disposition_sha256=_sha256(args.disposition),
             receipt_path=args.receipt,
             create_job_fn=create_job,
             list_jobs_fn=list_jobs,
@@ -380,7 +431,12 @@ def main(argv: list[str] | None = None) -> int:
             remove_job_fn=remove_job,
         )
     else:
-        receipt = _read_receipt(args.receipt, args.sha256)
+        receipt = _read_receipt(
+            args.receipt,
+            args.sha256,
+            expected_kind=RECEIPT_KIND_STAGE,
+            expected_wave=args.wave,
+        )
         result = enable_receipt(receipt, resume_job_fn=resume_job, pause_job_fn=pause_job)
     print(json.dumps(result, indent=2))
     return 0

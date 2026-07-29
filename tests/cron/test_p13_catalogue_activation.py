@@ -127,6 +127,7 @@ def test_stage_is_idempotent_and_remaps_context_dependencies(tmp_path: Path) -> 
     result = module.stage_wave(
         entries,
         catalogue_sha256=digest,
+        disposition_sha256="disposition-test-sha",
         receipt_path=receipt,
         create_job_fn=create_job,
         list_jobs_fn=list_jobs,
@@ -141,6 +142,7 @@ def test_stage_is_idempotent_and_remaps_context_dependencies(tmp_path: Path) -> 
     again = module.stage_wave(
         entries,
         catalogue_sha256=digest,
+        disposition_sha256="disposition-test-sha",
         receipt_path=receipt,
         create_job_fn=create_job,
         list_jobs_fn=list_jobs,
@@ -269,3 +271,193 @@ def test_select_authorised_wave_requires_complete_matrix_coverage(tmp_path: Path
             incomplete,
             "WAVE_1_BOUNDED_SCRIPTS",
         )
+
+
+# --- Fail-closed receipt-kind validation (P13 repair) ---
+
+
+def _write_receipt(path: Path, receipt: dict) -> Path:
+    path.write_text(json.dumps(receipt, sort_keys=True) + "\n")
+    return path
+
+
+def _stage_receipt(
+    tmp_path: Path,
+    module,
+    *,
+    wave: str = "WAVE_1_BOUNDED_SCRIPTS",
+    override: dict | None = None,
+) -> tuple[Path, str]:
+    """Build a valid p13_wave_stage_v1 receipt bound to the test catalogue."""
+    path, digest = _catalogue(tmp_path)
+    receipt = {
+        "schema_version": 1,
+        "receipt_kind": module.RECEIPT_KIND_STAGE,
+        "migration": module.MIGRATION_MARKER,
+        "catalogue_sha256": digest,
+        "disposition_sha256": "disposition-test-sha",
+        "wave": wave,
+        "jobs": [
+            {"source_instance": "VPS:cron/jobs.json:source-a", "source_id": "source-a", "target_id": "target-1"},
+            {"source_instance": "VPS:cron/jobs.json:source-b", "source_id": "source-b", "target_id": "target-2"},
+        ],
+    }
+    if override:
+        receipt.update(override)
+    receipt_path = tmp_path / "stage_receipt.json"
+    return _write_receipt(receipt_path, receipt), digest
+
+
+def test_read_receipt_accepts_valid_stage_receipt(tmp_path: Path) -> None:
+    module = _module()
+    path, digest = _stage_receipt(tmp_path, module)
+    receipt = module._read_receipt(
+        path, digest, expected_kind=module.RECEIPT_KIND_STAGE, expected_wave="WAVE_1_BOUNDED_SCRIPTS"
+    )
+    assert receipt["receipt_kind"] == module.RECEIPT_KIND_STAGE
+    assert len(receipt["jobs"]) == 2
+
+
+def test_read_receipt_rejects_registration_receipt(tmp_path: Path) -> None:
+    """The 103-job incident: an all-registration receipt must NOT enable jobs."""
+    module = _module()
+    path, digest = _catalogue(tmp_path)
+    registration = {
+        "schema_version": 1,
+        "receipt_kind": module.RECEIPT_KIND_REGISTRATION,
+        "migration": module.MIGRATION_MARKER,
+        "catalogue_sha256": digest,
+        "summary": {"total": 103, "created": 103, "reused": 0, "skipped": 0},
+        "jobs": [
+            {"source_instance": f"VPS:cron/jobs.json:s{i}", "target_id": f"job-{i}"}
+            for i in range(103)
+        ],
+        "errors": [],
+    }
+    receipt_path = _write_receipt(tmp_path / "reg_receipt.json", registration)
+    with pytest.raises(ValueError, match="not a valid p13_wave_stage_v1 receipt"):
+        module._read_receipt(
+            receipt_path, digest,
+            expected_kind=module.RECEIPT_KIND_STAGE,
+            expected_wave="WAVE_1_BOUNDED_SCRIPTS",
+        )
+
+
+def test_read_receipt_rejects_legacy_receipt_without_kind(tmp_path: Path) -> None:
+    """Pre-repair receipts lack receipt_kind — they must not be trusted."""
+    module = _module()
+    path, digest = _stage_receipt(tmp_path, module, override={"receipt_kind": None})
+    with pytest.raises(ValueError, match="not a valid p13_wave_stage_v1 receipt"):
+        module._read_receipt(
+            path, digest,
+            expected_kind=module.RECEIPT_KIND_STAGE,
+            expected_wave="WAVE_1_BOUNDED_SCRIPTS",
+        )
+
+
+def test_read_receipt_rejects_malformed_empty_jobs(tmp_path: Path) -> None:
+    module = _module()
+    path, digest = _stage_receipt(tmp_path, module, override={"jobs": []})
+    with pytest.raises(ValueError, match="no staged jobs"):
+        module._read_receipt(path, digest, expected_kind=module.RECEIPT_KIND_STAGE)
+
+
+def test_read_receipt_rejects_job_missing_target_id(tmp_path: Path) -> None:
+    module = _module()
+    path, digest = _stage_receipt(
+        tmp_path, module,
+        override={"jobs": [{"source_instance": "x", "source_id": "y"}]},
+    )
+    with pytest.raises(ValueError, match="missing target_id"):
+        module._read_receipt(path, digest, expected_kind=module.RECEIPT_KIND_STAGE)
+
+
+def test_read_receipt_rejects_job_missing_source_binding(tmp_path: Path) -> None:
+    """A staged target must retain its source-instance and source-ID binding."""
+    module = _module()
+    path, digest = _stage_receipt(
+        tmp_path, module,
+        override={"jobs": [{"target_id": "target-1"}]},
+    )
+    with pytest.raises(ValueError, match="missing source_instance"):
+        module._read_receipt(path, digest, expected_kind=module.RECEIPT_KIND_STAGE)
+
+
+def test_read_receipt_rejects_missing_wave_binding(tmp_path: Path) -> None:
+    module = _module()
+    path, digest = _stage_receipt(tmp_path, module, override={"wave": None})
+    with pytest.raises(ValueError, match="missing wave binding"):
+        module._read_receipt(path, digest, expected_kind=module.RECEIPT_KIND_STAGE)
+
+
+def test_read_receipt_rejects_out_of_wave_receipt(tmp_path: Path) -> None:
+    module = _module()
+    path, digest = _stage_receipt(tmp_path, module, wave="WAVE_2_OTHER")
+    with pytest.raises(ValueError, match="does not match expected wave"):
+        module._read_receipt(
+            path, digest,
+            expected_kind=module.RECEIPT_KIND_STAGE,
+            expected_wave="WAVE_1_BOUNDED_SCRIPTS",
+        )
+
+
+def test_stage_receipt_written_with_strict_kind_and_disposition_binding(tmp_path: Path) -> None:
+    """stage_wave must emit a p13_wave_stage_v1 receipt carrying disposition_sha256."""
+    module = _module()
+    path, digest = _catalogue(tmp_path)
+    catalogue = module.load_catalogue(path, digest)
+    entries = module.select_wave(catalogue, "WAVE_1_BOUNDED_SCRIPTS")
+    jobs: list[dict] = []
+    receipt = tmp_path / "receipt.json"
+
+    def create_job(**kwargs):
+        job = {**kwargs, "id": f"target-{len(jobs) + 1}", "state": "paused"}
+        jobs.append(job)
+        return job
+
+    module.stage_wave(
+        entries,
+        catalogue_sha256=digest,
+        disposition_sha256="disp-abc123",
+        receipt_path=receipt,
+        create_job_fn=create_job,
+        list_jobs_fn=lambda **kw: list(jobs),
+        update_job_fn=lambda jid, patch: {"id": jid, **patch},
+        remove_job_fn=lambda jid: True,
+    )
+    written = json.loads(receipt.read_text())
+    assert written["receipt_kind"] == module.RECEIPT_KIND_STAGE
+    assert written["disposition_sha256"] == "disp-abc123"
+    assert written["wave"] == "WAVE_1_BOUNDED_SCRIPTS"
+    assert len(written["jobs"]) == 2
+
+
+def test_enable_receipt_only_resumes_staged_ids_and_rolls_back_on_failure() -> None:
+    module = _module()
+    receipt = {
+        "receipt_kind": module.RECEIPT_KIND_STAGE,
+        "migration": module.MIGRATION_MARKER,
+        "catalogue_sha256": "x",
+        "wave": "W1",
+        "jobs": [
+            {"target_id": "a"},
+            {"target_id": "b"},
+        ],
+    }
+    resumed: list[str] = []
+    paused: list[str] = []
+
+    def resume_job(target_id):
+        resumed.append(target_id)
+        if target_id == "b":
+            return None  # simulate failure
+        return {"id": target_id, "enabled": True}
+
+    def pause_job(target_id, reason=None):
+        paused.append(target_id)
+        return {"id": target_id, "enabled": False}
+
+    with pytest.raises(RuntimeError, match="failed to enable b"):
+        module.enable_receipt(receipt, resume_job_fn=resume_job, pause_job_fn=pause_job)
+    assert resumed == ["a", "b"]
+    assert paused == ["a"]  # rollback of the one that succeeded

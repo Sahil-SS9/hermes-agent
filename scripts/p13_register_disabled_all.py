@@ -169,6 +169,7 @@ def main(argv: list[str] | None = None) -> int:
     # Write receipt
     receipt = {
         "schema_version": 1,
+        "receipt_kind": "p13_registration_v1",
         "migration": "P13_DISABLED_CATALOGUE",
         "catalogue_sha256": _sha256_hex(args.catalogue.read_bytes()),
         "summary": {
