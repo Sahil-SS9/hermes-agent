@@ -1462,6 +1462,8 @@ class DiscordAdapter(BasePlatformAdapter):
                     custom_id = ""
                 if custom_id.startswith("blog_approval:"):
                     await adapter_self._handle_blog_approval_component(interaction, custom_id)
+                if custom_id.startswith("ideabox_approval:"):
+                    await adapter_self._handle_ideabox_component(interaction, custom_id)
 
             @self._client.event
             async def on_message(message: DiscordMessage):
@@ -1627,6 +1629,13 @@ class DiscordAdapter(BasePlatformAdapter):
                 await asyncio.wait_for(self._ready_event.wait(), timeout=30.0)
             except asyncio.TimeoutError:
                 pass
+        # Idea Box intake hook — intercepts messages from configured
+        # #idea-box text channels and forum-idea-box posts before they
+        # reach the normal Hermes agent pipeline. Returns True when the
+        # message was consumed by the Idea Box so the rest of the
+        # dispatch path is skipped.
+        if await self._dispatch_ideabox_intake(message):
+            return True
         admitted, role_authorized = self._discord_message_admission(
             message, claim=True,
         )
@@ -3171,6 +3180,290 @@ class DiscordAdapter(BasePlatformAdapter):
             return
         await interaction.followup.send(result.get("message") or f"{label}: `{slug}`")
 
+    # ── Idea Box handlers ──────────────────────────────────────────────
+
+    async def _handle_ideabox_slash(
+        self, interaction, source: str,
+    ) -> None:
+        """Handle the /ideabox slash command."""
+        from .ideabox.handler import (
+            SourceSubmission,
+            handle_ideabox_submission,
+        )
+
+        await interaction.response.defer(ephemeral=False)
+
+        # Detect channel type so the source parser can tag provenance
+        # correctly. Slash commands can be invoked from any channel the
+        # bot can see, so we can't assume a forum vs text channel here.
+        channel = getattr(interaction, "channel", None)
+        channel_type = "text"
+        if channel is not None and self._is_forum_parent(channel):
+            channel_type = "forum"
+        elif isinstance(channel, discord.Thread) and self._is_forum_parent(
+            getattr(channel, "parent", None)
+        ):
+            channel_type = "forum"
+
+        submission = SourceSubmission(
+            raw_text=source,
+            author_id=str(interaction.user.id),
+            channel_id=str(interaction.channel_id or ""),
+            message_id=str(interaction.id),
+            guild_id=str(interaction.guild_id or ""),
+            channel_type=channel_type,
+            timestamp=int(time.time()),
+        )
+
+        result = await handle_ideabox_submission(submission)
+
+        if not result.get("success"):
+            errors = result.get("errors", ["Unknown error"])
+            embed = {
+                "title": "❌ Idea Box — Invalid Submission",
+                "description": "\n".join(f"• {e}" for e in errors),
+                "color": 0xED4245,
+                "footer": {"text": "Idea Box — fix the issues and try again"},
+            }
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            return
+
+        if result.get("is_duplicate"):
+            existing = result.get("existing_task_id") or result.get("existing_triage_id") or "unknown"
+            embed = {
+                "title": "🔁 Idea Box — Duplicate Source",
+                "description": (
+                    "This source has already been submitted.\n"
+                    f"Existing reference: `{existing}`"
+                ),
+                "color": 0xFEE75C,
+                "footer": {"text": "Idea Box — duplicate detected"},
+            }
+            await interaction.followup.send(embed=embed)
+            return
+
+        embed = result.get("embed", {})
+        triage_id = result.get("triage_summary", None)
+        triage_id_str = getattr(triage_id, "triage_id", "unknown") if triage_id else "unknown"
+
+        view = IdeaBoxApprovalView(
+            triage_id=triage_id_str,
+            allowed_user_ids=self._allowed_user_ids,
+            allowed_role_ids=self._allowed_role_ids,
+        )
+
+        # Send with buttons
+        try:
+            await interaction.followup.send(
+                embed=embed,
+                view=view,
+            )
+        except Exception as exc:
+            logger.error("Idea Box send failed: %s", exc, exc_info=True)
+            await interaction.followup.send(
+                "⚠️ Idea Box processed your submission but couldn't display the result. "
+                "Please try again.",
+                ephemeral=True,
+            )
+
+    async def _handle_ideabox_component(
+        self, interaction, custom_id: str,
+    ) -> None:
+        """Handle persistent raw Discord Idea Box components."""
+        from .ideabox.handler import handle_ideabox_component
+        await handle_ideabox_component(
+            interaction,
+            custom_id,
+            self._allowed_user_ids,
+            self._allowed_role_ids,
+        )
+
+    # ── Idea Box channel-level intake ─────────────────────────────────
+    # Configured via DISCORD_IDEABOX_CHANNELS env var (comma-separated
+    # list of channel IDs).  When a message lands in any of these
+    # channels — text or forum — the message is intercepted BEFORE the
+    # normal Hermes agent pipeline and run through the Idea Box
+    # triage → approval flow instead.  Returns True when the message
+    # was consumed by the Idea Box, False when the message is not
+    # part of an intake channel (and should fall through to the normal
+    # pipeline).
+
+    _IDEABOX_CHANNELS_ENV = "DISCORD_IDEABOX_CHANNELS"
+
+    def _ideabox_intake_channels(self) -> set:
+        """Return the configured set of Idea Box intake channel IDs.
+
+        Reads from ``DISCORD_IDEABOX_CHANNELS`` (comma-separated). Returns
+        an empty set when the variable is unset, which disables the hook.
+        """
+        raw = os.getenv(self._IDEABOX_CHANNELS_ENV, "").strip()
+        if not raw:
+            return set()
+        return {item.strip() for item in raw.split(",") if item.strip()}
+
+    def _is_ideabox_intake_message(self, message: Any) -> bool:
+        """True when ``message`` is in a configured Idea Box intake channel.
+
+        Matches both the direct channel ID and the parent channel ID
+        (so messages inside a forum thread whose parent forum is in the
+        intake set are caught too).
+        """
+        intake = self._ideabox_intake_channels()
+        if not intake:
+            return False
+        channel = getattr(message, "channel", None)
+        if channel is None:
+            return False
+        channel_id = str(getattr(channel, "id", "") or "")
+        if not channel_id:
+            return False
+        if channel_id in intake:
+            return True
+        parent_id = self._get_parent_channel_id(channel)
+        return bool(parent_id and parent_id in intake)
+
+    async def _dispatch_ideabox_intake(self, message: Any) -> bool:
+        """Intercept messages from Idea Box intake channels.
+
+        Returns True when the message was consumed by the Idea Box
+        pipeline (so the caller should skip normal dispatch), False
+        otherwise. Never raises — all errors are caught and logged
+        with a user-friendly fallback message.
+        """
+        # Skip our own messages and non-text message types fast.
+        if not self._client:
+            return False
+        author = getattr(message, "author", None)
+        if author == self._client.user:
+            return False
+        msg_type = getattr(message, "type", None)
+        if msg_type is not None and msg_type not in {0, 19, 20}:
+            # 0=default, 19=reply, 20=thread_starter_message
+            return False
+        if not self._is_ideabox_intake_message(message):
+            return False
+
+        from .ideabox.handler import (
+            IdeaBoxApprovalView,
+            SourceSubmission,
+            handle_ideabox_submission,
+        )
+
+        channel = message.channel
+        is_forum = self._is_forum_parent(channel) or self._is_forum_parent(
+            getattr(channel, "parent", None),
+        )
+        # Forum posts (threads under a forum) report channel_type="forum".
+        # Text channels report "text".  Threads under a non-forum parent
+        # inherit the parent text-channel treatment.
+        if is_forum:
+            channel_type = "forum"
+        elif isinstance(channel, discord.Thread):
+            channel_type = "text"
+        else:
+            channel_type = "text"
+
+        guild = getattr(message, "guild", None)
+        submission = SourceSubmission(
+            raw_text=message.content or "",
+            author_id=str(getattr(author, "id", "")),
+            channel_id=str(getattr(channel, "id", "")),
+            message_id=str(getattr(message, "id", "")),
+            guild_id=str(getattr(guild, "id", "")) if guild else "",
+            channel_type=channel_type,
+            timestamp=int(time.time()),
+        )
+
+        try:
+            result = await handle_ideabox_submission(submission)
+        except Exception as exc:
+            logger.error(
+                "[%s] Idea Box intake failed: %s", self.name, exc, exc_info=True,
+            )
+            try:
+                await channel.send(
+                    "⚠️ Idea Box hit an unexpected error. The submission was not "
+                    "processed — please try again or notify an admin if it "
+                    "persists."
+                )
+            except Exception:
+                pass
+            return True  # consumed — don't double-process via agent pipeline
+
+        # Validation / dedup errors → friendly ephemeral-style reply.
+        if not result.get("success"):
+            errors = result.get("errors", ["Unknown error"])
+            embed = {
+                "title": "❌ Idea Box — Invalid Submission",
+                "description": "\n".join(f"• {e}" for e in errors),
+                "color": 0xED4245,
+                "footer": {"text": "Idea Box — fix the issues and try again"},
+            }
+            try:
+                await channel.send(embed=embed)
+            except Exception:
+                pass
+            return True
+
+        if result.get("is_duplicate"):
+            existing = (
+                result.get("existing_task_id")
+                or result.get("existing_triage_id")
+                or "unknown"
+            )
+            embed = {
+                "title": "🔁 Idea Box — Duplicate Source",
+                "description": (
+                    "This source has already been submitted.\n"
+                    f"Existing reference: `{existing}`"
+                ),
+                "color": 0xFEE75C,
+                "footer": {"text": "Idea Box — duplicate detected"},
+            }
+            try:
+                await channel.send(embed=embed)
+            except Exception:
+                pass
+            return True
+
+        embed = result.get("embed") or {}
+        triage_id_str = "unknown"
+        ts = result.get("triage_summary")
+        if ts is not None:
+            triage_id_str = getattr(ts, "triage_id", "unknown")
+
+        view = IdeaBoxApprovalView(
+            triage_id=triage_id_str,
+            allowed_user_ids=self._allowed_user_ids,
+            allowed_role_ids=self._allowed_role_ids,
+        )
+        try:
+            await channel.send(embed=embed, view=view)
+        except Exception as exc:
+            logger.error(
+                "[%s] Idea Box intake send failed: %s", self.name, exc, exc_info=True,
+            )
+        return True
+
+    def _ideabox_view_from_content(self, content: str):
+        """Return an IdeaBoxApprovalView when a sent message is an Idea Box card."""
+        if not DISCORD_AVAILABLE or "Idea Box" not in str(content or ""):
+            return None
+        triage_match = re.search(r"Triage ID:\s*`?([a-zA-Z0-9_]+)`?", content)
+        if not triage_match:
+            return None
+        triage_id = triage_match.group(1).strip()
+        if not triage_id:
+            return None
+        try:
+            return IdeaBoxApprovalView(
+                triage_id=triage_id,
+                allowed_user_ids=self._allowed_user_ids,
+                allowed_role_ids=self._allowed_role_ids,
+            )
+        except NameError:
+            return None
+
     def _blog_approval_view_from_content(self, content: str):
         """Return a BlogApprovalView when a sent message is a SahilBlog approval card."""
         if not DISCORD_AVAILABLE or "[Blog Approval Request]" not in str(content or ""):
@@ -3259,6 +3552,7 @@ class DiscordAdapter(BasePlatformAdapter):
             formatted = self.format_message(content)
             chunks = self.truncate_message(formatted, self.MAX_MESSAGE_LENGTH)
             blog_approval_view = self._blog_approval_view_from_content(content)
+            ideabox_view = self._ideabox_view_from_content(content)
 
             message_ids = []
             reference = None
@@ -3278,7 +3572,7 @@ class DiscordAdapter(BasePlatformAdapter):
                     chunk_reference = reference
                 else:  # "first" (default) or "off"
                     chunk_reference = reference if i == 0 else None
-                view = blog_approval_view if i == 0 else None
+                view = blog_approval_view or ideabox_view if i == 0 else None
                 try:
                     msg = await channel.send(
                         content=chunk,
@@ -6232,6 +6526,16 @@ class DiscordAdapter(BasePlatformAdapter):
         ):
             await self._handle_blog_idea_slash(interaction, idea, stream)
 
+        @tree.command(name="ideabox", description="Submit a link, article, or GitHub repo to the Idea Box for triage")
+        @discord.app_commands.describe(
+            source="URL, article text, or GitHub repository link to submit",
+        )
+        async def slash_ideabox(
+            interaction: discord.Interaction,
+            source: str,
+        ):
+            await self._handle_ideabox_slash(interaction, source)
+
         # ── Auto-register any gateway-available commands not yet on the tree ──
         # This ensures new commands added to COMMAND_REGISTRY in
         # hermes_cli/commands.py automatically appear as Discord slash
@@ -9167,7 +9471,7 @@ def _define_discord_view_classes() -> None:
     undefined, causing NameError on the first button interaction.
     """
     global ExecApprovalView, SlashConfirmView, UpdatePromptView, ModelPickerView, ClarifyChoiceView, ChoicePickerView
-    global ProfileGateView, BlogApprovalView
+    global ProfileGateView, BlogApprovalView, IdeaBoxApprovalView
 
     class ExecApprovalView(discord.ui.View):
         """
@@ -9545,6 +9849,110 @@ def _define_discord_view_classes() -> None:
                         embed.set_footer(
                             text="⏱ Prompt expired; use !approve/!amend/!reject if still needed"
                         )
+                    await msg.edit(embed=embed, view=self)
+                except Exception:
+                    pass
+
+    class IdeaBoxApprovalView(discord.ui.View):
+        """Approve / Amend / Reject buttons for Idea Box triage cards.
+
+        Used by the live gateway send path (channel.send(view=...)).
+        For standalone/out-of-process sends, the raw component payload
+        from ideabox.handler.IdeaBoxApprovalView.get_components() is used.
+        """
+
+        def __init__(
+            self,
+            triage_id: str,
+            allowed_user_ids: set,
+            allowed_role_ids: Optional[set] = None,
+        ):
+            super().__init__(timeout=86400)
+            self.triage_id = triage_id
+            self.allowed_user_ids = allowed_user_ids
+            self.allowed_role_ids = allowed_role_ids or set()
+            self.resolved = False
+
+        def _check_auth(self, interaction: discord.Interaction) -> bool:
+            return _component_check_auth(
+                interaction, self.allowed_user_ids, self.allowed_role_ids,
+            )
+
+        async def _resolve(
+            self, interaction: discord.Interaction, action: str,
+            color: discord.Color, label: str,
+        ):
+            if self.resolved:
+                await interaction.response.send_message(
+                    "This Idea Box item has already been resolved~", ephemeral=True,
+                )
+                return
+            if not self._check_auth(interaction):
+                await interaction.response.send_message(
+                    "You're not authorised to act on this Idea Box item~", ephemeral=True,
+                )
+                return
+
+            self.resolved = True
+            for child in self.children:
+                child.disabled = True
+            embed = interaction.message.embeds[0] if interaction.message.embeds else None
+            if embed:
+                embed.color = color
+                embed.set_footer(text=f"{label} by {interaction.user.display_name}")
+            await interaction.response.edit_message(embed=embed, view=self)
+
+            # Execute the action via the state machine
+            from .ideabox.handler import ApprovalStateMachine, _get_store
+            store = _get_store()
+            sm = ApprovalStateMachine(store)
+            actor_name = getattr(interaction.user, "display_name", str(interaction.user.id))
+            try:
+                if action == "approve":
+                    result = await sm.approve(self.triage_id, str(interaction.user.id), actor_name)
+                    msg = f"✅ Approved! Kanban task created: `{result.kanban_task_id}`"
+                elif action == "reject":
+                    await sm.reject(self.triage_id, str(interaction.user.id), actor_name, reason="Rejected via button")
+                    msg = "❌ Rejected."
+                else:  # amend
+                    await sm.amend(self.triage_id, str(interaction.user.id), actor_name, reason="Amend requested via button")
+                    msg = "✏️ Amend requested."
+            except ValueError as exc:
+                msg = f"⚠️ {exc}"
+            except Exception as exc:
+                logger.error("Idea Box button action failed: %s", exc, exc_info=True)
+                msg = f"⚠️ Action failed: {exc}"
+
+            await interaction.followup.send(msg, ephemeral=True)
+
+        @discord.ui.button(label="Approve", style=discord.ButtonStyle.green, emoji="✅")
+        async def approve(
+            self, interaction: discord.Interaction, button: discord.ui.Button,
+        ):
+            await self._resolve(interaction, "approve", discord.Color.green(), "Approved")
+
+        @discord.ui.button(label="Amend", style=discord.ButtonStyle.grey, emoji="✏️")
+        async def amend(
+            self, interaction: discord.Interaction, button: discord.ui.Button,
+        ):
+            await self._resolve(interaction, "amend", discord.Color.blue(), "Amend requested")
+
+        @discord.ui.button(label="Reject", style=discord.ButtonStyle.red, emoji="❌")
+        async def reject(
+            self, interaction: discord.Interaction, button: discord.ui.Button,
+        ):
+            await self._resolve(interaction, "reject", discord.Color.red(), "Rejected")
+
+        async def on_timeout(self):
+            for child in self.children:
+                child.disabled = True
+            msg = getattr(self, "_message", None)
+            if msg:
+                try:
+                    embed = msg.embeds[0] if msg.embeds else None
+                    if embed:
+                        embed.color = discord.Color.greyple()
+                        embed.set_footer(text="⏱ Idea Box item expired")
                     await msg.edit(embed=embed, view=self)
                 except Exception:
                     pass
