@@ -88,7 +88,8 @@ def select_authorised_wave(
     disposition: dict[str, Any],
     wave: str,
 ) -> list[dict[str, Any]]:
-    """Return a catalogue wave only when every row is explicitly stage-approved."""
+    """Return a catalogue wave only when every row is explicitly stage-approved
+    and bound to its expected current-contract fingerprint."""
     matrix_entries = [
         item
         for item in disposition.get("entries", [])
@@ -97,6 +98,11 @@ def select_authorised_wave(
     states = {
         item["source_instance"]: item.get("audit_no_stage_state")
         for item in matrix_entries
+    }
+    row_fingerprints = {
+        item["source_instance"]: item.get("contract_fingerprint")
+        for item in matrix_entries
+        if item.get("contract_fingerprint")
     }
     catalogue_sources = {
         entry.get("source_instance") for entry in catalogue.get("entries", [])
@@ -112,6 +118,13 @@ def select_authorised_wave(
         source_instance = entry["source_instance"]
         if states.get(source_instance) != "STAGE_APPROVED":
             raise ValueError(f"entry is not stage-approved: {source_instance}")
+        expected_fp = _target_fingerprint(entry)
+        row_fp = row_fingerprints.get(source_instance)
+        if row_fp is not None and row_fp != expected_fp:
+            raise ValueError(
+                f"contract fingerprint mismatch for {source_instance}: "
+                f"disposition row does not match expected current contract"
+            )
     return selected
 
 
@@ -143,18 +156,109 @@ def _schedule_text(schedule: Any, display: str | None = None) -> str:
     raise ValueError(f"cannot convert schedule: {schedule!r}")
 
 
-def build_create_kwargs(entry: dict[str, Any]) -> dict[str, Any]:
+def _normalize_model_provider(
+    value: Any, *, field: str, source_instance: str
+) -> str | None:
+    """Normalize a legacy model/provider value to a string or fail closed.
+
+    Legacy catalogues may carry ``{model: ..., provider: ...}`` dicts.  A bare
+    string passes through.  A dict with a single ``name`` key (or a flat dict
+    whose first value is a string) is extracted.  Anything else fails closed
+    to prevent silent loss of inference configuration.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        stripped = value.strip()
+        return stripped or None
+    if isinstance(value, dict):
+        # Common legacy shapes: {"name": "..."} or {"model": "..."} / {"provider": "..."}
+        for key in (field, "name"):
+            inner = value.get(key)
+            if isinstance(inner, str) and inner.strip():
+                return inner.strip()
+        # Flat dict with a single string value as a last resort.
+        str_values = [v for v in value.values() if isinstance(v, str) and v.strip()]
+        if len(str_values) == 1:
+            return str_values[0].strip()
+        raise ValueError(
+            f"cannot normalize dict {field} for {source_instance}: "
+            f"no single string value in {value!r}"
+        )
+    raise ValueError(
+        f"unsupported {field} type {type(value).__name__} for {source_instance}"
+    )
+
+
+def _resolve_p13_policy(
+    entry: dict[str, Any],
+    *,
+    p13_policy: dict[str, Any] | None,
+) -> tuple[str | None, str | None]:
+    """Resolve model/provider for an unpinned agent job via explicit P13 policy.
+
+    Returns (provider, model).  When the job is already pinned (has explicit
+    model/provider strings), returns (None, None) — caller should keep the
+    pinned values.  When unpinned and no_agent, returns (None, None) — no
+    inference axes needed.  When unpinned and agent-bound, requires an
+    explicit policy mapping (per-source or a declared default); never falls
+    back to the root global default.
+    """
     job = entry["target_job"]
+    if bool(job.get("no_agent")):
+        return None, None
+    has_model = _normalize_model_provider(job.get("model"), field="model", source_instance=entry["source_instance"])
+    has_provider = _normalize_model_provider(job.get("provider"), field="provider", source_instance=entry["source_instance"])
+    if has_model is not None or has_provider is not None:
+        return None, None  # already pinned
+    # Unpinned agent job — require explicit P13 policy.
+    if not p13_policy:
+        raise ValueError(
+            f"unpinned agent job {entry['source_instance']} requires an "
+            f"explicit P13 policy mapping; refusing to fall back to root global default"
+        )
+    source_instance = entry["source_instance"]
+    mapping = p13_policy.get(source_instance) or p13_policy.get("default")
+    if not isinstance(mapping, dict):
+        raise ValueError(
+            f"no P13 policy mapping for {source_instance} and no declared default"
+        )
+    provider = mapping.get("provider")
+    model = mapping.get("model")
+    if not (isinstance(provider, str) and provider.strip() and isinstance(model, str) and model.strip()):
+        raise ValueError(
+            f"P13 policy mapping for {source_instance} must define non-empty "
+            f"provider and model strings"
+        )
+    return provider.strip(), model.strip()
+
+
+def build_create_kwargs(
+    entry: dict[str, Any],
+    *,
+    p13_policy: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    job = entry["target_job"]
+    source_instance = entry["source_instance"]
     if job.get("profile") or job.get("fallback_providers"):
         raise ValueError(
-            f"unsupported legacy execution fields for {entry['source_instance']}"
+            f"unsupported legacy execution fields for {source_instance}"
         )
     if job.get("deliver") == "origin":
         raise ValueError(
-            f"origin delivery cannot be reconstructed safely for {entry['source_instance']}"
+            f"origin delivery cannot be reconstructed safely for {source_instance}"
         )
     repeat = job.get("repeat")
     repeat_times = repeat.get("times") if isinstance(repeat, dict) else repeat
+    # Normalize legacy dict model/provider to strings or fail closed.
+    model = _normalize_model_provider(job.get("model"), field="model", source_instance=source_instance)
+    provider = _normalize_model_provider(job.get("provider"), field="provider", source_instance=source_instance)
+    # Require explicit P13 policy for unpinned agent jobs.
+    policy_provider, policy_model = _resolve_p13_policy(entry, p13_policy=p13_policy)
+    if policy_provider is not None:
+        provider = policy_provider
+    if policy_model is not None:
+        model = policy_model
     return {
         "prompt": job.get("prompt") or "",
         "schedule": _schedule_text(job.get("schedule"), job.get("schedule_display")),
@@ -163,8 +267,8 @@ def build_create_kwargs(entry: dict[str, Any]) -> dict[str, Any]:
         "deliver": job.get("deliver") or "local",
         "skill": job.get("skill"),
         "skills": job.get("skills"),
-        "model": job.get("model"),
-        "provider": job.get("provider"),
+        "model": model,
+        "provider": provider,
         "base_url": job.get("base_url"),
         "script": job.get("script"),
         "context_from": None,
@@ -175,8 +279,12 @@ def build_create_kwargs(entry: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _target_fingerprint(entry: dict[str, Any]) -> str:
-    return hashlib.sha256(_canonical(build_create_kwargs(entry)).encode()).hexdigest()
+def _target_fingerprint(
+    entry: dict[str, Any], *, p13_policy: dict[str, Any] | None = None
+) -> str:
+    return hashlib.sha256(
+        _canonical(build_create_kwargs(entry, p13_policy=p13_policy)).encode()
+    ).hexdigest()
 
 
 def _write_private_json(path: Path, value: dict[str, Any]) -> None:
@@ -189,6 +297,49 @@ def _write_private_json(path: Path, value: dict[str, Any]) -> None:
     path.chmod(0o600)
 
 
+def _persisted_schedule_text(job: dict[str, Any]) -> str:
+    """Extract the schedule as the contract string from a persisted job.
+
+    Real cron jobs store a parsed schedule dict in ``schedule`` and the
+    human-readable form in ``schedule_display``.  Mock jobs (unit tests)
+    may store the raw string directly in ``schedule``.  Normalize both to
+    the contract string for comparison.
+    """
+    display = job.get("schedule_display")
+    if isinstance(display, str) and display.strip():
+        return display.strip()
+    schedule = job.get("schedule")
+    if isinstance(schedule, str):
+        return schedule
+    if isinstance(schedule, dict):
+        return _schedule_text(schedule, display)
+    return ""
+
+
+def _persisted_contract(job: dict[str, Any]) -> dict[str, Any]:
+    """Extract the runtime-contract fields from a persisted cron job.
+
+    This is the set of fields that must match the expected current contract
+    for a reused P13 job.  We compare the *actual persisted values*, not the
+    stored origin fingerprint, so that drift introduced via update_job (which
+    permits origin and payload updates) is detected.
+    """
+    return {
+        "prompt": job.get("prompt") or "",
+        "schedule": _persisted_schedule_text(job),
+        "skills": job.get("skills") or [],
+        "model": job.get("model"),
+        "provider": job.get("provider"),
+        "base_url": job.get("base_url"),
+        "script": job.get("script"),
+        "no_agent": bool(job.get("no_agent")),
+        "deliver": job.get("deliver") or "local",
+        "workdir": job.get("workdir"),
+        "enabled_toolsets": job.get("enabled_toolsets"),
+        "enabled": bool(job.get("enabled")),
+    }
+
+
 def stage_wave(
     entries: list[dict[str, Any]],
     *,
@@ -199,6 +350,7 @@ def stage_wave(
     list_jobs_fn: Callable[..., list[dict[str, Any]]],
     update_job_fn: Callable[[str, dict[str, Any]], dict[str, Any] | None],
     remove_job_fn: Callable[[str], bool],
+    p13_policy: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     existing_jobs = list_jobs_fn(include_disabled=True)
     by_source: dict[str, dict[str, Any]] = {}
@@ -213,23 +365,56 @@ def stage_wave(
     mapping: dict[str, str] = {}
     source_id_mapping: dict[str, str] = {}
     reused = 0
+    job_fingerprints: dict[str, str] = {}
     try:
         for entry in entries:
             source_instance = entry["source_instance"]
-            fingerprint = _target_fingerprint(entry)
+            fingerprint = _target_fingerprint(entry, p13_policy=p13_policy)
+            job_fingerprints[source_instance] = fingerprint
             current = by_source.get(source_instance)
             if current is not None:
                 origin = current.get("origin") or {}
+                # Reject origin rebinding: the persisted origin must still
+                # name this source_instance (update_job permits origin updates,
+                # so we re-validate the *actual* origin on the persisted job).
+                if origin.get("source_instance") != source_instance:
+                    raise ValueError(
+                        f"origin rebind detected for staged job {source_instance}: "
+                        f"persisted origin names {origin.get('source_instance')!r}"
+                    )
                 if origin.get("catalogue_sha256") != catalogue_sha256:
                     raise ValueError(f"catalogue checksum drift for staged job {source_instance}")
-                if origin.get("target_fingerprint") != fingerprint:
-                    raise ValueError(f"target contract drift for staged job {source_instance}")
+                # Re-validate the *persisted* job against the expected current
+                # contract, not just the stored origin fingerprint.  This
+                # catches drift introduced via update_job even if the stored
+                # fingerprint was also mutated.
+                persisted_contract = _persisted_contract(current)
+                expected_kwargs = build_create_kwargs(entry, p13_policy=p13_policy)
+                expected_contract = {
+                    "prompt": expected_kwargs["prompt"],
+                    "schedule": expected_kwargs["schedule"],
+                    "skills": expected_kwargs["skills"] or [],
+                    "model": expected_kwargs["model"],
+                    "provider": expected_kwargs["provider"],
+                    "base_url": expected_kwargs["base_url"],
+                    "script": expected_kwargs["script"],
+                    "no_agent": expected_kwargs["no_agent"],
+                    "deliver": expected_kwargs["deliver"],
+                    "workdir": expected_kwargs["workdir"],
+                    "enabled_toolsets": expected_kwargs["enabled_toolsets"],
+                    "enabled": expected_kwargs["enabled"],
+                }
+                if persisted_contract != expected_contract:
+                    raise ValueError(
+                        f"persisted contract drift for staged job {source_instance}: "
+                        f"actual {persisted_contract!r} != expected {expected_contract!r}"
+                    )
                 if current.get("enabled") or current.get("state") != "paused":
                     raise ValueError(f"staged job is not paused: {current.get('id')}")
                 target_id = current["id"]
                 reused += 1
             else:
-                kwargs = build_create_kwargs(entry)
+                kwargs = build_create_kwargs(entry, p13_policy=p13_policy)
                 kwargs["origin"] = {
                     "migration": MIGRATION_MARKER,
                     "source_instance": source_instance,
@@ -278,6 +463,7 @@ def stage_wave(
                 "source_instance": entry["source_instance"],
                 "source_id": entry["source_id"],
                 "target_id": mapping[entry["source_instance"]],
+                "target_fingerprint": job_fingerprints[entry["source_instance"]],
             }
             for entry in entries
         ],
@@ -385,6 +571,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--disposition", type=Path)
     parser.add_argument("--wave")
     parser.add_argument("--receipt", type=Path)
+    parser.add_argument("--p13-policy", type=Path,
+                        help="JSON file with explicit P13 model/provider policy mappings")
     return parser
 
 
@@ -419,6 +607,11 @@ def main(argv: list[str] | None = None) -> int:
         if not args.wave:
             raise SystemExit("--wave is required for enable")
         require_go_authority(os.environ.get("KENSEI_MIGRATION_AUTHORITY"))
+    p13_policy = None
+    if args.p13_policy:
+        p13_policy = json.loads(args.p13_policy.read_text(encoding="utf-8"))
+        if not isinstance(p13_policy, dict):
+            raise ValueError("P13 policy file must be a JSON object")
     if args.action == "stage":
         result = stage_wave(
             entries,
@@ -429,6 +622,7 @@ def main(argv: list[str] | None = None) -> int:
             list_jobs_fn=list_jobs,
             update_job_fn=update_job,
             remove_job_fn=remove_job,
+            p13_policy=p13_policy,
         )
     else:
         receipt = _read_receipt(
