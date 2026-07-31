@@ -301,6 +301,16 @@ def query_events(
 def record_event_if_enabled(*, cfg: Optional[dict[str, Any]] = None, **kwargs: Any) -> Optional[str]:
     if not is_enabled(cfg):
         return None
+    # Producers historically used the generic `profile` key. Preserve that
+    # contract by normalising it to the ledger's explicit actor field.
+    profile = kwargs.pop("profile", None)
+    if profile is not None and kwargs.get("actor_profile") is None:
+        kwargs["actor_profile"] = profile
+    severity = kwargs.pop("severity", None)
+    if severity is not None:
+        payload = dict(kwargs.get("payload") or {})
+        payload.setdefault("severity", severity)
+        kwargs["payload"] = payload
     try:
         return append_event(**kwargs)
     except Exception as exc:  # audit hooks must never break primary flows
