@@ -221,22 +221,20 @@ def test_e2e_payload_drift_rejected_on_reuse(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 3. Origin rebind rejected
+# 3. Origin rebind rejected (genuine RED→GREEN: receipt-authoritative reuse)
 # ---------------------------------------------------------------------------
 
-def test_e2e_origin_rebind_rejected(tmp_path: Path) -> None:
-    """A reused job whose origin has been rebound (via update_job, which
-    permits origin updates) must not pass validation.  Two rebind vectors:
+def test_e2e_origin_rebind_source_instance_changed_rejected(tmp_path: Path) -> None:
+    """Re-stage must reject a rebinding of an already staged source, not
+    quietly create a fresh replacement.
 
-    a) Origin source_instance changed to a different value — the original
-       job disappears from the by-source index, so re-staging creates a
-       fresh job (safe).  But the *orphaned* job still carries the old
-       target_id from the prior receipt.  We verify the re-staged receipt
-       does NOT reuse the orphaned target_id.
-
-    b) A *different* job's origin is rebound to claim to be source-a
-       (identity theft) while carrying a tampered payload — the persisted
-       contract check must reject it.
+    Vector: the prior stage receipt records source_instance→target_id.  An
+    attacker rebinds the persisted job''s origin.source_instance to a
+    different value (update_job permits origin updates).  On re-stage, the
+    receipt still names the original target_id for this source_instance.
+    That target_id still exists (the rebound job kept its id) but its
+    origin now names a *different* source_instance.  Re-stage must reject
+    this — not silently create a fresh replacement job.
     """
     import cron.jobs as jobs
 
@@ -248,52 +246,66 @@ def test_e2e_origin_rebind_rejected(tmp_path: Path) -> None:
     original_receipt = json.loads(receipt_path.read_text())
     original_target_id = original_receipt["jobs"][0]["target_id"]
 
-    # Vector (a): rebind origin source_instance to a different value.
+    # Rebind the persisted job''s origin.source_instance to a different value.
+    # The job keeps its id, so the receipt''s target_id still exists — but its
+    # origin no longer matches source-a.
     with jobs.use_cron_store(tmp_path / "cron_home"):
         persisted = jobs.list_jobs(include_disabled=True)
-        job_id = persisted[0]["id"]
+        assert persisted[0]["id"] == original_target_id
         original_origin = persisted[0]["origin"]
         tampered_origin = {
             **original_origin,
             "source_instance": "VPS:cron/jobs.json:DIFFERENT",
         }
-        jobs.update_job(job_id, {"origin": tampered_origin})
+        jobs.update_job(original_target_id, {"origin": tampered_origin})
 
     cat_path = tmp_path / "catalogue.json"
     catalogue = module.load_catalogue(cat_path, digest)
     selected = module.select_wave(catalogue, "WAVE_1_BOUNDED_SCRIPTS")
 
-    # Re-stage: the rebound job is no longer found under source-a, so a
-    # new job is created.  The receipt must NOT reuse the orphaned target_id.
+    # Re-stage must reject: the receipt''s target_id still exists but its
+    # origin has been rebound away from source-a.
     with jobs.use_cron_store(tmp_path / "cron_home"):
-        result = module.stage_wave(
-            selected,
-            catalogue_sha256=digest,
-            disposition_sha256=disp_sha,
-            receipt_path=receipt_path,
-            create_job_fn=jobs.create_job,
-            list_jobs_fn=jobs.list_jobs,
-            update_job_fn=jobs.update_job,
-            remove_job_fn=jobs.remove_job,
-        )
-    assert result["created"] == 1
-    assert result["reused"] == 0
-    assert result["target_ids"][0] != original_target_id
+        with pytest.raises(ValueError, match="origin rebind|persisted contract drift|target_fingerprint"):
+            module.stage_wave(
+                selected,
+                catalogue_sha256=digest,
+                disposition_sha256=disp_sha,
+                receipt_path=receipt_path,
+                create_job_fn=jobs.create_job,
+                list_jobs_fn=jobs.list_jobs,
+                update_job_fn=jobs.update_job,
+                remove_job_fn=jobs.remove_job,
+            )
 
-    # Vector (b): rebind a different job's origin to claim source-a with a
-    # tampered payload — persisted contract check must reject.
+
+def test_e2e_origin_rebind_identity_theft_rejected(tmp_path: Path) -> None:
+    """A *different* job''s origin is rebound to claim to be source-a
+    (identity theft) while the original source-a job still exists.  The
+    receipt names the original target_id; that job''s origin still matches,
+    but a second job now also claims source-a.  Re-stage must use the
+    receipt-authoritative target_id and reject the stolen job.
+    """
+    import cron.jobs as jobs
+
+    module = _module()
+    entry = _entry()
+    digest, disp_sha, receipt_path, fp = _stage_once(module, tmp_path, entry)
+    original_receipt = json.loads(receipt_path.read_text())
+    original_target_id = original_receipt["jobs"][0]["target_id"]
+
+    # Create a second job and rebind its origin to claim source-a.
     entry2 = _entry(source_instance="VPS:cron/jobs.json:source-b", source_id="source-b")
     (tmp_path / "b").mkdir(exist_ok=True)
     cat_path2, digest2 = _write_catalogue(tmp_path / "b", [entry, entry2])
-    # Reset the cron store for a clean slate.
     import shutil
     shutil.rmtree(tmp_path / "cron_home2", ignore_errors=True)
     catalogue2 = module.load_catalogue(cat_path2, digest2)
     selected2 = module.select_wave(catalogue2, "WAVE_1_BOUNDED_SCRIPTS")
-    fp2 = module._target_fingerprint(entry)
-    fp2_b = module._target_fingerprint(entry2)
+    fp_a = module._target_fingerprint(entry)
+    fp_b = module._target_fingerprint(entry2)
     disp2 = _disposition(digest2, [entry, entry2],
-                         row_fingerprints={entry["source_instance"]: fp2, entry2["source_instance"]: fp2_b})
+                         row_fingerprints={entry["source_instance"]: fp_a, entry2["source_instance"]: fp_b})
     disp_path2, disp_sha2 = _write_disposition(tmp_path / "b", disp2)
     receipt_path2 = tmp_path / "b" / "receipt.json"
 
@@ -308,15 +320,17 @@ def test_e2e_origin_rebind_rejected(tmp_path: Path) -> None:
             update_job_fn=jobs.update_job,
             remove_job_fn=jobs.remove_job,
         )
-        # Now rebind source-b's job to claim to be source-a, with tampered payload.
+        # Now rebind source-b''s job to claim to be source-a, with tampered payload.
         all_jobs = jobs.list_jobs(include_disabled=True)
         job_b = next(j for j in all_jobs if j["origin"]["source_instance"] == "VPS:cron/jobs.json:source-b")
         stolen_origin = {**job_b["origin"], "source_instance": "VPS:cron/jobs.json:source-a"}
         jobs.update_job(job_b["id"], {"origin": stolen_origin, "prompt": "stolen"})
 
-    # Re-staging source-a must reject: the stolen job has a tampered payload.
+    # Re-staging source-a must reject: the receipt names the original target
+    # but a stolen job also claims source-a.  The receipt-authoritative target
+    # must be validated and the rebind rejected.
     with jobs.use_cron_store(tmp_path / "cron_home2"):
-        with pytest.raises(ValueError, match="persisted contract drift|origin rebind"):
+        with pytest.raises(ValueError, match="persisted contract drift|origin rebind|target_fingerprint"):
             module.stage_wave(
                 selected2,
                 catalogue_sha256=digest2,
@@ -327,6 +341,202 @@ def test_e2e_origin_rebind_rejected(tmp_path: Path) -> None:
                 update_job_fn=jobs.update_job,
                 remove_job_fn=jobs.remove_job,
             )
+
+
+def test_e2e_reuse_rejects_origin_target_fingerprint_mismatch(tmp_path: Path) -> None:
+    """Hole 1: stage_wave reuse checks catalogue_sha256 but does NOT verify
+    origin.target_fingerprint == recomputed expected fingerprint.  After
+    remediation, a reused job whose persisted origin.target_fingerprint does
+    not match the recomputed expected fingerprint must be rejected — even
+    when the persisted contract otherwise matches (the stored fingerprint
+    was tampered via update_job on the origin dict).
+    """
+    import cron.jobs as jobs
+
+    module = _module()
+    entry = _entry()
+    digest, disp_sha, receipt_path, fp = _stage_once(module, tmp_path, entry)
+    original_receipt = json.loads(receipt_path.read_text())
+    original_target_id = original_receipt["jobs"][0]["target_id"]
+
+    # Tamper ONLY the origin.target_fingerprint via update_job — leave the
+    # rest of the contract intact.  The persisted contract still matches,
+    # but the origin fingerprint is now wrong.
+    with jobs.use_cron_store(tmp_path / "cron_home"):
+        persisted = jobs.list_jobs(include_disabled=True)
+        job = persisted[0]
+        tampered_origin = {**job["origin"], "target_fingerprint": "0" * 64}
+        jobs.update_job(job["id"], {"origin": tampered_origin})
+
+    cat_path = tmp_path / "catalogue.json"
+    catalogue = module.load_catalogue(cat_path, digest)
+    selected = module.select_wave(catalogue, "WAVE_1_BOUNDED_SCRIPTS")
+
+    with jobs.use_cron_store(tmp_path / "cron_home"):
+        with pytest.raises(ValueError, match="target fingerprint mismatch|target_fingerprint"):
+            module.stage_wave(
+                selected,
+                catalogue_sha256=digest,
+                disposition_sha256=disp_sha,
+                receipt_path=receipt_path,
+                create_job_fn=jobs.create_job,
+                list_jobs_fn=jobs.list_jobs,
+                update_job_fn=jobs.update_job,
+                remove_job_fn=jobs.remove_job,
+            )
+
+
+def test_e2e_select_authorised_wave_missing_contract_fingerprint_rejected(
+    tmp_path: Path,
+) -> None:
+    """Hole 2: select_authorised_wave must fail closed when a disposition
+    row is missing its contract_fingerprint, not silently skip the check.
+    """
+    module = _module()
+    entry = _entry()
+    cat_path, digest = _write_catalogue(tmp_path, [entry])
+    catalogue = module.load_catalogue(cat_path, digest)
+
+    # Disposition with NO contract_fingerprint on the row.
+    disp = _disposition(digest, [entry])
+    disp_path, disp_sha = _write_disposition(tmp_path, disp)
+
+    with pytest.raises(ValueError, match="missing contract_fingerprint|fail-closed"):
+        module.select_authorised_wave(catalogue, disp, "WAVE_1_BOUNDED_SCRIPTS")
+
+
+def test_e2e_select_authorised_wave_policy_bound_fingerprint(tmp_path: Path) -> None:
+    """Hole 2: select_authorised_wave must compute the expected fingerprint
+    using the same explicit p13_policy that stage_wave will use.  A row
+    fingerprint computed without the policy must NOT match.
+    """
+    module = _module()
+    entry = _entry(job={"no_agent": False, "script": None, "model": None, "provider": None})
+    cat_path, digest = _write_catalogue(tmp_path, [entry])
+    catalogue = module.load_catalogue(cat_path, digest)
+
+    policy = {"default": {"provider": "openai-approved", "model": "gpt-approved"}}
+    # Fingerprint computed WITH the correct policy.
+    fp_with_policy = module._target_fingerprint(entry, p13_policy=policy)
+    # Fingerprint computed with a DIFFERENT policy (wrong — simulates the
+    # old behaviour where select_authorised_wave didn''t pass p13_policy
+    # and thus computed a fingerprint for a different contract).
+    wrong_policy = {"default": {"provider": "openai-different", "model": "gpt-different"}}
+    fp_wrong_policy = module._target_fingerprint(entry, p13_policy=wrong_policy)
+
+    # Disposition with the WRONG (different-policy) fingerprint must be rejected.
+    disp_wrong = _disposition(digest, [entry], row_fingerprints={entry["source_instance"]: fp_wrong_policy})
+    with pytest.raises(ValueError, match="contract fingerprint mismatch"):
+        module.select_authorised_wave(catalogue, disp_wrong, "WAVE_1_BOUNDED_SCRIPTS", p13_policy=policy)
+
+    # Disposition with the CORRECT (policy-bound) fingerprint must pass.
+    disp_right = _disposition(digest, [entry], row_fingerprints={entry["source_instance"]: fp_with_policy})
+    selected = module.select_authorised_wave(catalogue, disp_right, "WAVE_1_BOUNDED_SCRIPTS", p13_policy=policy)
+    assert len(selected) == 1
+
+
+def test_e2e_provider_validation_disabled_provider_rejected(tmp_path: Path) -> None:
+    """Hole 4: explicit P13 policy providers must be checked as not
+    explicitly disabled in the effective config.  Uses a disposable
+    test seam (no live user config).  A disabled provider fails closed.
+    """
+    import cron.jobs as jobs
+
+    module = _module()
+    entry = _entry(job={"no_agent": False, "script": None, "model": None, "provider": None})
+    cat_path, digest = _write_catalogue(tmp_path, [entry])
+    catalogue = module.load_catalogue(cat_path, digest)
+    selected = module.select_wave(catalogue, "WAVE_1_BOUNDED_SCRIPTS")
+
+    policy = {"default": {"provider": "openai-approved", "model": "gpt-approved"}}
+    fp = module._target_fingerprint(entry, p13_policy=policy)
+    disp = _disposition(digest, [entry], row_fingerprints={entry["source_instance"]: fp})
+    disp_path, disp_sha = _write_disposition(tmp_path, disp)
+
+    # Disposable test seam: provider "openai-approved" is explicitly disabled.
+    disabled_providers = {"openai-approved"}
+    def validation_fn(provider: str) -> bool:
+        return provider not in disabled_providers
+
+    receipt_path = tmp_path / "receipt.json"
+    with jobs.use_cron_store(tmp_path / "cron_home"):
+        with pytest.raises(ValueError, match="disabled in the effective config|refusing to stage"):
+            module.stage_wave(
+                selected,
+                catalogue_sha256=digest,
+                disposition_sha256=disp_sha,
+                receipt_path=receipt_path,
+                create_job_fn=jobs.create_job,
+                list_jobs_fn=jobs.list_jobs,
+                update_job_fn=jobs.update_job,
+                remove_job_fn=jobs.remove_job,
+                p13_policy=policy,
+                provider_validation_fn=validation_fn,
+            )
+
+
+def test_e2e_provider_validation_enabled_provider_accepted(tmp_path: Path) -> None:
+    """Hole 4 GREEN: when the policy provider is enabled in the disposable
+    config seam, staging succeeds.
+    """
+    import cron.jobs as jobs
+
+    module = _module()
+    entry = _entry(job={"no_agent": False, "script": None, "model": None, "provider": None})
+    cat_path, digest = _write_catalogue(tmp_path, [entry])
+    catalogue = module.load_catalogue(cat_path, digest)
+    selected = module.select_wave(catalogue, "WAVE_1_BOUNDED_SCRIPTS")
+
+    policy = {"default": {"provider": "openai-approved", "model": "gpt-approved"}}
+    fp = module._target_fingerprint(entry, p13_policy=policy)
+    disp = _disposition(digest, [entry], row_fingerprints={entry["source_instance"]: fp})
+    disp_path, disp_sha = _write_disposition(tmp_path, disp)
+
+    # Disposable test seam: provider is enabled.
+    def validation_fn(provider: str) -> bool:
+        return True
+
+    receipt_path = tmp_path / "receipt.json"
+    with jobs.use_cron_store(tmp_path / "cron_home"):
+        result = module.stage_wave(
+            selected,
+            catalogue_sha256=digest,
+            disposition_sha256=disp_sha,
+            receipt_path=receipt_path,
+            create_job_fn=jobs.create_job,
+            list_jobs_fn=jobs.list_jobs,
+            update_job_fn=jobs.update_job,
+            remove_job_fn=jobs.remove_job,
+            p13_policy=policy,
+            provider_validation_fn=validation_fn,
+        )
+    assert result["created"] == 1
+
+
+def test_e2e_select_authorised_wave_provider_validation_disabled(tmp_path: Path) -> None:
+    """Hole 4 (select_authorised_wave seam): the provider validation seam
+    is also checked at the select_authorised_wave gate, so a disabled
+    provider is rejected before staging even begins.
+    """
+    module = _module()
+    entry = _entry(job={"no_agent": False, "script": None, "model": None, "provider": None})
+    cat_path, digest = _write_catalogue(tmp_path, [entry])
+    catalogue = module.load_catalogue(cat_path, digest)
+
+    policy = {"default": {"provider": "openai-approved", "model": "gpt-approved"}}
+    fp = module._target_fingerprint(entry, p13_policy=policy)
+    disp = _disposition(digest, [entry], row_fingerprints={entry["source_instance"]: fp})
+
+    disabled_providers = {"openai-approved"}
+    def validation_fn(provider: str) -> bool:
+        return provider not in disabled_providers
+
+    with pytest.raises(ValueError, match="disabled in the effective config|refusing to stage"):
+        module.select_authorised_wave(
+            catalogue, disp, "WAVE_1_BOUNDED_SCRIPTS",
+            p13_policy=policy,
+            provider_validation_fn=validation_fn,
+        )
 
 
 # ---------------------------------------------------------------------------

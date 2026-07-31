@@ -87,9 +87,23 @@ def select_authorised_wave(
     catalogue: dict[str, Any],
     disposition: dict[str, Any],
     wave: str,
+    *,
+    p13_policy: dict[str, Any] | None = None,
+    provider_validation_fn: Callable[[str], bool] | None = None,
 ) -> list[dict[str, Any]]:
     """Return a catalogue wave only when every row is explicitly stage-approved
-    and bound to its expected current-contract fingerprint."""
+    and bound to its expected current-contract fingerprint.
+
+    Fails closed when a disposition row is missing its ``contract_fingerprint``
+    (no silent skip) and computes the expected fingerprint using the same
+    explicit ``p13_policy`` that :func:`stage_wave` will use, so the row
+    binding matches the contract that will actually be persisted.
+
+    When ``provider_validation_fn`` is supplied, every explicit P13 policy
+    provider resolved for a selected row is checked via that seam; a provider
+    the seam reports as disabled fails closed.  No fallback to the root
+    global default.
+    """
     matrix_entries = [
         item
         for item in disposition.get("entries", [])
@@ -99,10 +113,9 @@ def select_authorised_wave(
         item["source_instance"]: item.get("audit_no_stage_state")
         for item in matrix_entries
     }
-    row_fingerprints = {
+    row_fingerprints: dict[str, str | None] = {
         item["source_instance"]: item.get("contract_fingerprint")
         for item in matrix_entries
-        if item.get("contract_fingerprint")
     }
     catalogue_sources = {
         entry.get("source_instance") for entry in catalogue.get("entries", [])
@@ -118,13 +131,32 @@ def select_authorised_wave(
         source_instance = entry["source_instance"]
         if states.get(source_instance) != "STAGE_APPROVED":
             raise ValueError(f"entry is not stage-approved: {source_instance}")
-        expected_fp = _target_fingerprint(entry)
+        expected_fp = _target_fingerprint(entry, p13_policy=p13_policy)
         row_fp = row_fingerprints.get(source_instance)
-        if row_fp is not None and row_fp != expected_fp:
+        # Fail closed: a missing contract_fingerprint is a rejected binding,
+        # not a silently skipped one.
+        if not row_fp:
+            raise ValueError(
+                f"disposition row for {source_instance} is missing "
+                f"contract_fingerprint; fail-closed"
+            )
+        if row_fp != expected_fp:
             raise ValueError(
                 f"contract fingerprint mismatch for {source_instance}: "
                 f"disposition row does not match expected current contract"
             )
+        # Provider validation seam: explicit P13 policy providers must not be
+        # explicitly disabled in the effective config.
+        if provider_validation_fn is not None:
+            resolved_provider, _ = _resolve_p13_policy(
+                entry, p13_policy=p13_policy
+            )
+            if resolved_provider is not None and not provider_validation_fn(resolved_provider):
+                raise ValueError(
+                    f"P13 policy provider {resolved_provider!r} for "
+                    f"{source_instance} is disabled in the effective config; "
+                    f"refusing to stage"
+                )
     return selected
 
 
@@ -340,6 +372,43 @@ def _persisted_contract(job: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _receipt_target_for_source(receipt_path: Path, source_instance: str) -> str | None:
+    """Return the target_id recorded for *source_instance* in a prior stage
+    receipt at *receipt_path*, or None when no receipt exists.
+
+    Fail-closed: a non-stage receipt (e.g. a registration receipt) raises
+    ValueError so a tampered receipt can never silently downgrade to the
+    by-source index.  The receipt\'s catalogue_sha256 is NOT validated
+    here — the caller (stage_wave) validates the catalogue sha against the
+    persisted origin separately.  We only need the source_instance→target_id
+    mapping from the prior stage.
+    """
+    if not receipt_path.exists():
+        return None
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    if receipt.get("migration") != MIGRATION_MARKER:
+        raise ValueError(f"prior receipt at {receipt_path} is not a migration receipt")
+    kind = receipt.get("receipt_kind")
+    if kind != RECEIPT_KIND_STAGE:
+        raise ValueError(
+            f"prior receipt at {receipt_path} is not a stage receipt "
+            f"(kind={kind!r}); refusing to use it for reuse authority"
+        )
+    for item in receipt.get("jobs", []):
+        if isinstance(item, dict) and item.get("source_instance") == source_instance:
+            tid = item.get("target_id")
+            if tid:
+                return str(tid)
+    return None
+
+
+def _find_job_by_id(jobs: list[dict[str, Any]], job_id: str) -> dict[str, Any] | None:
+    for job in jobs:
+        if job.get("id") == job_id:
+            return job
+    return None
+
+
 def stage_wave(
     entries: list[dict[str, Any]],
     *,
@@ -351,6 +420,7 @@ def stage_wave(
     update_job_fn: Callable[[str, dict[str, Any]], dict[str, Any] | None],
     remove_job_fn: Callable[[str], bool],
     p13_policy: dict[str, Any] | None = None,
+    provider_validation_fn: Callable[[str], bool] | None = None,
 ) -> dict[str, Any]:
     existing_jobs = list_jobs_fn(include_disabled=True)
     by_source: dict[str, dict[str, Any]] = {}
@@ -366,12 +436,51 @@ def stage_wave(
     source_id_mapping: dict[str, str] = {}
     reused = 0
     job_fingerprints: dict[str, str] = {}
+    # Provider validation seam: every explicit P13 policy provider must
+    # be checked as not explicitly disabled in the effective config.  No
+    # fallback to the root global default.
+    if provider_validation_fn is not None:
+        for entry in entries:
+            resolved_provider, _ = _resolve_p13_policy(entry, p13_policy=p13_policy)
+            if resolved_provider is not None and not provider_validation_fn(resolved_provider):
+                raise ValueError(
+                    f"P13 policy provider {resolved_provider!r} for "
+                    f"{entry['source_instance']} is disabled in the effective "
+                    f"config; refusing to stage"
+                )
     try:
         for entry in entries:
             source_instance = entry["source_instance"]
             fingerprint = _target_fingerprint(entry, p13_policy=p13_policy)
             job_fingerprints[source_instance] = fingerprint
             current = by_source.get(source_instance)
+            # Authoritative prior-stage mapping: when a prior stage receipt
+            # exists at receipt_path, the source_instance->target_id binding
+            # recorded there is the authority for reuse.  We do NOT trust the
+            # by_source index alone, because update_job can rebind a job's
+            # origin to a different source_instance (creating an orphan) or
+            # steal another job's source_instance (identity theft).  The
+            # receipt records the exact target_id that was staged for this
+            # source_instance; we validate that target still exists and its
+            # full persisted contract/origin match expected.
+            prior_target_id = _receipt_target_for_source(receipt_path, source_instance)
+            if prior_target_id is not None:
+                receipt_job = _find_job_by_id(list_jobs_fn(include_disabled=True), prior_target_id)
+                if receipt_job is None:
+                    raise ValueError(
+                        f"prior stage receipt named target {prior_target_id!r} "
+                        f"for {source_instance} but that job no longer exists; "
+                        f"refusing to re-stage (possible orphan/rebind)"
+                    )
+                # The receipt's target must be the authoritative reused job.
+                # If by_source points at a *different* job, that is a rebind.
+                if current is not None and current.get("id") != prior_target_id:
+                    raise ValueError(
+                        f"origin rebind detected for staged source {source_instance}: "
+                        f"by-source index points at {current.get('id')!r} but prior "
+                        f"stage receipt recorded target {prior_target_id!r}"
+                    )
+                current = receipt_job
             if current is not None:
                 origin = current.get("origin") or {}
                 # Reject origin rebinding: the persisted origin must still
@@ -384,6 +493,22 @@ def stage_wave(
                     )
                 if origin.get("catalogue_sha256") != catalogue_sha256:
                     raise ValueError(f"catalogue checksum drift for staged job {source_instance}")
+                # Strict target_fingerprint check: the persisted origin's
+                # target_fingerprint must equal the recomputed expected
+                # fingerprint for the current contract.  A mismatch means the
+                # contract was changed (via update_job) and the stored
+                # fingerprint was either not updated or tampered with.
+                origin_fp = origin.get("target_fingerprint")
+                if not origin_fp:
+                    raise ValueError(
+                        f"staged job {source_instance} origin is missing "
+                        f"target_fingerprint; fail-closed"
+                    )
+                if origin_fp != fingerprint:
+                    raise ValueError(
+                        f"target fingerprint mismatch for staged job {source_instance}: "
+                        f"origin target_fingerprint {origin_fp!r} != expected {fingerprint!r}"
+                    )
                 # Re-validate the *persisted* job against the expected current
                 # contract, not just the stored origin fingerprint.  This
                 # catches drift introduced via update_job even if the stored
@@ -563,6 +688,47 @@ def pause_receipt(
     return {"paused": len(paused), "target_ids": paused}
 
 
+def _build_provider_validation_fn() -> Callable[[str], bool] | None:
+    """Build a provider validation seam from the effective config.
+
+    Returns a callable ``(provider_name) -> bool`` that reports whether the
+    provider is enabled in the effective config, or None when no config can
+    be loaded (e.g. running outside a Hermes home).  An explicitly disabled
+    provider (``enabled: false`` under ``providers.<name>``) reports False.
+
+    The seam is injectable so tests can supply a disposable config without
+    touching live user config.
+    """
+    try:
+        from hermes_cli.config import is_provider_enabled, load_config
+    except Exception:
+        return None
+    try:
+        cfg = load_config()
+    except Exception:
+        return None
+    if not isinstance(cfg, dict):
+        return None
+    providers = cfg.get("providers")
+    if not isinstance(providers, dict):
+        # No providers section — nothing is explicitly disabled.
+        return None
+
+    def _is_enabled(provider_name: str) -> bool:
+        # Only an explicit enabled:false under a matching provider block
+        # disables the provider.  Unknown providers default to enabled.
+        for _key, entry in providers.items():
+            if not isinstance(entry, dict):
+                continue
+            names = {str(entry.get("name") or "").strip().lower(),
+                     str(_key).strip().lower()}
+            if provider_name.strip().lower() in names:
+                return is_provider_enabled(entry)
+        return True
+
+    return _is_enabled
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=["plan", "stage", "enable", "pause"])
@@ -580,13 +746,27 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     catalogue = load_catalogue(args.catalogue, args.sha256)
     entries: list[dict[str, Any]] = []
+
+    p13_policy = None
+    if args.p13_policy:
+        p13_policy = json.loads(args.p13_policy.read_text(encoding="utf-8"))
+        if not isinstance(p13_policy, dict):
+            raise ValueError("P13 policy file must be a JSON object")
+
     if args.action in {"plan", "stage"}:
         if not args.wave:
             raise SystemExit("--wave is required for plan/stage")
         if not args.disposition:
             raise SystemExit("--disposition is required for plan/stage")
         disposition = load_disposition_matrix(args.disposition, args.sha256)
-        entries = select_authorised_wave(catalogue, disposition, args.wave)
+        provider_validation_fn = _build_provider_validation_fn()
+        entries = select_authorised_wave(
+            catalogue,
+            disposition,
+            args.wave,
+            p13_policy=p13_policy,
+            provider_validation_fn=provider_validation_fn,
+        )
         if args.action == "plan":
             print(json.dumps({"wave": args.wave, "jobs": len(entries), "mutation": False}, indent=2))
             return 0
@@ -607,11 +787,6 @@ def main(argv: list[str] | None = None) -> int:
         if not args.wave:
             raise SystemExit("--wave is required for enable")
         require_go_authority(os.environ.get("KENSEI_MIGRATION_AUTHORITY"))
-    p13_policy = None
-    if args.p13_policy:
-        p13_policy = json.loads(args.p13_policy.read_text(encoding="utf-8"))
-        if not isinstance(p13_policy, dict):
-            raise ValueError("P13 policy file must be a JSON object")
     if args.action == "stage":
         result = stage_wave(
             entries,
@@ -623,6 +798,7 @@ def main(argv: list[str] | None = None) -> int:
             update_job_fn=update_job,
             remove_job_fn=remove_job,
             p13_policy=p13_policy,
+            provider_validation_fn=provider_validation_fn,
         )
     else:
         receipt = _read_receipt(

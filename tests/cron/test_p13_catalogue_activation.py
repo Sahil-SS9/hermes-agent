@@ -170,11 +170,17 @@ def test_stage_does_not_require_go_authority_when_matrix_is_stage_approved(
 ) -> None:
     module = _module()
     path, digest = _catalogue(tmp_path)
+    catalogue = module.load_catalogue(path, digest)
+    entries = module.select_wave(catalogue, "WAVE_1_BOUNDED_SCRIPTS")
+    fp_a = module._target_fingerprint(entries[0])
+    fp_b = module._target_fingerprint(entries[1])
     matrix = {
         "catalogue_sha256": digest,
         "entries": [
-            {"source_instance": "VPS:cron/jobs.json:source-a", "audit_no_stage_state": "STAGE_APPROVED"},
-            {"source_instance": "VPS:cron/jobs.json:source-b", "audit_no_stage_state": "STAGE_APPROVED"},
+            {"source_instance": "VPS:cron/jobs.json:source-a", "audit_no_stage_state": "STAGE_APPROVED",
+             "contract_fingerprint": fp_a},
+            {"source_instance": "VPS:cron/jobs.json:source-b", "audit_no_stage_state": "STAGE_APPROVED",
+             "contract_fingerprint": fp_b},
         ],
     }
     matrix_path = tmp_path / "matrix.json"
