@@ -12,7 +12,9 @@ if [[ "${POSTIZ_DRY_RUN:-0}" == "1" ]]; then
     exit 0
 fi
 
-CE="/home/kensei/repos/KenseiAgent/content_engine"
+RUNTIME_ROOT="${HERMES_AGENT_ROOT:-$PWD}"
+CE="$RUNTIME_ROOT/content_engine"
+[[ -d "$CE" ]] || { echo "ERROR: content engine not found under runtime root: $RUNTIME_ROOT" >&2; exit 1; }
 cd "$CE"
 
 # Source env for DB credentials
@@ -23,4 +25,4 @@ set +a
 export PYTHONPATH="${CE}:${PYTHONPATH:-}"
 
 # Use the venv python (has psycopg2-binary installed)
-timeout 60 /home/kensei/repos/KenseiAgent/.venv/bin/python publish_to_postiz.py
+timeout 60 "$RUNTIME_ROOT/.venv/bin/python" publish_to_postiz.py

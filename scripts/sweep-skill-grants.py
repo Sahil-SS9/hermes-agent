@@ -11,10 +11,14 @@ and exits 0 without touching the ledger. HERMES_HOME (read by the ledger via
 the config layer) selects the active home for any read path.
 """
 import json
+import os
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+# Resolve the canonical runtime root from the cron workdir (or explicit
+# relocation setting), not from the mutable scripts mirror.
+RUNTIME_ROOT = Path(os.environ.get("HERMES_AGENT_ROOT", os.getcwd())).resolve()
+sys.path.insert(0, str(RUNTIME_ROOT))
 from tools.skill_grants import sweep_expired_grants
 
 if "--dry-run" in sys.argv:

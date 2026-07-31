@@ -16,6 +16,12 @@ import sqlite3
 from datetime import datetime, timedelta
 
 # Cross-process write lock — prevents WAL checkpoint races
+# Cron workdir is the canonical runtime checkout.  Prefer an explicit
+# relocation override, then cwd, rather than the mutable ~/.hermes/scripts
+# directory that contains this compatibility entrypoint.
+_RUNTIME_ROOT = os.path.abspath(os.environ.get("HERMES_AGENT_ROOT", os.getcwd()))
+sys.path.insert(0, _RUNTIME_ROOT)
+sys.path.insert(0, os.path.join(_RUNTIME_ROOT, "scripts"))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 try:
     from kanban_write_lock import write_lock

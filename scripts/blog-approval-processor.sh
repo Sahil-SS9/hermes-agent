@@ -8,8 +8,14 @@ if [[ ${BLOG_APPROVAL_DRY_RUN:-0} == "1" ]]; then
     exit 0
 fi
 
-cd /home/kensei/repos/KenseiAgent/content_engine
-export PYTHONPATH=.
+# Cron supplies the canonical runtime checkout as workdir.  An explicit
+# override supports controlled relocation without reintroducing a hard-coded
+# checkout path.
+RUNTIME_ROOT="${HERMES_AGENT_ROOT:-$PWD}"
+CE="$RUNTIME_ROOT/content_engine"
+[[ -d "$CE" ]] || { echo "ERROR: content engine not found under runtime root: $RUNTIME_ROOT" >&2; exit 1; }
+cd "$CE"
+export PYTHONPATH="${CE}${PYTHONPATH:+:$PYTHONPATH}"
 
 python3 <<'PY'
 from blog.blog_approval import _read_tracker, publish
