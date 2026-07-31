@@ -15,9 +15,9 @@ import os
 import sys
 from pathlib import Path
 
-# Resolve the canonical runtime root from the cron workdir (or explicit
-# relocation setting), not from the mutable scripts mirror.
-RUNTIME_ROOT = Path(os.environ.get("HERMES_AGENT_ROOT", os.getcwd())).resolve()
+# Prefer the scheduler-provided canonical runtime root.  When invoked
+# standalone or copied for a relocation test, retain self-contained discovery.
+RUNTIME_ROOT = Path(os.environ.get("HERMES_AGENT_ROOT", Path(__file__).resolve().parents[1])).resolve()
 sys.path.insert(0, str(RUNTIME_ROOT))
 from tools.skill_grants import sweep_expired_grants
 
