@@ -105,11 +105,26 @@ function buildTileView(storedSessionId: string): SessionView {
 }
 
 // Module-level constants so these ChatView props are referentially stable —
-// tiles have no pin/delete affordance, and transcription needs no per-tile state.
+// tiles have no delete affordance, and transcription needs no per-tile state.
 const noop = () => undefined
 
 const tileTranscribeAudio = async (audio: Blob) =>
   (await transcribeAudio(await blobToDataUrl(audio), audio.type)).transcript
+
+/** Toggle pin for a tile's session, keyed on the durable lineage root so pins
+ *  survive compression tip rotation — same identity rule as the tab context
+ *  menu (#76890). Mirrors `useTileMenuRow`'s pinId resolution. */
+export function toggleTilePin(storedSessionId: string): void {
+  const stored = tileStoredRow(storedSessionId)
+  const pinId = stored ? sessionPinId(stored) : storedSessionId
+  const pinned = $pinnedSessionIds.get().includes(pinId)
+
+  if (pinned) {
+    unpinSession(pinId)
+  } else {
+    pinSession(pinId)
+  }
+}
 
 function TileChat({
   runtimeId,
@@ -172,6 +187,10 @@ function TileChat({
   const onRemoveAttachment = useCallback((id: string) => void removeAttachment(id), [removeAttachment])
   const onRetryResume = useCallback(() => patchSessionTile(storedSessionId, { error: undefined }), [storedSessionId])
 
+  // Wire the tile's title/header menu Pin to the same pin toggle the tab
+  // context menu uses — keyed on the durable lineage root (#76890).
+  const onToggleSelectedPin = useCallback(() => toggleTilePin(storedSessionId), [storedSessionId])
+
   // Per-tile model menu — rendered under this tile's SessionView so the pill
   // + switch target THIS runtime, not the primary (which may be mid-turn).
   const modelMenuContent = useMemo(
@@ -212,7 +231,7 @@ function TileChat({
           onSteer={actions.steerPrompt}
           onSubmit={actions.submitText}
           onThreadMessagesChange={actions.handleThreadMessagesChange}
-          onToggleSelectedPin={noop}
+          onToggleSelectedPin={onToggleSelectedPin}
           onTranscribeAudio={tileTranscribeAudio}
         />
       </ComposerScopeProvider>
