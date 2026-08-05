@@ -1779,6 +1779,7 @@ DEFAULT_CONFIG = {
                 ],
                 "aggregator": {"provider": "openrouter", "model": "anthropic/claude-opus-4.8"},
                 "max_tokens": 4096,
+                "reference_execution": "parallel",
                 "enabled": True,
             }
         },

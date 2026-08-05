@@ -101,6 +101,21 @@ def _coerce_int_or_none(value: Any) -> int | None:
     return n if n > 0 else None
 
 
+def _coerce_reference_execution(value: Any) -> str:
+    """Normalize the reference execution mode; unknown values fall back to default.
+
+    Canonical values are ``"parallel"`` (the default — all reference models
+    fan out concurrently, fastest wall time when each model is pre-loaded)
+    and ``"sequential"`` (reference models run one at a time — needed when a
+    local inference server like LM Studio in JIT mode cannot handle
+    concurrent model loads, issue #78011).
+    """
+    mode = str(value or "").strip().lower()
+    if mode in {"parallel", "sequential"}:
+        return mode
+    return "parallel"
+
+
 def _coerce_fanout(value: Any) -> str:
     """Normalize the fan-out cadence; unknown values fall back to default.
 
@@ -306,6 +321,7 @@ def _default_preset() -> dict[str, Any]:
         "max_tokens": 4096,
         "reference_max_tokens": None,
         "fanout": "user_turn",
+        "reference_execution": "parallel",
         "enabled": True,
     }
 
@@ -366,6 +382,9 @@ def _normalize_preset(raw: Any) -> dict[str, Any]:
         # last advisor run. Also accepts the mapping form
         # {mode: every_n, n: N}, normalized to the canonical string.
         "fanout": _coerce_fanout(raw.get("fanout")),
+        "reference_execution": _coerce_reference_execution(
+            raw.get("reference_execution")
+        ),
     }
 
 
@@ -415,6 +434,7 @@ def normalize_moa_config(raw: Any) -> dict[str, Any]:
         "max_tokens": active["max_tokens"],
         "reference_max_tokens": active.get("reference_max_tokens"),
         "fanout": active.get("fanout", "user_turn"),
+        "reference_execution": active.get("reference_execution", "parallel"),
         "enabled": active["enabled"],
         # MoA-level (not per-preset) toggles ride at the top level alongside
         # save_traces. privacy_filter: '' (off, default) | 'display' | 'full'

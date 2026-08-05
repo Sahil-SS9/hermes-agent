@@ -783,6 +783,7 @@ def _run_references_parallel(
     reference_timeout: float | None = None,
     agent: Any = None,
     late_accounting_sink: Any = None,
+    sequential: bool = False,
 ) -> list[tuple[str, str, Any]]:
     """Fan out all reference models in parallel, returning outputs in order.
 
@@ -816,6 +817,14 @@ def _run_references_parallel(
     reference's own timeout still reaps its thread independently. *agent* is
     optional and defaults to ``None``, preserving the uninterruptible
     blocking behavior for any caller that doesn't pass it.
+
+    When *sequential* is ``True``, references are dispatched and awaited one
+    at a time instead of concurrently. This is needed for local inference
+    servers (e.g. LM Studio in JIT mode) that cannot handle concurrent model
+    loads — parallel requests abort each other's loading process (issue
+    #78011). Sequential mode reuses the same progress callback and interrupt
+    semantics: each reference is awaited before the next is dispatched, and a
+    user interrupt after a completed reference skips the remaining ones.
     """
     from agent.usage_pricing import CanonicalUsage
 
@@ -833,7 +842,6 @@ def _run_references_parallel(
 
     total = len(reference_models)
     completed = 0
-    executor = ThreadPoolExecutor(max_workers=workers)
     interrupted = False
     # Per-fan-out context-length cache shared by every reference worker, so
     # duplicate (provider, model) slots resolve their window once per turn
@@ -843,6 +851,56 @@ def _run_references_parallel(
     cache_disabled = (
         getattr(agent, "_cache_disabled", None) if agent is not None else None
     )
+
+    if sequential:
+        # Sequential path: dispatch and await each reference one at a time.
+        # Needed for local inference servers (e.g. LM Studio JIT) that abort
+        # a model load when a concurrent request arrives (issue #78011).
+        # We still use a ThreadPoolExecutor (max_workers=1) so late-accounting
+        # callbacks and the shutdown contract remain identical to the
+        # parallel path.
+        executor = ThreadPoolExecutor(max_workers=1)
+        try:
+            for idx, slot in enumerate(reference_models):
+                if slot.get("provider") == "moa":
+                    results[idx] = (
+                        _slot_label(slot),
+                        "[skipped: MoA presets cannot recursively reference MoA]",
+                        _RefAccounting(CanonicalUsage()),
+                    )
+                    continue
+                if agent is not None and getattr(agent, "_interrupt_requested", False):
+                    interrupted = True
+                    results[idx] = (
+                        _slot_label(slot),
+                        _INTERRUPTED_REFERENCE_NOTE,
+                        _RefAccounting(CanonicalUsage()),
+                    )
+                    continue
+                future = executor.submit(
+                    propagate_context_to_thread(_run_reference),
+                    slot,
+                    ref_messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    reference_timeout=reference_timeout,
+                    context_length_cache=_ctx_len_cache,
+                    cache_disabled=cache_disabled,
+                )
+                # Await this reference before dispatching the next.
+                results[idx] = future.result()
+                completed += 1
+                if progress_callback is not None:
+                    try:
+                        label = _slot_label(slot)
+                        progress_callback(completed, total, label)
+                    except Exception as exc:  # pragma: no cover
+                        logger.debug("MoA progress_callback failed: %s", exc)
+        finally:
+            executor.shutdown(wait=not interrupted, cancel_futures=interrupted)
+        return [r for r in results if r is not None]
+
+    executor = ThreadPoolExecutor(max_workers=workers)
     try:
         for idx, slot in enumerate(reference_models):
             if slot.get("provider") == "moa":
@@ -1175,6 +1233,33 @@ def _preset_temperature(preset: dict[str, Any], key: str) -> float | None:
         return None
 
 
+def _reference_execution_sequential(
+    preset: dict[str, Any], agent: Any
+) -> bool:
+    """Determine whether reference models should run sequentially.
+
+    Explicit ``reference_execution: sequential`` in the preset is honored
+    directly. When left at the default (``"parallel"``), we also auto-switch
+    to sequential if the agent is configured for LM Studio in JIT mode
+    (``model.lmstudio_load_mode: jit``) — LM Studio's JIT loader cannot
+    handle concurrent model loads; parallel MoA reference requests abort
+    each other's loading process (issue #78011).
+    """
+    mode = str(
+        preset.get("reference_execution") or "parallel"
+    ).strip().lower()
+    if mode == "sequential":
+        return True
+    # Auto-detect LM Studio JIT mode — the most common trigger for #78011.
+    if agent is not None:
+        load_mode = (
+            getattr(agent, "lmstudio_load_mode", None) or "explicit"
+        ).strip().lower()
+        if load_mode == "jit":
+            return True
+    return False
+
+
 def _is_failed_reference(text: str) -> bool:
     """Return whether a reference output is an internal failure/skip sentinel.
 
@@ -1218,6 +1303,7 @@ def aggregate_moa_context(
     reference_timeout: float | None = None,
     degraded_reference_policy: str = "loud",
     agent: Any = None,
+    sequential: bool = False,
 ) -> str:
     """Run configured reference models and synthesize their advice.
 
@@ -1251,6 +1337,7 @@ def aggregate_moa_context(
         max_tokens=reference_max_tokens,
         reference_timeout=reference_timeout,
         agent=agent,
+        sequential=sequential,
     )
 
     successful_outputs = _successful_references(reference_outputs)
@@ -2077,6 +2164,9 @@ class MoAChatCompletions:
                 reference_timeout=reference_timeout,
                 agent=self._agent,
                 late_accounting_sink=self._record_late_reference_accounting,
+                sequential=_reference_execution_sequential(
+                    preset, self._agent
+                ),
             )
             interrupted_any = any(
                 text == _INTERRUPTED_REFERENCE_NOTE
