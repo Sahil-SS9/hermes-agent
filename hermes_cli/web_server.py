@@ -6445,6 +6445,7 @@ def set_moa_models(body: MoaConfigPayload, profile: Optional[str] = None):
                 "max_tokens": preset.max_tokens,
                 "reference_max_tokens": preset.reference_max_tokens,
                 "fanout": preset.fanout,
+                "reference_execution": preset.reference_execution,
                 "enabled": preset.enabled,
             }
 

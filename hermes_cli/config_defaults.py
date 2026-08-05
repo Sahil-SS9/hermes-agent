@@ -1771,6 +1771,13 @@ DEFAULT_CONFIG = {
         #   "full"    — additionally redact the advisor text injected into
         #               the aggregator prompt (issue #59959).
         "privacy_filter": "",
+        # Reference-model fan-out execution: "parallel" (default) fans out all
+        # reference models concurrently via a thread pool; "sequential" runs
+        # them one at a time. Sequential is needed when reference models share
+        # a single local backend that cannot handle concurrent model loads —
+        # e.g. LM Studio with JIT loading, where parallel requests abort each
+        # other's model swap (#78011).
+        "reference_execution": "parallel",
         "presets": {
             "default": {
                 "reference_models": [

@@ -1735,6 +1735,9 @@ def run_conversation(
                     degraded_reference_policy=str(
                         moa_config.get("degraded_reference_policy") or "loud"
                     ),
+                    reference_execution=str(
+                        moa_config.get("reference_execution") or "parallel"
+                    ),
                     agent=agent,
                 )
                 if _moa_context:

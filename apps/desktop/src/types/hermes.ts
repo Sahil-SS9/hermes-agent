@@ -1192,6 +1192,8 @@ export interface MoaConfigResponse {
       reference_max_tokens?: number | null
       /** Fan-out cadence (user_turn default | per_iteration | every_n:N) — round-tripped. */
       fanout?: string
+      /** Reference execution mode (parallel default | sequential) — round-tripped. */
+      reference_execution?: string
       reference_timeout: number | null
     }
   >

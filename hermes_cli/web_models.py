@@ -195,6 +195,7 @@ class MoaPresetPayload(_MoaReferenceControls):
     # that round-trip the GET payload don't silently erase hand-set values.
     reference_max_tokens: Optional[int] = None
     fanout: Optional[str] = None
+    reference_execution: Optional[str] = None
     enabled: bool = True
 
 
@@ -211,6 +212,7 @@ class MoaConfigPayload(_MoaReferenceControls):
     max_tokens: int = 4096
     reference_max_tokens: Optional[int] = None
     fanout: Optional[str] = None
+    reference_execution: Optional[str] = None
     enabled: bool = True
     profile: Optional[str] = None
 

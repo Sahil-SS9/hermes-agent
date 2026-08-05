@@ -136,6 +136,22 @@ def _coerce_fanout(value: Any) -> str:
     return "user_turn"
 
 
+def _coerce_reference_execution(value: Any) -> str:
+    """Normalize the reference-model fan-out execution mode.
+
+    ``"parallel"`` (default) dispatches all reference models concurrently via
+    a thread pool — fastest when each reference hits a different remote
+    provider. ``"sequential"`` runs them one at a time, which is needed when
+    reference models share a single local backend that cannot handle
+    concurrent model loads (e.g. LM Studio with JIT loading, where parallel
+    requests abort each other's model swap — #78011). Unknown values fall
+    back to ``"parallel"`` (the prior behavior) so a hand-edited config
+    degrades to the original concurrent fan-out rather than crashing.
+    """
+    mode = str(value or "").strip().lower()
+    return mode if mode in {"parallel", "sequential"} else "parallel"
+
+
 def coerce_privacy_filter(value: Any) -> str:
     """Normalize ``moa.privacy_filter`` to '' (off), 'display', or 'full'.
 
@@ -366,6 +382,14 @@ def _normalize_preset(raw: Any) -> dict[str, Any]:
         # last advisor run. Also accepts the mapping form
         # {mode: every_n, n: N}, normalized to the canonical string.
         "fanout": _coerce_fanout(raw.get("fanout")),
+        # Reference-model fan-out execution: "parallel" (default) dispatches
+        # all references concurrently via a thread pool; "sequential" runs
+        # them one at a time — needed when reference models share a single
+        # local backend that cannot handle concurrent model loads (e.g. LM
+        # Studio with JIT loading — #78011).
+        "reference_execution": _coerce_reference_execution(
+            raw.get("reference_execution")
+        ),
     }
 
 
@@ -415,6 +439,7 @@ def normalize_moa_config(raw: Any) -> dict[str, Any]:
         "max_tokens": active["max_tokens"],
         "reference_max_tokens": active.get("reference_max_tokens"),
         "fanout": active.get("fanout", "user_turn"),
+        "reference_execution": active.get("reference_execution", "parallel"),
         "enabled": active["enabled"],
         # MoA-level (not per-preset) toggles ride at the top level alongside
         # save_traces. privacy_filter: '' (off, default) | 'display' | 'full'

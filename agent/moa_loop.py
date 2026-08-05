@@ -937,6 +937,119 @@ def _run_references_parallel(
     return [r for r in results if r is not None]
 
 
+def _run_references_sequential(
+    reference_models: list[dict[str, Any]],
+    ref_messages: list[dict[str, Any]],
+    *,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+    progress_callback: Any = None,
+    reference_timeout: float | None = None,
+    agent: Any = None,
+    late_accounting_sink: Any = None,
+) -> list[tuple[str, str, Any]]:
+    """Run reference models one at a time, returning outputs in order.
+
+    Drop-in alternative to :func:`_run_references_parallel` for presets that
+    set ``reference_execution: sequential``. Local backends like LM Studio
+    with JIT loading cannot handle concurrent model loads — parallel requests
+    abort each other's model swap (#78011). Sequential execution gives each
+    reference model exclusive access to the backend so every advisor loads
+    and completes.
+
+    Accepts the same parameters as ``_run_references_parallel`` so callers can
+    dispatch with a single ``if``. The interrupt check runs between
+    references (not mid-call — ``call_llm`` is a blocking HTTP call with no
+    interrupt hook, same limitation as the parallel path). When interrupted,
+    remaining references are marked with ``_INTERRUPTED_REFERENCE_NOTE``.
+    ``late_accounting_sink`` is accepted for signature parity but unused —
+    there are no in-flight orphaned futures in sequential mode.
+    """
+    if not reference_models:
+        return []
+
+    from agent.usage_pricing import CanonicalUsage
+    from tools.thread_context import propagate_context_to_thread
+
+    results: list[tuple[str, str, Any]] = []
+    total = len(reference_models)
+    _ctx_len_cache: dict[tuple[str, str], int | None] = {}
+    cache_disabled = (
+        getattr(agent, "_cache_disabled", None) if agent is not None else None
+    )
+    # propagate_context_to_thread wraps the call so contextvars (approval
+    # callbacks, Nous Portal conversation tag) survive — same as the parallel
+    # path's worker threads.
+    _run = propagate_context_to_thread(_run_reference)
+
+    for idx, slot in enumerate(reference_models):
+        if slot.get("provider") == "moa":
+            results.append(
+                (
+                    _slot_label(slot),
+                    "[skipped: MoA presets cannot recursively reference MoA]",
+                    _RefAccounting(CanonicalUsage()),
+                )
+            )
+            if progress_callback is not None:
+                try:
+                    progress_callback(idx + 1, total, _slot_label(slot))
+                except Exception:
+                    pass
+            continue
+
+        # Check for user interrupt before each reference (between calls, not
+        # mid-call — see docstring).
+        if agent is not None and getattr(agent, "_interrupt_requested", False):
+            for remaining_slot in reference_models[idx:]:
+                results.append(
+                    (
+                        _slot_label(remaining_slot),
+                        _INTERRUPTED_REFERENCE_NOTE,
+                        _RefAccounting(CanonicalUsage()),
+                    )
+                )
+            break
+
+        result = _run(
+            slot,
+            ref_messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            reference_timeout=reference_timeout,
+            context_length_cache=_ctx_len_cache,
+            cache_disabled=cache_disabled,
+        )
+        results.append(result)
+        if progress_callback is not None:
+            try:
+                progress_callback(idx + 1, total, result[0])
+            except Exception:
+                logger.debug("MoA progress_callback failed", exc_info=True)
+
+    return results
+
+
+def _run_references(
+    reference_models: list[dict[str, Any]],
+    ref_messages: list[dict[str, Any]],
+    *,
+    reference_execution: str = "parallel",
+    **kwargs: Any,
+) -> list[tuple[str, str, Any]]:
+    """Dispatch to parallel or sequential reference fan-out.
+
+    ``reference_execution`` selects the mode: ``"parallel"`` (default) uses
+    :func:`_run_references_parallel`; ``"sequential"`` uses
+    :func:`_run_references_sequential`. Any other value defaults to parallel
+    (the prior behavior). All remaining keyword arguments are forwarded
+    unchanged.
+    """
+    if reference_execution == "sequential":
+        return _run_references_sequential(reference_models, ref_messages, **kwargs)
+    return _run_references_parallel(reference_models, ref_messages, **kwargs)
+
+
 def _truncate_tool_result(text: str, budget: int = _REFERENCE_TOOL_RESULT_BUDGET) -> str:
     """Head+tail preview of a tool result for the advisory view.
 
@@ -1217,6 +1330,7 @@ def aggregate_moa_context(
     reference_max_tokens: int | None = None,
     reference_timeout: float | None = None,
     degraded_reference_policy: str = "loud",
+    reference_execution: str = "parallel",
     agent: Any = None,
 ) -> str:
     """Run configured reference models and synthesize their advice.
@@ -1244,9 +1358,10 @@ def aggregate_moa_context(
     reference_models = [slot for slot in reference_models if slot.get("enabled", True)]
     reference_outputs: list[tuple[str, str, Any]] = []
     ref_messages = _reference_messages(api_messages)
-    reference_outputs = _run_references_parallel(
+    reference_outputs = _run_references(
         reference_models,
         ref_messages,
+        reference_execution=reference_execution,
         temperature=temperature,
         max_tokens=reference_max_tokens,
         reference_timeout=reference_timeout,
@@ -1930,6 +2045,9 @@ class MoAChatCompletions:
         degraded_reference_policy = str(
             preset.get("degraded_reference_policy") or "loud"
         )
+        reference_execution = str(
+            preset.get("reference_execution") or "parallel"
+        ).strip().lower()
         if aggregator_temperature is None and api_kwargs.get("temperature") is not None:
             # The acting agent's own configured temperature (if any) still
             # applies to the aggregator, which IS the acting model.
@@ -2068,9 +2186,10 @@ class MoAChatCompletions:
                     label=label,
                 )
 
-            reference_outputs = _run_references_parallel(
+            reference_outputs = _run_references(
                 reference_models,
                 ref_messages,
+                reference_execution=reference_execution,
                 temperature=temperature,
                 max_tokens=reference_max_tokens,
                 progress_callback=_progress,
