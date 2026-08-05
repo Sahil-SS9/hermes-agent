@@ -101,6 +101,18 @@ def _coerce_int_or_none(value: Any) -> int | None:
     return n if n > 0 else None
 
 
+def _coerce_reference_concurrency(value: Any) -> int | None:
+    """Coerce to a positive int, or None when unset/blank/invalid/non-positive.
+
+    None (the default) means no concurrency limit — all reference models fire
+    at once, matching the original parallel fan-out behavior. Setting 1 makes
+    references run sequentially (one at a time), which is needed for local
+    backends like LM Studio in JIT mode that cannot handle concurrent model
+    loads on a single GPU (#78011).
+    """
+    return _coerce_int_or_none(value)
+
+
 def _coerce_fanout(value: Any) -> str:
     """Normalize the fan-out cadence; unknown values fall back to default.
 
@@ -305,6 +317,7 @@ def _default_preset() -> dict[str, Any]:
         "degraded_reference_policy": "loud",
         "max_tokens": 4096,
         "reference_max_tokens": None,
+        "reference_concurrency": None,
         "fanout": "user_turn",
         "enabled": True,
     }
@@ -353,6 +366,14 @@ def _normalize_preset(raw: Any) -> dict[str, Any]:
         # judgement, so capping roughly halves per-turn wall time. Does NOT cap
         # the acting aggregator (its output is the user-visible answer).
         "reference_max_tokens": _coerce_int_or_none(raw.get("reference_max_tokens")),
+        # Maximum number of reference models to call concurrently. None
+        # (default) = no limit (all fire at once, the original parallel
+        # fan-out). Set to 1 for sequential execution — needed for local
+        # backends like LM Studio in JIT mode where concurrent requests
+        # abort each other's model loads (#78011).
+        "reference_concurrency": _coerce_reference_concurrency(
+            raw.get("reference_concurrency")
+        ),
         # When the reference fan-out runs. "user_turn" (default) runs the
         # advisors ONCE per user turn (the original MoA shape, and the
         # cheapest cadence — #67199): the aggregator gets their upfront
@@ -414,6 +435,7 @@ def normalize_moa_config(raw: Any) -> dict[str, Any]:
         "degraded_reference_policy": active["degraded_reference_policy"],
         "max_tokens": active["max_tokens"],
         "reference_max_tokens": active.get("reference_max_tokens"),
+        "reference_concurrency": active.get("reference_concurrency"),
         "fanout": active.get("fanout", "user_turn"),
         "enabled": active["enabled"],
         # MoA-level (not per-preset) toggles ride at the top level alongside

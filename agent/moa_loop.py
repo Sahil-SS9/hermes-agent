@@ -783,6 +783,7 @@ def _run_references_parallel(
     reference_timeout: float | None = None,
     agent: Any = None,
     late_accounting_sink: Any = None,
+    max_concurrency: int | None = None,
 ) -> list[tuple[str, str, Any]]:
     """Fan out all reference models in parallel, returning outputs in order.
 
@@ -825,6 +826,8 @@ def _run_references_parallel(
     results: list[tuple[str, str, Any] | None] = [None] * len(reference_models)
     futures: dict[Any, int] = {}
     workers = min(_MAX_REFERENCE_WORKERS, len(reference_models))
+    if max_concurrency is not None and max_concurrency > 0:
+        workers = min(workers, max_concurrency)
     # Reference slots run on bare executor threads, which start with an empty
     # contextvars.Context — propagate the parent turn's context (approval
     # callbacks + the Nous Portal conversation tag) into each worker so
@@ -1218,6 +1221,7 @@ def aggregate_moa_context(
     reference_timeout: float | None = None,
     degraded_reference_policy: str = "loud",
     agent: Any = None,
+    reference_concurrency: int | None = None,
 ) -> str:
     """Run configured reference models and synthesize their advice.
 
@@ -1251,6 +1255,7 @@ def aggregate_moa_context(
         max_tokens=reference_max_tokens,
         reference_timeout=reference_timeout,
         agent=agent,
+        max_concurrency=reference_concurrency,
     )
 
     successful_outputs = _successful_references(reference_outputs)
@@ -1930,6 +1935,10 @@ class MoAChatCompletions:
         degraded_reference_policy = str(
             preset.get("degraded_reference_policy") or "loud"
         )
+        # Maximum concurrent reference calls. None (default) = no limit
+        # (all references fire at once). Set to 1 for sequential execution
+        # — needed for local backends like LM Studio in JIT mode (#78011).
+        reference_concurrency = preset.get("reference_concurrency")
         if aggregator_temperature is None and api_kwargs.get("temperature") is not None:
             # The acting agent's own configured temperature (if any) still
             # applies to the aggregator, which IS the acting model.
@@ -2077,6 +2086,7 @@ class MoAChatCompletions:
                 reference_timeout=reference_timeout,
                 agent=self._agent,
                 late_accounting_sink=self._record_late_reference_accounting,
+                max_concurrency=reference_concurrency,
             )
             interrupted_any = any(
                 text == _INTERRUPTED_REFERENCE_NOTE
